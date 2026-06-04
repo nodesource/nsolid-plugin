@@ -1,0 +1,80 @@
+schema: ns-workflow
+
+context: |
+  This is a new project — establish conventions, tooling, and architecture from the start.
+  Define the project's tech stack, build system, test framework, and linting rules early.
+  Planning workflow: Use Plannotator for interactive plan review before implementation
+  Plan review: All proposals should go through Plannotator submit_plan for review and approval
+  Agent: OpenCode with plan-agent workflow
+
+rules:
+  proposal:
+    - Include rollback plan
+    - Identify affected components and files
+    - Use Plannotator submit_plan for plan review before implementation
+    - Define success criteria and acceptance tests up front
+  specs:
+    - Use Given/When/Then format for scenarios
+    - Cover both happy path and edge cases
+  design:
+    - Include sequence diagrams or data flow diagrams for complex flows
+    - Define module boundaries, interfaces, and data contracts before coding
+    - Consider error paths and edge cases in the design, not just the happy path
+    - Keep the design simple — prefer the simplest solution that meets requirements
+  project:
+    - Establish project structure conventions early (directory layout, module naming, file naming)
+    - Define and document build, test, and lint scripts in the project's package manager
+    - Set up CI pipeline with lint, type-check, and test gates from the start
+    - Configure environment variable management (env files, validation schema, defaults)
+    - Choose and document the logging and error handling patterns before writing business logic
+  quality:
+    - Run linter and fix all warnings before committing
+    - Run the project's type checker or static analysis — no errors allowed
+    - Keep the dependency tree lean — justify every dependency
+    - No dead code, no debug logs or console output in production code
+  testing:
+    - Write tests alongside implementation (TDD when possible)
+    - Cover unit, integration, and edge cases
+    - Ensure all existing tests pass before pushing
+    - Test error paths, not just happy paths
+  security:
+    - Never commit secrets, API keys, or credentials — use env vars or secrets manager
+    - Sanitize and validate all external inputs
+    - Follow OWASP guidelines for auth, authorization, and data exposure
+    - Keep dependencies updated — flag known vulnerabilities
+  performance:
+    - Avoid N+1 queries, unnecessary loops, loading full datasets when pagination applies
+    - Consider caching, batching, and async for hot paths
+    - Profile before optimizing — don't optimize what isn't measured
+  errors:
+    - Define consistent error handling patterns early (error classes, middleware, status codes)
+    - Fail gracefully with meaningful messages — never expose internals to the client
+    - Distinguish between expected errors (validation, not-found) and unexpected (crash, timeout)
+    - Ensure error paths are tested, not just happy paths
+  logging:
+    - Use a structured logging framework from the start
+    - Log actionable context (what failed, what input, what state)
+    - Never log sensitive data (passwords, tokens, PII, secrets)
+    - Use appropriate log levels (debug for detail, error for failures, warn for recoverable)
+  data:
+    - Define the data model before implementing business logic
+    - Use migrations for schema changes — never alter the database schema by hand
+    - Validate data at the boundary (API input, file import, user submission)
+    - Use transactions for multi-step data operations
+  env:
+    - Keep all environment-specific config in env vars or config files, never hardcoded
+    - Document env vars in an env example file from the start
+    - Use sensible defaults for development — require explicit config only in production
+  documentation:
+    - Keep README, API docs, and changelog up to date from the start
+    - Document architectural decisions (ADRs) as they are made
+    - Don't leave TODO or FIXME without an associated issue
+  commit:
+    - "Use conventional commits: feat:, fix:, refactor:, chore:, docs:, test:"
+    - One logical change per commit (atomic commits)
+    - Write descriptive messages explaining the why
+  implementation:
+    - Require explicit apply lock before code changes
+    - Follow test-driven development when possible
+    - Make minimal surgical changes — implement only what's specified
+    - Match established project conventions as they evolve

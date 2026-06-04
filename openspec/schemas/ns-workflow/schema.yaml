@@ -1,0 +1,70 @@
+name: ns-workflow
+version: 1
+description: |
+  NodeSource standard workflow for feature development.
+  Supports both new projects and existing codebases with rules configured per project.
+
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: |
+      Define what needs to be done and why.
+      Includes problem statement, proposed approach, rollback plan, and affected components.
+    instruction: |
+      Define the problem, proposed solution, rollback plan, and identify all affected
+      components and files. Include success criteria and acceptance tests up front.
+      Use Plannotator submit_plan for plan review before proceeding.
+
+  - id: specs
+    generates: specs/**/*.md
+    description: |
+      Formal specifications using Given/When/Then format.
+      Covers happy path, edge cases, and error scenarios.
+    requires: [proposal]
+    instruction: |
+      Write specifications in Given/When/Then format. Cover both happy path and
+      edge cases. For existing projects, document current behavior vs desired behavior.
+      Specify what existing behavior must be preserved as regression guardrails.
+
+  - id: design
+    generates: design.md
+    description: |
+      Technical design covering architecture, module boundaries, interfaces,
+      data contracts, and sequence diagrams for complex flows.
+    requires: [proposal]
+    instruction: |
+      Explain how the change fits into the architecture. Define module boundaries,
+      interfaces, and data contracts before coding. Include sequence diagrams or
+      data flow diagrams for complex flows. For existing projects, prefer additive
+      changes (new modules, new parameters) over modifying existing contracts.
+
+  - id: tasks
+    generates: tasks.md
+    description: |
+      Breakdown of implementation tasks with dependencies and ordering.
+    requires: [proposal, specs, design]
+    instruction: |
+      Break down the implementation into atomic, ordered tasks. Each task should
+      be independently testable. Group related tasks under headings. Reference the
+      relevant specs and design decisions for each task.
+
+  - id: implementation
+    generates: .
+    description: |
+      Implementation phase — writing code according to the approved proposal,
+      specs, design, and task breakdown.
+    requires: [proposal, specs, design, tasks]
+    instruction: |
+      Implement following the approved proposal, specs, design, and tasks.
+      Make minimal surgical changes — implement only what's specified.
+      Match existing code patterns, naming conventions, and style.
+      Run the project's quality commands (lint, type-check, test) before
+      considering the implementation complete.
+
+apply:
+  requires: [proposal, specs, design, tasks]
+  tracks: tasks
+  instruction: |
+    Implement the approved design following the task breakdown. Each task should
+    produce working, tested code. Run quality checks after each task. Ensure all
+    existing tests still pass and add tests for new behavior.
