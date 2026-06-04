@@ -7,6 +7,7 @@ description: |
 artifacts:
   - id: proposal
     generates: proposal.md
+    template: proposal.md
     description: |
       Define what needs to be done and why.
       Includes problem statement, proposed approach, rollback plan, and affected components.
@@ -17,6 +18,7 @@ artifacts:
 
   - id: specs
     generates: specs/**/*.md
+    template: specs.md
     description: |
       Formal specifications using Given/When/Then format.
       Covers happy path, edge cases, and error scenarios.
@@ -28,6 +30,7 @@ artifacts:
 
   - id: design
     generates: design.md
+    template: design.md
     description: |
       Technical design covering architecture, module boundaries, interfaces,
       data contracts, and sequence diagrams for complex flows.
@@ -40,6 +43,7 @@ artifacts:
 
   - id: tasks
     generates: tasks.md
+    template: tasks.md
     description: |
       Breakdown of implementation tasks with dependencies and ordering.
     requires: [proposal, specs, design]
@@ -50,6 +54,7 @@ artifacts:
 
   - id: implementation
     generates: .
+    template: design.md
     description: |
       Implementation phase — writing code according to the approved proposal,
       specs, design, and task breakdown.
