@@ -52,7 +52,52 @@ nsolid-plugin/
 
 4. **Auth flow adapted from nsentinel**: The OAuth flow is extracted and simplified for CLI context (no VSCode dependency). Uses browser redirect + local HTTP callback server.
 
-5. **Skills as universal path**: All harnesses support `~/.agents/skills/` or similar. The core installer copies skills to a canonical location, then each harness adapter creates symlinks or copies to harness-specific paths.
+5. **Skills as universal path**: All harnesses support `~/.agents/skills/` or similar. The core installer copies skills to a canonical location, then each harness adapter creates symlinks (Unix) or copies/junctions (Windows) to harness-specific paths.
+
+6. **Cross-platform support**: The installer supports macOS, Linux, and Windows as first-class platforms. All path resolution uses `os.homedir()` + `path.join()` (never string concatenation with `/`). Platform-specific behavior (symlinks, permissions, atomic writes) is abstracted in shared utilities.
+
+### Platform Path Resolution
+
+All paths in this design use `~` as shorthand. At runtime, the path utility (`packages/core/src/utils/path.ts`) resolves these using `os.homedir()` + `path.join()`:
+
+| Logical Path | macOS/Linux | Windows |
+|---|---|---|
+| `~/.agents/skills/` | `/home/user/.agents/skills/` | `C:\Users\user\.agents\skills\` |
+| `~/.agents/.nodesource-auth.json` | `/home/user/.agents/.nodesource-auth.json` | `C:\Users\user\.agents\.nodesource-auth.json` |
+| `~/.agents/.nodesource-installed.json` | `/home/user/.agents/.nodesource-installed.json` | `C:\Users\user\.agents\.nodesource-installed.json` |
+| `~/.claude.json` | `/home/user/.claude.json` | `C:\Users\user\.claude.json` |
+| `~/.claude/skills/` | `/home/user/.claude/skills/` | `C:\Users\user\.claude\skills\` |
+| `~/.codex/config.toml` | `/home/user/.codex/config.toml` | `C:\Users\user\.codex\config.toml` |
+| `~/.codex/skills/` | `/home/user/.codex/skills/` | `C:\Users\user\.codex\skills\` |
+| `~/.config/opencode/opencode.jsonc` | `/home/user/.config/opencode/opencode.jsonc` | `C:\Users\user\.config\opencode\opencode.jsonc` |
+| `~/.config/opencode/skills/` | `/home/user/.config/opencode/skills/` | `C:\Users\user\.config\opencode\skills\` |
+| `~/.gemini/antigravity-cli/mcp_config.json` | `/home/user/.gemini/antigravity-cli/mcp_config.json` | `C:\Users\user\.gemini\antigravity-cli\mcp_config.json` |
+| `~/.gemini/antigravity-cli/skills/` | `/home/user/.gemini/antigravity-cli/skills/` | `C:\Users\user\.gemini\antigravity-cli\skills\` |
+| `~/.pi/agent/skills/` | `/home/user/.pi/agent/skills/` | `C:\Users\user\.pi\agent\skills\` |
+
+**Rules:**
+- All path construction uses `path.join(os.homedir(), ...segments)` — never string concatenation with `/`
+- All stored paths are normalized with `path.resolve()` before writing to tracking files
+- Harness adapters return platform-appropriate paths from `getMcpConfigPath()` and `getSkillsPath()`
+- **Note**: All verified harnesses use `%USERPROFILE%` (i.e., `os.homedir()`) on Windows — none use `%APPDATA%`. Claude Code config dir can be overridden via `CLAUDE_CONFIG_DIR`; Codex CLI via `CODEX_HOME`; Pi Agent via `PI_CODING_AGENT_DIR`.
+
+### Platform Filesystem Abstractions
+
+**Symlinks:**
+- Unix (macOS/Linux): Use `fs.symlink()` (standard symbolic links)
+- Windows: Use `fs.symlink(target, path, 'junction')` for directory links (junctions work without Developer Mode or admin privileges). Fall back to file copy if junction creation fails.
+
+**File permissions (`0600`):**
+- Unix: `fs.chmod(path, 0o600)` restricts to owner read/write
+- Windows: `fs.chmod()` has minimal effect (only toggles read-only flag). Credential protection relies on `%USERPROFILE%` directory ACLs. Consider Windows Credential Manager or DPAPI as a future enhancement.
+
+**Atomic writes:**
+- Unix: Write to temp file, `fs.rename()` overwrites target atomically
+- Windows: On Node.js < 14, `fs.rename()` fails with `EPERM` if the destination exists. On Node.js 14+, `fs.rename()` uses `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` and works. Recommended approach: use the `write-file-atomic` package as the primary strategy (handles all platform differences, avoids the unlink-then-rename data-loss window where the target file briefly doesn't exist).
+
+**Error messages:**
+- Unix: Suggest `sudo`, `chown`, `chmod` as appropriate
+- Windows: Suggest "Run as Administrator", `icacls`, `takeown` as appropriate. Detect OS via `process.platform` and provide platform-specific remediation.
 
 ## Module Boundaries
 
@@ -117,7 +162,7 @@ export async function clearCredentials(): Promise<void>;
 
 **Responsibilities:**
 - Copy skills from source to `~/.agents/skills/`
-- Create harness-specific symlinks/copies
+- Create harness-specific symlinks (Unix) or copies/junctions (Windows)
 - Track installed skills for uninstall
 
 **Files:**
@@ -231,6 +276,27 @@ export function getAdapter(harness: HarnessType): HarnessAdapter;
 
 **JSON Schema:** Defined in `packages/core/schemas/bundle.schema.json`
 
+#### Variable Expansion
+
+Placeholders in `mcpServers[].args` and `mcpServers[].env` are expanded at **install time** (not runtime):
+
+- `${MCP_ROOT}` — resolved to the absolute path where MCP server sources are installed (e.g., `~/.agents/mcp-servers/`)
+- `${AUTH_TOKEN}` — resolved from credentials at `~/.agents/.nodesource-auth.json` (`serviceToken` field)
+- `${AUTH_ORG_ID}` — resolved from credentials at `~/.agents/.nodesource-auth.json` (`organizationId` field)
+
+**Source precedence** (highest to lowest): environment variables → credential store (`~/.agents/.nodesource-auth.json`) → agent config.
+
+**Failure behavior**: If a required variable cannot be resolved, the installer logs a warning and writes the placeholder as-is. MCP servers will fail at runtime with a clear error if credentials are missing.
+
+#### MCP Dependency Validation (`requiresMcp`)
+
+Skills may declare MCP dependencies via `requiresMcp: string[]`. During install:
+
+1. Check the list of MCP servers being installed (from `bundle.json#mcpServers`)
+2. If a required MCP server name is not in the install list, log a warning but continue (the MCP may be provided externally)
+3. If MCP config writing fails for a required server, the dependent skill remains installed but a warning is logged
+4. Automatic MCP installation from external registries is **not** allowed — only bundled MCP servers are installed
+
 ### Credentials Storage (`~/.agents/.nodesource-auth.json`)
 
 ```json
@@ -242,7 +308,7 @@ export function getAdapter(harness: HarnessType): HarnessAdapter;
 }
 ```
 
-**File permissions:** `0600` (owner read/write only)
+**File permissions:** `0600` (owner read/write only). On Windows, `chmod 0600` has minimal effect (only toggles read-only flag); credential protection relies on directory ACLs. See Platform Filesystem Abstractions above.
 
 ### Tracking File (`~/.agents/.nodesource-installed.json`)
 
@@ -254,21 +320,26 @@ export function getAdapter(harness: HarnessType): HarnessAdapter;
   "skills": [
     {
       "name": "ns-analyze-vulnerabilities",
-      "path": "/home/user/.agents/skills/ns-analyze-vulnerabilities"
+      "path": "<resolved absolute path, e.g. /home/user/.agents/skills/ns-analyze-vulnerabilities or C:\\Users\\user\\.agents\\skills\\ns-analyze-vulnerabilities>"
     }
   ],
   "mcpServers": [
     {
       "name": "ns-benchmark",
-      "configPath": "/home/user/.claude/.mcp.json"
+      "configPath": "<resolved absolute path, e.g. /home/user/.claude.json or C:\\Users\\user\\.claude.json>"
     }
   ]
 }
 ```
 
+**File permissions:** `0600` (owner read/write only; limited effect on Windows — see Platform Filesystem Abstractions). Written atomically via temp-file rename: on Unix, `fs.rename()` overwrites atomically; on Windows, `fs.unlink()` the target first if it exists (since `fs.rename()` fails with `EPERM` when destination exists), then `fs.rename()`. Temp file must be on the same volume as the target.
+
+> **Note**: Each skill entry includes a `harnesses: string[]` field to support multi-harness installations. The top-level `harness` field records the primary installing harness for backward compatibility.
+
 ### Harness Config Formats
 
-**Claude Code (`~/.claude/.mcp.json`):**
+**Claude Code (`~/.claude.json`):**
+> **Note**: User-scoped MCP servers are stored in `~/.claude.json` (outside the `~/.claude/` directory). Project-scoped servers use `.mcp.json` in the project root. We write to the user-scoped file.
 ```json
 {
   "mcpServers": {
@@ -294,6 +365,24 @@ env = { NSOLID_SERVICE_TOKEN = "<token>", NSOLID_ORG_ID = "<orgId>" }
 
 **OpenCode (`~/.config/opencode/opencode.jsonc`):**
 ```jsonc
+{
+  "mcpServers": {
+    "ns-benchmark": {
+      "command": "node",
+      "args": ["/path/to/ns-benchmark/src/mcp-entrypoint.js"],
+      "env": {
+        "NSOLID_SERVICE_TOKEN": "<token>",
+        "NSOLID_ORG_ID": "<orgId>"
+      }
+    }
+  }
+}
+```
+
+**Antigravity CLI (`~/.gemini/antigravity-cli/mcp_config.json`):**
+> **Note**: Antigravity uses a dedicated `mcp_config.json` file (not inline in `settings.json` like the legacy Gemini CLI). Shared MCP configs across all Antigravity tools go in `~/.gemini/config/mcp_config.json`; CLI-specific configs go in `~/.gemini/antigravity-cli/mcp_config.json`.
+
+```json
 {
   "mcpServers": {
     "ns-benchmark": {
@@ -499,13 +588,13 @@ env = { NSOLID_SERVICE_TOKEN = "<token>", NSOLID_ORG_ID = "<orgId>" }
 1. **Skill copy failure**: Rollback partially copied skills, report error with disk/permission guidance
 2. **MCP config write failure**: Keep skills installed, report MCP-specific error, allow re-run
 3. **Config corruption**: Detect invalid JSON/TOML, warn user, offer to backup and recreate
-4. **Permission denied**: Report specific file/path, suggest `sudo` or permission fix
+4. **Permission denied**: Report specific file/path, suggest platform-appropriate fix (Unix: `sudo chown -R $USER <path>` or `chmod`; Windows: "Run as Administrator" or `icacls <path> /grant %USERNAME%:F`)
 
 ### Uninstall Errors
 
 1. **Missing tracking file**: Best-effort cleanup of known NodeSource artifacts, warn user
 2. **Partial uninstall**: Report which artifacts remain, provide manual cleanup instructions
-3. **Permission denied**: Report specific files, suggest manual deletion with `sudo`
+3. **Permission denied**: Report specific files, suggest platform-appropriate manual deletion (Unix: `sudo rm -rf <path>`; Windows: "Run as Administrator" or `takeown /f <path> && rd /s <path>`)
 
 ## Design Decisions
 
@@ -537,9 +626,10 @@ env = { NSOLID_SERVICE_TOKEN = "<token>", NSOLID_ORG_ID = "<orgId>" }
 
 **Rationale:**
 - Universal path supported by Claude, Codex, OpenCode
-- Pi Agent uses `~/.pi/skills/` but can symlink from `~/.agents/`
+- Pi Agent uses `~/.pi/agent/skills/` but can symlink (Unix) or copy (Windows) from `~/.agents/`
+- Pi Agent also reads from `~/.agents/skills/` natively, so skills placed there are auto-discovered
 - Single source of truth for skill content
-- Harness adapters create symlinks/copies as needed
+- Harness adapters create symlinks on Unix, directory junctions or copies on Windows
 
 ### Why JSON for credentials and tracking?
 

@@ -65,13 +65,16 @@ Adapt the nsentinel-vscode-extension OAuth flow:
 
 If marketplace plugins cause issues:
 
+> **Note**: Rollback is an **emergency full cleanup** that removes all NodeSource artifacts including shared credentials. Normal per-harness uninstall (see installation-and-auth.md) **preserves** `~/.agents/.nodesource-auth.json` for re-use across harnesses.
+
 1. **Per-harness uninstall**: Each plugin includes uninstall hook that:
    - Reads `~/.agents/.nodesource-installed.json`
    - Removes MCP entries from harness configs
    - Deletes skill directories from `~/.agents/skills/`
    - Removes tracking file
+   - **Does NOT** delete `~/.agents/.nodesource-auth.json` (credentials preserved for other harnesses)
 
-2. **Auth cleanup**: Delete `~/.agents/.nodesource-auth.json`
+2. **Emergency rollback auth cleanup**: Delete `~/.agents/.nodesource-auth.json` (only in full rollback, not normal uninstall)
 
 3. **Marketplace removal**: Users can uninstall via harness UI (e.g., `/plugins` in Claude Code)
 
@@ -101,11 +104,17 @@ If marketplace plugins cause issues:
 - **Skills**: 14 skills from skills-poc repository
 
 ### Harness Config Locations
-- Claude Code: `~/.claude/.mcp.json`, `~/.claude/skills/`
+Supported platforms: **macOS**, **Linux**, and **Windows**.
+
+All paths use `~` as shorthand for the user's home directory (`$HOME` on macOS/Linux, `%USERPROFILE%` on Windows). At runtime, paths are resolved via `os.homedir()` + `path.join()`.
+
+- Claude Code: `~/.claude.json`, `~/.claude/skills/`
 - Codex CLI: `~/.codex/config.toml`, `~/.codex/skills/`
 - OpenCode: `~/.config/opencode/opencode.jsonc`, `~/.config/opencode/skills/`
-- Antigravity: harness-specific config location (TBD)
-- Pi Agent: `~/.pi/skills/` (no MCP config)
+- Antigravity: `~/.gemini/antigravity-cli/mcp_config.json`, `~/.gemini/antigravity-cli/skills/`
+- Pi Agent: `~/.pi/agent/skills/` (no MCP config)
+
+> **Windows note**: Some harnesses may use `%APPDATA%` instead of `%USERPROFILE%` for config storage. Verify actual locations during adapter implementation. See design.md Platform Path Resolution for full details.
 
 ## Success Criteria
 
@@ -120,7 +129,7 @@ If marketplace plugins cause issues:
 ### Quality Requirements
 - [ ] Zero overwrites of existing user configurations (merge, don't replace)
 - [ ] Idempotent installation (re-running install is safe)
-- [ ] Auth tokens stored securely (file permissions 0600)
+- [ ] Auth tokens stored securely (file permissions 0600; best-effort on Windows where `chmod` has limited effect)
 - [ ] All marketplace plugins pass validation (schema compliance)
 
 ### Verification

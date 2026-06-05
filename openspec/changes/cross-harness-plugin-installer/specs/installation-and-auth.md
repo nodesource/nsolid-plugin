@@ -7,7 +7,7 @@
 **When** the user installs the plugin from a marketplace (e.g., Claude Code `/plugins`)
 **Then** the plugin post-install hook triggers the shared core installer
 **And** the auth flow initiates (browser opens to `accounts.nodesource.com/sign-in`)
-**And** after successful OAuth, credentials are stored at `~/.agents/.nodesource-auth.json` with permissions 0600
+**And** after successful OAuth, credentials are stored at `~/.agents/.nodesource-auth.json` with permissions 0600 (best-effort; on Windows, `chmod 0600` has minimal effect — see design.md Platform Filesystem Abstractions)
 **And** all 14 skills are copied to `~/.agents/skills/`
 **And** MCP configurations are written to the harness-specific config location
 **And** a tracking file is created at `~/.agents/.nodesource-installed.json`
@@ -135,7 +135,7 @@
 **When** the user uninstalls via marketplace UI (e.g., Claude Code `/plugins` → uninstall)
 **Then** the plugin uninstall hook reads the tracking file
 **And** all NodeSource MCP entries are removed from harness configs
-**And** all NodeSource skill directories are deleted from `~/.agents/skills/`
+**And** all NodeSource skill directories, symlinks, and copies are deleted from harness-specific paths (`~/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, `~/.gemini/antigravity-cli/skills/`, `~/.pi/agent/skills/`)
 **And** the tracking file is deleted
 **And** credentials at `~/.agents/.nodesource-auth.json` are preserved (shared across installs)
 
@@ -145,8 +145,34 @@
 **And** no tracking file exists
 **When** uninstall is triggered
 **Then** a warning indicates tracking file is missing
-**And** uninstall attempts best-effort cleanup (remove known NodeSource artifacts)
+**And** uninstall attempts best-effort cleanup of known NodeSource artifacts (see below)
+**And** a message lists what was removed and what was skipped
 **And** a message suggests manual verification
+
+### Best-Effort Cleanup Algorithm
+
+When no tracking file is present, the uninstaller scans only these predefined patterns:
+
+**Known NodeSource artifacts** (exact match only):
+- `~/.agents/skills/ns-*` (skill directories prefixed with `ns-`)
+- `~/.claude/skills/ns-*` (Claude harness skill directories)
+- `~/.codex/skills/ns-*` (Codex harness skill directories)
+- `~/.config/opencode/skills/ns-*` (OpenCode harness skill directories)
+- `~/.gemini/antigravity-cli/skills/ns-*` (Antigravity harness skill directories)
+- `~/.pi/agent/skills/ns-*` (Pi harness skill directories)
+- `~/.agents/.nodesource-installed.json` (tracking file, if partially present)
+- MCP entries named `ns-benchmark`, `nsolid-mcp`, or `ncm-mcp` in harness config files:
+  - `~/.claude.json`
+  - `~/.codex/config.toml`
+  - `~/.config/opencode/opencode.jsonc`
+
+**Algorithm**:
+1. Scan only the predefined patterns above (no recursive or broad searches)
+2. Verify each match is a NodeSource artifact (check for NodeSource markers in file content where possible)
+3. Skip any file modified within the last 24 hours (to avoid removing freshly-created user files that happen to match)
+4. Log each deletion before performing it
+5. **Conservative by default**: Remove only exact-match artifacts; leave ambiguous files untouched
+6. With `--force` flag: also remove credentials (`~/.agents/.nodesource-auth.json`) and skip the 24-hour recency check
 
 ## Scenario: Uninstall preserves user modifications
 
@@ -213,7 +239,7 @@
 
 **Given** the user installs the Claude Code plugin
 **When** MCP configurations are written
-**Then** entries are added to `~/.claude/.mcp.json`:
+**Then** entries are added to `~/.claude.json`:
 ```json
 {
   "mcpServers": {
@@ -230,7 +256,7 @@
   }
 }
 ```
-**And** skills are symlinked or copied to `~/.claude/skills/`
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.claude/skills/`
 
 ## Scenario: Codex CLI configuration
 
@@ -249,7 +275,7 @@ env = { NSOLID_SERVICE_TOKEN = "<from auth>", NSOLID_ORG_ID = "<from auth>" }
 [mcp_servers.ncm-mcp]
 ...
 ```
-**And** skills are copied to `~/.codex/skills/`
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.codex/skills/`
 
 ## Scenario: OpenCode configuration
 
@@ -265,21 +291,30 @@ env = { NSOLID_SERVICE_TOKEN = "<from auth>", NSOLID_ORG_ID = "<from auth>" }
   }
 }
 ```
-**And** skills are copied to `~/.config/opencode/skills/`
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.config/opencode/skills/`
 
 ## Scenario: Antigravity CLI configuration
 
 **Given** the user installs the Antigravity plugin
 **When** MCP configurations are written
-**Then** entries are added to Antigravity-specific config location (TBD based on Antigravity docs)
-**And** skills are copied to Antigravity skill directory
+**Then** entries are added to `~/.gemini/antigravity-cli/mcp_config.json`:
+```json
+{
+  "mcpServers": {
+    "ns-benchmark": { ... },
+    "nsolid-mcp": { ... },
+    "ncm-mcp": { ... }
+  }
+}
+```
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.gemini/antigravity-cli/skills/`
 
 ## Scenario: Pi Agent configuration (skills only)
 
 **Given** the user installs the Pi Agent plugin
 **When** installation runs
 **Then** NO MCP configurations are written (Pi rejects MCP)
-**And** skills are copied to `~/.pi/skills/`
+**And** skills are copied to `~/.pi/agent/skills/` (Pi always uses copy, no symlinks)
 **And** a message indicates MCP servers are not supported in Pi
 
 ---
@@ -298,6 +333,6 @@ env = { NSOLID_SERVICE_TOKEN = "<from auth>", NSOLID_ORG_ID = "<from auth>" }
 
 1. **Partial installation**: If installation fails midway, subsequent installs must complete successfully
 2. **Config corruption**: If harness config becomes invalid JSON/TOML, installation should detect and warn (not crash)
-3. **Permission issues**: If file permissions prevent writing, provide actionable error messages
+3. **Permission issues**: If file permissions prevent writing, provide platform-aware error messages (Unix: `sudo`/`chmod` guidance; Windows: "Run as Administrator" or `icacls` guidance)
 4. **Network failures**: Auth and MCP health checks must handle network errors gracefully
 5. **Port conflicts**: Auth callback server must handle port conflicts with fallback strategy

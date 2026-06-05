@@ -54,7 +54,6 @@ artifacts:
 
   - id: implementation
     generates: .
-    template: design.md
     description: |
       Implementation phase — writing code according to the approved proposal,
       specs, design, and task breakdown.
