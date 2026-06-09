@@ -35,6 +35,14 @@ describe('resolveHome', () => {
   it('does not expand ~user paths', () => {
     strictEqual(resolveHome('~other/path'), '~other/path');
   });
+
+  it('expands ~\\ on Windows-style inputs', () => {
+    strictEqual(resolveHome('~\\test\\path'), path.join(os.homedir(), '\\test\\path'));
+  });
+
+  it('expands ~\\ to home dir', () => {
+    strictEqual(resolveHome('~\\'), path.join(os.homedir(), '\\'));
+  });
 });
 
 describe('normalizePath', () => {
