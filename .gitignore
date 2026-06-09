@@ -1,4 +1,10 @@
 
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+
 # OpenCode
 .opencode/sessions/
 .opencode/logs/

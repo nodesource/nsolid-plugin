@@ -2,8 +2,8 @@
 
 ## Phase 1: Project Setup and Core Infrastructure
 
-### Task 1: Initialize monorepo structure
-- **Description**: Set up npm workspace monorepo with packages directory structure. Create root package.json with workspace configuration, tsconfig.json for TypeScript, and basic project files (README, .gitignore, .npmrc).
+### Task 1: Initialize monorepo structure ✓
+- [x] **Description**: Set up npm workspace monorepo with packages directory structure. Create root package.json with workspace configuration, tsconfig.json for TypeScript, and basic project files (README, .gitignore, .npmrc).
 - **Depends on**: None
 - **Files**: 
   - `package.json` (root workspace config)
@@ -13,8 +13,8 @@
   - `README.md`
 - **Testing**: Run `npm install` to verify workspace setup. Check that `packages/` directory structure is recognized.
 
-### Task 2: Create core package scaffold
-- **Description**: Initialize `packages/core` with package.json, tsconfig.json, and directory structure for auth, skills, mcp, and harnesses modules. Set up build script to compile TypeScript to dist/.
+### Task 2: Create core package scaffold ✓
+- [x] **Description**: Initialize `packages/core` with package.json, tsconfig.json, and directory structure for auth, skills, mcp, and harnesses modules. Set up build script to compile TypeScript to dist/.
 - **Depends on**: Task 1
 - **Files**:
   - `packages/core/package.json`
@@ -27,8 +27,8 @@
   - `packages/core/src/utils/` (directory)
 - **Testing**: Run `npm run build` in packages/core. Verify dist/ is created with compiled JavaScript.
 
-### Task 3: Define bundle descriptor schema and types
-- **Description**: Create TypeScript interfaces for BundleDescriptor, SkillRef, McpServerRef, and Credentials. Create JSON Schema for bundle.json validation. Create bundle.json with all 14 skills and 3 MCP servers.
+### Task 3: Define bundle descriptor schema and types ✓
+- [x] **Description**: Create TypeScript interfaces for BundleDescriptor, SkillRef, McpServerRef, and Credentials. Create JSON Schema for bundle.json validation. Create bundle.json with all 15 skills and 3 MCP servers.
 - **Depends on**: Task 2
 - **Files**:
   - `packages/core/src/types.ts` (interfaces)
@@ -38,8 +38,8 @@
 - **Testing**: Write unit test to validate bundle.json against schema. Test validation with invalid bundle (missing required fields).
 - **Spec reference**: Bundle Descriptor in design.md
 
-### Task 4: Implement utility functions
-- **Description**: Create shared utilities for file operations (atomic write, ensure directory), path resolution (expand ~, resolve relative paths), and JSON/TOML parsing/writing. Path resolution must use `os.homedir()` + `path.join()` for `~` expansion — never string concatenation with `/`. All stored paths must be normalized with `path.resolve()`. Atomic write must handle Windows: write temp file to same volume, `fs.unlink()` target if it exists (Windows `fs.rename()` fails with `EPERM` when destination exists), then `fs.rename()`. Follow the existing "Platform Path Resolution" section in design.md for the platform path mapping table and path normalization requirements — implementers should use that section's Windows-equivalent paths and rules directly.
+### Task 4: Implement utility functions ✓
+- [x] **Description**: Create shared utilities for file operations (atomic write, ensure directory), path resolution (expand ~, resolve relative paths), and JSON/TOML parsing/writing. Path resolution must use `os.homedir()` + `path.join()` for `~` expansion — never string concatenation with `/`. All stored paths must be normalized with `path.resolve()`. Atomic write must handle Windows: write temp file to same volume, `fs.unlink()` target if it exists (Windows `fs.rename()` fails with `EPERM` when destination exists), then `fs.rename()`. Follow the existing "Platform Path Resolution" section in design.md for the platform path mapping table and path normalization requirements — implementers should use that section's Windows-equivalent paths and rules directly.
 - **Depends on**: Task 2
 - **Files**:
   - `packages/core/src/utils/fs.ts` (file operations including cross-platform atomic write)

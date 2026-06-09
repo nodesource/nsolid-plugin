@@ -1,0 +1,133 @@
+{
+  "name": "nodesource-ai-skills",
+  "version": "1.0.0",
+  "description": "NodeSource AI skills for N|Solid performance and security",
+  "skills": [
+    {
+      "name": "ns-advanced-memory-leak-hunter",
+      "path": "skills/ns-advanced-memory-leak-hunter",
+      "description": "Perform deep memory analysis to identify and locate memory leaks in production",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-analyze-asset",
+      "path": "skills/ns-analyze-asset",
+      "description": "Load and analyze N|Solid saved assets (CPU profiles, heap snapshots)",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-analyze-cpu",
+      "path": "skills/ns-analyze-cpu",
+      "description": "Profile CPU usage of running production processes to identify bottlenecks",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-analyze-event",
+      "path": "skills/ns-analyze-event",
+      "description": "Analyze event loop delays and identify blocking operations in production",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-analyze-memory",
+      "path": "skills/ns-analyze-memory",
+      "description": "Take and analyze heap snapshots of running production memory",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-analyze-tracing",
+      "path": "skills/ns-analyze-tracing",
+      "description": "Collect and analyze distributed traces for request flow analysis",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-analyze-vulnerabilities",
+      "path": "skills/ns-analyze-vulnerabilities",
+      "description": "Scan running production memory for actively-exploitable CVEs",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-audit-dependencies",
+      "path": "skills/ns-audit-dependencies",
+      "description": "Audit project dependencies for known vulnerabilities and quality issues",
+      "requiresMcp": ["ncm-mcp"]
+    },
+    {
+      "name": "ns-benchmark-run",
+      "path": "skills/ns-benchmark-run",
+      "description": "Execute performance benchmarks against running production instances",
+      "requiresMcp": ["ns-benchmark"]
+    },
+    {
+      "name": "ns-benchmark-validate",
+      "path": "skills/ns-benchmark-validate",
+      "description": "Validate benchmark results against established performance baselines",
+      "requiresMcp": ["ns-benchmark"]
+    },
+    {
+      "name": "ns-generate-asset",
+      "path": "skills/ns-generate-asset",
+      "description": "Generate N|Solid diagnostics assets from production processes",
+      "requiresMcp": ["nsolid-mcp"]
+    },
+    {
+      "name": "ns-generate-sbom",
+      "path": "skills/ns-generate-sbom",
+      "description": "Generate Software Bill of Materials for project dependency provenance",
+      "requiresMcp": ["ncm-mcp"]
+    },
+    {
+      "name": "ns-node-upgrade",
+      "path": "skills/ns-node-upgrade",
+      "description": "Plan and execute Node.js version upgrades safely",
+      "requiresMcp": ["ncm-mcp"]
+    },
+    {
+      "name": "ns-replace-package",
+      "path": "skills/ns-replace-package",
+      "description": "Identify and replace risky npm packages with safer alternatives",
+      "requiresMcp": ["ncm-mcp"]
+    },
+    {
+      "name": "ns-upgrade-package",
+      "path": "skills/ns-upgrade-package",
+      "description": "Safely upgrade npm packages with compatibility analysis",
+      "requiresMcp": ["ncm-mcp"]
+    }
+  ],
+  "mcpServers": [
+    {
+      "name": "ns-benchmark",
+      "command": "node",
+      "args": ["${MCP_ROOT}/ns-benchmark/src/mcp-entrypoint.js"],
+      "env": {
+        "NSOLID_SERVICE_TOKEN": "${AUTH_TOKEN}",
+        "NSOLID_ORG_ID": "${AUTH_ORG_ID}"
+      }
+    },
+    {
+      "name": "nsolid-mcp",
+      "command": "node",
+      "args": ["${MCP_ROOT}/nsolid-mcp/src/mcp-entrypoint.js"],
+      "env": {
+        "NSOLID_SERVICE_TOKEN": "${AUTH_TOKEN}",
+        "NSOLID_ORG_ID": "${AUTH_ORG_ID}"
+      }
+    },
+    {
+      "name": "ncm-mcp",
+      "command": "node",
+      "args": ["${MCP_ROOT}/ncm-mcp/src/mcp-entrypoint.js"],
+      "env": {
+        "NSOLID_SERVICE_TOKEN": "${AUTH_TOKEN}",
+        "NSOLID_ORG_ID": "${AUTH_ORG_ID}"
+      }
+    }
+  ],
+  "auth": {
+    "type": "oauth",
+    "provider": "nodesource",
+    "accountsUrl": "https://accounts.nodesource.com",
+    "callbackPort": 8765,
+    "requiredPermissions": ["nsolid:benchmark:run"]
+  }
+}
