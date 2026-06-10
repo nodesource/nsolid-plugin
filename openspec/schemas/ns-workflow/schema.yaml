@@ -7,7 +7,6 @@ description: |
 artifacts:
   - id: proposal
     generates: proposal.md
-    template: proposal.md
     description: |
       Define what needs to be done and why.
       Includes problem statement, proposed approach, rollback plan, and affected components.
@@ -15,10 +14,10 @@ artifacts:
       Define the problem, proposed solution, rollback plan, and identify all affected
       components and files. Include success criteria and acceptance tests up front.
       Use Plannotator submit_plan for plan review before proceeding.
+    template: proposal.md
 
   - id: specs
     generates: specs/**/*.md
-    template: specs.md
     description: |
       Formal specifications using Given/When/Then format.
       Covers happy path, edge cases, and error scenarios.
@@ -27,10 +26,10 @@ artifacts:
       Write specifications in Given/When/Then format. Cover both happy path and
       edge cases. For existing projects, document current behavior vs desired behavior.
       Specify what existing behavior must be preserved as regression guardrails.
+    template: specs.md
 
   - id: design
     generates: design.md
-    template: design.md
     description: |
       Technical design covering architecture, module boundaries, interfaces,
       data contracts, and sequence diagrams for complex flows.
@@ -40,10 +39,10 @@ artifacts:
       interfaces, and data contracts before coding. Include sequence diagrams or
       data flow diagrams for complex flows. For existing projects, prefer additive
       changes (new modules, new parameters) over modifying existing contracts.
+    template: design.md
 
   - id: tasks
     generates: tasks.md
-    template: tasks.md
     description: |
       Breakdown of implementation tasks with dependencies and ordering.
     requires: [proposal, specs, design]
@@ -51,6 +50,7 @@ artifacts:
       Break down the implementation into atomic, ordered tasks. Each task should
       be independently testable. Group related tasks under headings. Reference the
       relevant specs and design decisions for each task.
+    template: tasks.md
 
   - id: implementation
     generates: .
@@ -64,6 +64,7 @@ artifacts:
       Match existing code patterns, naming conventions, and style.
       Run the project's quality commands (lint, type-check, test) before
       considering the implementation complete.
+    template: implementation.md
 
 apply:
   requires: [proposal, specs, design, tasks]
