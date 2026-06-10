@@ -89,4 +89,19 @@ describe('token-storage', () => {
     
     expect(isExpired(creds)).toBe(false);
   });
+
+  it('isExpired returns true for invalid date', async () => {
+    const { isExpired } = await import('../../../src/auth/token-storage.js');
+    
+    const creds: Credentials = {
+      serviceToken: 'token',
+      organizationId: 'org',
+      saasToken: 'saas',
+      consoleUrl: 'https://test.saas.nodesource.io',
+      mcpUrl: 'https://org.mcp.saas.nodesource.io',
+      expiresAt: 'not-a-valid-date'
+    };
+    
+    expect(isExpired(creds)).toBe(true);
+  });
 });

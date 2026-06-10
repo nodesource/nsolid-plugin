@@ -16,6 +16,7 @@ describe('validateToken', () => {
     globalThis.fetch = (async () => ({
       ok: true,
       status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
       json: async () => ({ permissions: ['nsolid:benchmark:run', 'nsolid:profile:read'] }),
     })) as unknown as typeof fetch;
 
@@ -68,5 +69,64 @@ describe('validateToken', () => {
     await expect(
       validateToken('token', 'org-123', 'https://accounts.example.com')
     ).rejects.toThrow(/timed out/i);
+  });
+
+  it('handles malformed response (permissions not an array)', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: 'not-an-array' }),
+    })) as unknown as typeof fetch;
+
+    const { validateToken } = await import('../../../src/auth/token-validator.js');
+    await expect(
+      validateToken('test-token', 'org-123', 'https://accounts.example.com')
+    ).rejects.toThrow(/invalid permissions format/);
+  });
+
+  it('handles malformed response (non-string permissions filtered)', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: ['valid', 123, null, 'also-valid'] }),
+    })) as unknown as typeof fetch;
+
+    const { validateToken } = await import('../../../src/auth/token-validator.js');
+    const result = await validateToken('test-token', 'org-123', 'https://accounts.example.com');
+
+    expect(result).toEqual({
+      valid: true,
+      permissions: ['valid', 'also-valid'],
+    } satisfies ValidationResult);
+  });
+
+  it('handles null response body', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => null,
+    })) as unknown as typeof fetch;
+
+    const { validateToken } = await import('../../../src/auth/token-validator.js');
+    await expect(
+      validateToken('token', 'org-123', 'https://accounts.example.com')
+    ).rejects.toThrow(/invalid response format/);
+  });
+
+  it('rejects non-JSON content type', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/html' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch;
+
+    const { validateToken } = await import('../../../src/auth/token-validator.js');
+    await expect(
+      validateToken('token', 'org-123', 'https://accounts.example.com')
+    ).rejects.toThrow(/unexpected content type/);
   });
 });

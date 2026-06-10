@@ -14,5 +14,9 @@ export function loadCredentials(): Credentials | null {
 }
 
 export function isExpired(creds: Credentials): boolean {
-  return new Date(creds.expiresAt).getTime() < Date.now();
+  const timestamp = new Date(creds.expiresAt).getTime();
+  if (isNaN(timestamp)) {
+    return true; // Treat invalid dates as expired
+  }
+  return timestamp < Date.now();
 }

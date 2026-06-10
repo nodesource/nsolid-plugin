@@ -1,10 +1,10 @@
 import { describe, it, afterEach, expect } from 'vitest';
 import { createServer } from 'node:http';
 
-const cleanup: (() => void)[] = [];
+const cleanup: (() => Promise<void>)[] = [];
 
-afterEach(() => {
-  for (const fn of cleanup.splice(0)) fn();
+afterEach(async () => {
+  for (const fn of cleanup.splice(0)) await fn();
 });
 
 describe('oauth-server', () => {
@@ -40,7 +40,7 @@ describe('oauth-server', () => {
   it('falls back to next port on conflict', async () => {
     const blocker = createServer();
     await new Promise<void>((resolve) => blocker.listen(8769, '127.0.0.1', resolve));
-    cleanup.push(() => blocker.close());
+    cleanup.push(() => new Promise<void>((resolve) => blocker.close(() => resolve())));
 
     const { startOAuthServer } = await import('../../../src/auth/oauth-server.js');
     const server = await startOAuthServer(8769);
@@ -49,12 +49,25 @@ describe('oauth-server', () => {
     expect(server.port).toBe(8770);
   });
 
+  it('retries on EADDRINUSE during listen callback', async () => {
+    const blocker = createServer();
+    cleanup.push(() => new Promise<void>((resolve) => blocker.close(() => resolve())));
+
+    await new Promise<void>((resolve) => blocker.listen(8768, '127.0.0.1', resolve));
+
+    const { startOAuthServer } = await import('../../../src/auth/oauth-server.js');
+    const server = await startOAuthServer(8768);
+    cleanup.push(() => server.close());
+
+    expect(server.port).toBe(8769);
+  });
+
   it('resolves with timeout on close before callback', async () => {
     const { startOAuthServer } = await import('../../../src/auth/oauth-server.js');
     const server = await startOAuthServer();
 
     const callbackPromise = server.waitForCallback();
-    server.close();
+    await server.close();
 
     const result = await callbackPromise;
     expect(result.success).toBeFalsy();

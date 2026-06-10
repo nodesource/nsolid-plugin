@@ -27,8 +27,23 @@ export async function validateToken(
       throw new Error(`Accounts API returned ${response.status}`);
     }
 
-    const data = await response.json() as { permissions?: string[] };
-    return { valid: true, permissions: data.permissions ?? [] };
+    const contentType = response.headers?.get('content-type');
+    if (contentType && !contentType.includes('application/json')) {
+      throw new Error(`Accounts API returned unexpected content type: ${contentType}`);
+    }
+
+    const data = await response.json() as unknown;
+    if (typeof data !== 'object' || data === null) {
+      throw new Error('Accounts API returned invalid response format');
+    }
+    const obj = data as Record<string, unknown>;
+    if (obj.permissions !== undefined && !Array.isArray(obj.permissions)) {
+      throw new Error('Accounts API returned invalid permissions format');
+    }
+    const permissions = Array.isArray(obj.permissions)
+      ? obj.permissions.filter((p): p is string => typeof p === 'string')
+      : [];
+    return { valid: true, permissions };
   } catch (err) {
     if ((err as Error).name === 'AbortError') {
       throw new Error('Token validation timed out', { cause: err });

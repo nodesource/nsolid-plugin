@@ -21,7 +21,7 @@ export type OAuthCallbackResult =
 export type OAuthServer = {
   port: number;
   waitForCallback(): Promise<OAuthCallbackResult>;
-  close(): void;
+  close(): Promise<void>;
 };
 
 const DEFAULT_PORT = 8765;
@@ -49,7 +49,7 @@ async function findAvailablePort(startPort: number): Promise<number> {
 
 export async function startOAuthServer(preferredPort?: number, expectedState?: string): Promise<OAuthServer> {
   const startPort = preferredPort ?? DEFAULT_PORT;
-  const port = await findAvailablePort(startPort);
+  let port = await findAvailablePort(startPort);
   let resolveCallback: ((result: OAuthCallbackResult) => void) | null = null;
   let settled = false;
 
@@ -89,9 +89,29 @@ export async function startOAuthServer(preferredPort?: number, expectedState?: s
     }
   });
 
-  await new Promise<void>((resolve) => {
-    server.listen(port, '127.0.0.1', () => resolve());
-  });
+  // Retry loop to handle TOCTOU race between port check and bind
+  while (port <= MAX_PORT) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(port, '127.0.0.1', () => {
+          server.removeListener('error', reject);
+          resolve();
+        });
+      });
+      break; // Successfully bound
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+        port = await findAvailablePort(port + 1);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  if (port > MAX_PORT) {
+    throw new Error(`No available ports in range ${startPort}-${MAX_PORT}`);
+  }
 
   const timeoutId = setTimeout(() => {
     if (!settled) {
@@ -114,13 +134,18 @@ export async function startOAuthServer(preferredPort?: number, expectedState?: s
         };
       });
     },
-    close() {
+    close(): Promise<void> {
       clearTimeout(timeoutId);
       if (!settled) {
         settled = true;
         resolveCallback?.({ success: false, reason: 'timeout' });
       }
-      server.close();
+      return new Promise<void>((resolve) => {
+        if ('closeAllConnections' in server) {
+          server.closeAllConnections();
+        }
+        server.close(() => resolve());
+      });
     },
   };
 }
