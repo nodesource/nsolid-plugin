@@ -1,10 +1,9 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
-import { strictEqual, deepStrictEqual, ok } from 'node:assert';
+import { describe, it, beforeEach, afterEach, expect } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { atomicWriteSync, ensureDir } from '../../src/utils/fs.js';
-import { writeJsonFileSync } from '../../src/utils/fs.js';
+import { atomicWriteSync, ensureDir } from '../../../src/utils/fs.js';
+import { writeJsonFileSync } from '../../../src/utils/fs.js';
 
 let tmpDir: string;
 
@@ -20,7 +19,7 @@ describe('ensureDir', () => {
   it('creates a directory recursively', () => {
     const dir = join(tmpDir, 'a', 'b', 'c');
     ensureDir(dir);
-    ok(existsSync(dir));
+    expect(existsSync(dir)).toBeTruthy();
   });
 
   it('does not throw if directory already exists', () => {
@@ -36,9 +35,9 @@ describe('writeJsonFileSync', () => {
 
     const content = readFileSync(file, 'utf-8');
     const parsed = JSON.parse(content);
-    deepStrictEqual(parsed, { hello: 'world', num: 42 });
-    ok(content.endsWith('\n'));
-    ok(content.includes('\n  '));
+    expect(parsed).toEqual({ hello: 'world', num: 42 });
+    expect(content.endsWith('\n')).toBeTruthy();
+    expect(content.includes('\n  ')).toBeTruthy();
   });
 
   it('overwrites existing file', () => {
@@ -47,7 +46,7 @@ describe('writeJsonFileSync', () => {
     writeJsonFileSync(file, { v: 2 });
 
     const content = readFileSync(file, 'utf-8');
-    deepStrictEqual(JSON.parse(content), { v: 2 });
+    expect(JSON.parse(content)).toEqual({ v: 2 });
   });
 });
 
@@ -57,6 +56,6 @@ describe('atomicWriteSync', () => {
     atomicWriteSync(file, 'hello world');
 
     const content = readFileSync(file, 'utf-8');
-    strictEqual(content, 'hello world');
+    expect(content).toBe('hello world');
   });
 });

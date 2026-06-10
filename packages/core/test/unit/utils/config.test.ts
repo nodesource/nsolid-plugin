@@ -1,10 +1,9 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
-import { strictEqual, deepStrictEqual, ok } from 'node:assert';
+import { describe, it, beforeEach, afterEach, expect } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readJsonFile, readTomlFile, parseJsonc, readJsoncFile } from '../../src/utils/config.js';
-import { writeTomlFileSync } from '../../src/utils/config.js';
+import { readJsonFile, readTomlFile, parseJsonc, readJsoncFile } from '../../../src/utils/config.js';
+import { writeTomlFileSync } from '../../../src/utils/config.js';
 
 let tmpDir: string;
 
@@ -21,17 +20,17 @@ describe('readJsonFile', () => {
     const file = join(tmpDir, 'test.json');
     writeFileSync(file, '{"key":"value","num":42}');
     const result = readJsonFile<{ key: string; num: number }>(file);
-    deepStrictEqual(result, { key: 'value', num: 42 });
+    expect(result).toEqual({ key: 'value', num: 42 });
   });
 
   it('returns null for missing file', () => {
-    strictEqual(readJsonFile(join(tmpDir, 'nonexistent.json')), null);
+    expect(readJsonFile(join(tmpDir, 'nonexistent.json'))).toBeNull();
   });
 
-  it('returns null for invalid JSON', () => {
+  it('throws for invalid JSON', () => {
     const file = join(tmpDir, 'bad.json');
     writeFileSync(file, 'not json');
-    strictEqual(readJsonFile(file), null);
+    expect(() => readJsonFile(file)).toThrow(/Failed to parse/);
   });
 });
 
@@ -44,44 +43,44 @@ describe('readTomlFile and writeTomlFileSync', () => {
     };
     writeTomlFileSync(file, data);
     const result = readTomlFile<typeof data>(file);
-    deepStrictEqual(result, data);
+    expect(result).toEqual(data);
   });
 
   it('returns null for missing TOML file', () => {
-    strictEqual(readTomlFile(join(tmpDir, 'none.toml')), null);
+    expect(readTomlFile(join(tmpDir, 'none.toml'))).toBeNull();
   });
 
-  it('returns null for invalid TOML', () => {
+  it('throws for invalid TOML', () => {
     const file = join(tmpDir, 'bad.toml');
     writeFileSync(file, '[[invalid]]]');
-    strictEqual(readTomlFile(file), null);
+    expect(() => readTomlFile(file)).toThrow(/Failed to parse/);
   });
 });
 
 describe('parseJsonc', () => {
   it('strips single-line comments', () => {
     const content = '{\n  // comment\n  "key": "value"\n}';
-    deepStrictEqual(parseJsonc(content), { key: 'value' });
+    expect(parseJsonc(content)).toEqual({ key: 'value' });
   });
 
   it('strips block comments', () => {
     const content = '{\n  /* multi\n  line\n  comment */\n  "key": "value"\n}';
-    deepStrictEqual(parseJsonc(content), { key: 'value' });
+    expect(parseJsonc(content)).toEqual({ key: 'value' });
   });
 
   it('handles trailing commas', () => {
     const content = '{"key": "value",}';
-    deepStrictEqual(parseJsonc(content), { key: 'value' });
+    expect(parseJsonc(content)).toEqual({ key: 'value' });
   });
 
   it('preserves strings containing comment-like chars', () => {
     const content = '{"url": "https://example.com", "key": "value"}';
-    deepStrictEqual(parseJsonc(content), { url: 'https://example.com', key: 'value' });
+    expect(parseJsonc(content)).toEqual({ url: 'https://example.com', key: 'value' });
   });
 
   it('preserves comma-close tokens inside strings', () => {
     const content = '{"token": ",}", "arrToken": ",]"}';
-    deepStrictEqual(parseJsonc(content), { token: ',}', arrToken: ',]' });
+    expect(parseJsonc(content)).toEqual({ token: ',}', arrToken: ',]' });
   });
 });
 
@@ -90,16 +89,16 @@ describe('readJsoncFile', () => {
     const file = join(tmpDir, 'config.jsonc');
     writeFileSync(file, '{\n  // config\n  "name": "test",\n  "debug": true\n}');
     const result = readJsoncFile<{ name: string; debug: boolean }>(file);
-    deepStrictEqual(result, { name: 'test', debug: true });
+    expect(result).toEqual({ name: 'test', debug: true });
   });
 
   it('returns null for missing file', () => {
-    strictEqual(readJsoncFile(join(tmpDir, 'none.jsonc')), null);
+    expect(readJsoncFile(join(tmpDir, 'none.jsonc'))).toBeNull();
   });
 
-  it('returns null for invalid JSONC', () => {
+  it('throws for invalid JSONC', () => {
     const file = join(tmpDir, 'bad.jsonc');
     writeFileSync(file, '{broken');
-    strictEqual(readJsoncFile(file), null);
+    expect(() => readJsoncFile(file)).toThrow(/Failed to parse/);
   });
 });

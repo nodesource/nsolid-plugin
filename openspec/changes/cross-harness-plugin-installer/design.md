@@ -150,7 +150,11 @@ export async function doctor(harness: HarnessType): Promise<DoctorReport>;
 export interface Credentials {
   serviceToken: string;
   organizationId: string;
-  expiresAt: Date;
+  saasToken: string;
+  consoleUrl: string;
+  mcpUrl: string;
+  expiresAt: string;
+  permissions?: string[];
 }
 
 export async function ensureAuthenticated(): Promise<Credentials>;

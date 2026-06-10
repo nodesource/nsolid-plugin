@@ -1,7 +1,6 @@
-import { describe, it } from 'node:test';
-import { deepStrictEqual, strictEqual, throws } from 'node:assert';
-import { validateBundle } from '../src/validate.js';
-import type { BundleDescriptor } from '../src/types.js';
+import { describe, it, expect } from 'vitest';
+import { validateBundle } from '../../src/validate.js';
+import type { BundleDescriptor } from '../../src/types.js';
 
 const validBundle: BundleDescriptor = {
   name: 'test-bundle',
@@ -18,7 +17,7 @@ const validBundle: BundleDescriptor = {
 describe('validateBundle', () => {
   it('validates a complete bundle descriptor', () => {
     const result = validateBundle(validBundle);
-    deepStrictEqual(result, validBundle);
+    expect(result).toEqual(validBundle);
   });
 
   it('validates bundle with all optional fields', () => {
@@ -65,32 +64,23 @@ describe('validateBundle', () => {
       }
     };
     const result = validateBundle(bundle);
-    deepStrictEqual(result, bundle);
+    expect(result).toEqual(bundle);
   });
 
   it('rejects bundle missing required fields', () => {
-    throws(() => validateBundle({}), /validation failed/i);
+    expect(() => validateBundle({})).toThrow(/validation failed/i);
   });
 
   it('rejects bundle with missing name', () => {
-    throws(
-      () => validateBundle({ ...validBundle, name: undefined }),
-      /validation failed/i
-    );
+    expect(() => validateBundle({ ...validBundle, name: undefined })).toThrow(/validation failed/i);
   });
 
   it('rejects bundle with empty skills array', () => {
-    throws(
-      () => validateBundle({ ...validBundle, skills: [] }),
-      /validation failed/i
-    );
+    expect(() => validateBundle({ ...validBundle, skills: [] })).toThrow(/validation failed/i);
   });
 
   it('rejects bundle with empty mcpServers array', () => {
-    throws(
-      () => validateBundle({ ...validBundle, mcpServers: [] }),
-      /validation failed/i
-    );
+    expect(() => validateBundle({ ...validBundle, mcpServers: [] })).toThrow(/validation failed/i);
   });
 
   it('rejects skill missing required name', () => {
@@ -98,7 +88,7 @@ describe('validateBundle', () => {
       ...validBundle,
       skills: [{ path: 'skills/x', description: 'No name' }]
     };
-    throws(() => validateBundle(bad), /validation failed/i);
+    expect(() => validateBundle(bad)).toThrow(/validation failed/i);
   });
 
   it('rejects auth with wrong type enum', () => {
@@ -106,7 +96,7 @@ describe('validateBundle', () => {
       ...validBundle,
       auth: { type: 'apikey' }
     };
-    throws(() => validateBundle(bad), /validation failed/i);
+    expect(() => validateBundle(bad)).toThrow(/validation failed/i);
   });
 
   it('rejects skill with duplicate requiresMcp entries', () => {
@@ -119,6 +109,6 @@ describe('validateBundle', () => {
         requiresMcp: ['nsolid-mcp', 'nsolid-mcp']
       }]
     };
-    throws(() => validateBundle(bad), /validation failed/i);
+    expect(() => validateBundle(bad)).toThrow(/validation failed/i);
   });
 });

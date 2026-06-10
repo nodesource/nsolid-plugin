@@ -2,23 +2,33 @@ import { readFileSync, existsSync } from 'node:fs';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { atomicWriteSync } from './fs.js';
 
+/**
+ * Reads and parses a JSON file.
+ * @returns Parsed data, or null if the file does not exist.
+ * @throws Error if the file exists but contains invalid JSON.
+ */
 export function readJsonFile<T>(filePath: string): T | null {
+  if (!existsSync(filePath)) return null;
   try {
-    if (!existsSync(filePath)) return null;
     const data = readFileSync(filePath, 'utf-8');
     return JSON.parse(data) as T;
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`Failed to parse ${filePath}: ${(err as Error).message}`, { cause: err });
   }
 }
 
+/**
+ * Reads and parses a TOML file.
+ * @returns Parsed data, or null if the file does not exist.
+ * @throws Error if the file exists but contains invalid TOML.
+ */
 export function readTomlFile<T>(filePath: string): T | null {
+  if (!existsSync(filePath)) return null;
   try {
-    if (!existsSync(filePath)) return null;
     const data = readFileSync(filePath, 'utf-8');
     return parseToml(data) as T;
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`Failed to parse ${filePath}: ${(err as Error).message}`, { cause: err });
   }
 }
 
@@ -83,12 +93,17 @@ export function parseJsonc(content: string): unknown {
   return JSON.parse(out);
 }
 
+/**
+ * Reads and parses a JSONC (JSON with comments) file.
+ * @returns Parsed data, or null if the file does not exist.
+ * @throws Error if the file exists but contains invalid JSON after comment stripping.
+ */
 export function readJsoncFile<T>(filePath: string): T | null {
+  if (!existsSync(filePath)) return null;
   try {
-    if (!existsSync(filePath)) return null;
     const content = readFileSync(filePath, 'utf-8');
     return parseJsonc(content) as T;
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`Failed to parse ${filePath}: ${(err as Error).message}`, { cause: err });
   }
 }

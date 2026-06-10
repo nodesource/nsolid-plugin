@@ -49,32 +49,33 @@
 
 ## Phase 2: Authentication Module
 
-### Task 5: Implement token storage module
-- **Description**: Create token-storage.ts to read/write credentials to `~/.agents/.nodesource-auth.json`. Implement secure file permissions (0600). Note: on Windows, `chmod 0600` has minimal effect (only toggles read-only flag); credential protection relies on directory ACLs. Handle missing file, invalid JSON, and expired tokens.
+### Task 5: Implement token storage module ✓
+- [x] **Description**: Create token-storage.ts to read/write credentials to `~/.agents/.nodesource-auth.json`. Implement secure file permissions (0600). Note: on Windows, `chmod 0600` has minimal effect (only toggles read-only flag); credential protection relies on directory ACLs. Handle missing file, invalid JSON, and expired tokens.
 - **Depends on**: Task 4
 - **Files**:
   - `packages/core/src/auth/token-storage.ts`
 - **Testing**: Unit tests for save/load credentials. Test file permissions (verify `0600` on Unix, document Windows behavior). Test handling of corrupted file.
 - **Spec reference**: Credentials Storage in design.md
 
-### Task 6: Implement token validator module
-- **Description**: Create token-validator.ts to validate service tokens with Accounts API at `/accounts/org/access-token`. Handle network errors, 401/403 responses, and timeouts. Return validation result with permissions list.
+### Task 6: Implement token validator module ✓
+- [x] **Description**: Create token-validator.ts to validate service tokens with Accounts API at `/accounts/org/access-token`. Handle network errors, 401/403 responses, and timeouts. Return validation result with permissions list.
 - **Depends on**: Task 5
 - **Files**:
   - `packages/core/src/auth/token-validator.ts`
 - **Testing**: Unit tests with mocked HTTP responses. Test success, 401, 500, and timeout scenarios.
 - **Spec reference**: Token validation failure scenario in specs/installation-and-auth.md
 
-### Task 7: Implement OAuth callback server
-- **Description**: Create oauth-server.ts to start local HTTP server on port 8765 (with fallback to 8766-8770). Listen for OAuth callback with token and orgId. Implement 5-minute timeout. Return received credentials.
+### Task 7: Implement OAuth callback server ✓
+- [x] **Description**: Create oauth-server.ts to start local HTTP server on port 8765 (with fallback to 8766-8770). Listen for OAuth callback with token, consoleId (sent as consoleId by accounts service, not orgId), NSOLID_SAAS, url, and success flag. Implement 5-minute timeout. Validate state for CSRF protection. Return received credentials.
 - **Depends on**: Task 4
 - **Files**:
   - `packages/core/src/auth/oauth-server.ts`
 - **Testing**: Unit tests for server startup, callback handling, timeout, and port conflicts. Use mock HTTP client to simulate callback.
 - **Spec reference**: OAuth timeout and port conflict scenarios in specs/installation-and-auth.md
 
-### Task 8: Implement auth manager orchestrator
-- **Description**: Create auth-manager.ts with `ensureAuthenticated()` function. Check for existing valid credentials first. If missing/expired, initiate OAuth flow (open browser, start callback server). Validate token with Accounts API. Store credentials. Return Credentials object.
+### Task 8: Implement auth manager orchestrator ✓
+- [x] **Description**: Create auth-manager.ts with `ensureAuthenticated()` function. Check for existing valid credentials first. If missing/expired, initiate OAuth flow (open browser, start callback server). Parse callback parameters: token, consoleId, NSOLID_SAAS, url. Derive MCP URL from consoleId. Validate token with Accounts API. Store credentials including saasToken, consoleUrl, and mcpUrl. Return Credentials object.
+- **Note**: Credentials now include `saasToken`, `consoleUrl`, and `mcpUrl` in addition to `serviceToken`, `organizationId`, and `expiresAt` per real accounts service behavior observed in nsentinel-vscode-extension.
 - **Depends on**: Tasks 5, 6, 7
 - **Files**:
   - `packages/core/src/auth/auth-manager.ts`

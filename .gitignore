@@ -9,3 +9,4 @@ dist/
 .opencode/sessions/
 .opencode/logs/
 .codegraph/
+.opencode/plans

@@ -17,6 +17,9 @@ export interface McpServerRef {
 export interface Credentials {
   serviceToken: string;
   organizationId: string;
+  saasToken: string;
+  consoleUrl: string;
+  mcpUrl: string;
   expiresAt: string;
   permissions?: string[];
 }
