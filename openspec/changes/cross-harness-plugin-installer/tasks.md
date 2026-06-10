@@ -85,16 +85,16 @@
 
 ## Phase 3: Skills Module
 
-### Task 9: Implement skill copier module
-- **Description**: Create skill-copier.ts to copy skills from source directory to `~/.agents/skills/`. Read skill list from bundle descriptor. Copy SKILL.md and any supporting files. Track installed skills with paths.
+### Task 9: Implement skill copier module ✓
+- [x] **Description**: Create skill-copier.ts to copy skills from source directory to `~/.agents/skills/`. Read skill list from bundle descriptor. Copy SKILL.md and any supporting files. Track installed skills with paths.
 - **Depends on**: Task 4
 - **Files**:
   - `packages/core/src/skills/skill-copier.ts`
 - **Testing**: Unit tests with mock file system. Test copying multiple skills, handling missing source files, permission errors.
 - **Spec reference**: Installation failure during skill copy scenario in specs/installation-and-auth.md
 
-### Task 10: Implement skill linker module
-- **Description**: Create skill-linker.ts to create harness-specific skill links with idempotent handling. Platform-aware linking strategy:
+### Task 10: Implement skill linker module ✓
+- [x] **Description**: Create skill-linker.ts to create harness-specific skill links with idempotent handling. Platform-aware linking strategy:
   - **Unix (macOS/Linux)**: Use `fs.symlink()` for all harnesses (Claude/Codex/OpenCode), copy for Pi
   - **Windows**: Use `fs.symlink(target, path, 'junction')` for directory links (junctions work without Developer Mode or admin privileges). Fall back to file copy if junction creation fails. Always copy for Pi.
 
@@ -109,8 +109,8 @@
 - **Testing**: Unit tests for each idempotent case (skip/replace/backup/create), different harness types, broken symlinks. Add Windows-specific test cases: junction creation, junction fallback to copy, junction detection in idempotent checks.
 - **Spec reference**: Per-harness configuration mapping and Idempotent installation scenario in specs/installation-and-auth.md
 
-### Task 11: Implement skill tracker module
-- **Description**: Create skill-tracker.ts to record installed skills in tracking file. Store skill name, path, installation timestamp, and **harness association** (array of harness IDs that installed this skill). All paths must be normalized with `path.resolve()` before storing — never hardcode `/` in path strings. Support add/remove harness entries per skill for multi-harness installs. Support reading tracking file for uninstall with harness-aware semantics (targeted uninstall removes only the specified harness's entries, full uninstall removes all). Handle missing/corrupted tracking file gracefully.
+### Task 11: Implement skill tracker module ✓
+- [x] **Description**: Create skill-tracker.ts to record installed skills in tracking file. Store skill name, path, installation timestamp, and **harness association** (array of harness IDs that installed this skill). All paths must be normalized with `path.resolve()` before storing — never hardcode `/` in path strings. Support add/remove harness entries per skill for multi-harness installs. Support reading tracking file for uninstall with harness-aware semantics (targeted uninstall removes only the specified harness's entries, full uninstall removes all). Handle missing/corrupted tracking file gracefully.
 - **Depends on**: Task 9
 - **Files**:
   - `packages/core/src/skills/skill-tracker.ts`

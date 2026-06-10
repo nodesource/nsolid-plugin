@@ -1,0 +1,52 @@
+import { cp, rm, access } from 'node:fs/promises'
+import path from 'node:path'
+import type { SkillRef } from '../types.js'
+import { getSkillsDir } from '../utils/path.js'
+import { ensureDir } from '../utils/fs.js'
+
+export class SkillCopyError extends Error {
+  constructor (
+    public readonly skill: string,
+    cause: Error
+  ) {
+    super(`Failed to copy skill '${skill}': ${cause.message}`)
+    this.name = 'SkillCopyError'
+    this.cause = cause
+  }
+}
+
+export async function installSkills (skills: SkillRef[], sourceDir: string): Promise<void> {
+  const destDir = getSkillsDir()
+  ensureDir(destDir)
+
+  for (const skill of skills) {
+    const srcPath = path.join(sourceDir, skill.path)
+    const destPath = path.join(destDir, skill.name)
+
+    try {
+      await access(srcPath)
+    } catch {
+      throw new SkillCopyError(skill.name, new Error(`Source not found: ${srcPath}`))
+    }
+
+    try {
+      await cp(srcPath, destPath, { recursive: true, force: true })
+    } catch (err) {
+      throw new SkillCopyError(skill.name, err as Error)
+    }
+  }
+}
+
+export async function uninstallSkills (skills: SkillRef[]): Promise<void> {
+  const destDir = getSkillsDir()
+
+  for (const skill of skills) {
+    const destPath = path.join(destDir, skill.name)
+    try {
+      await access(destPath)
+      await rm(destPath, { recursive: true, force: true })
+    } catch {
+      // Best-effort: ignore missing skills
+    }
+  }
+}

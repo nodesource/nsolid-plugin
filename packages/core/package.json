@@ -29,6 +29,7 @@
     "node": ">=22.3.0"
   },
   "files": [
-    "dist/src/"
+    "dist/src/",
+    "skills/"
   ]
 }
