@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
-    "test": "vitest run --config ../../vitest.config.ts",
+    "test": "node --experimental-test-module-mocks --import tsx/esm --test test/**/*.test.ts",
     "lint": "eslint src/ test/"
   },
   "dependencies": {

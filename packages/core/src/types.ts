@@ -1,4 +1,4 @@
-export type HarnessType = 'claude' | 'codex' | 'opencode' | 'antigravity' | 'pi';
+export type HarnessType = 'claude' | 'codex' | 'opencode' | 'antigravity' | 'pi'
 
 export interface SkillRef {
   name: string;

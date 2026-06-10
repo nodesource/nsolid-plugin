@@ -1,18 +1,6 @@
-import js from '@eslint/js';
-import tseslint from 'typescript-eslint';
+import neostandard from 'neostandard'
 
-export default tseslint.config(
-  js.configs.recommended,
-  ...tseslint.configs.recommended,
-  {
-    ignores: ['**/dist/**', '**/node_modules/**'],
-  },
-  {
-    files: ['**/*.ts'],
-    languageOptions: {
-      parserOptions: {
-        projectService: true,
-      },
-    },
-  },
-);
+export default neostandard({
+  ts: true,
+  ignores: ['dist/**']
+})

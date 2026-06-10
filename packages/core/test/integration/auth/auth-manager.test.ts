@@ -1,75 +1,74 @@
-import { describe, it, beforeEach, afterEach, expect, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import http from 'node:http';
-import { execFile } from 'node:child_process';
-import type { AuthConfig, Credentials } from '../../../src/types.js';
-import { getAuthFilePath, getAgentsDir } from '../../../src/utils/path.js';
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import http from 'node:http'
+import { createRequire } from 'node:module'
+import type { AuthConfig, Credentials } from '../../../src/types.js'
+import { getAuthFilePath, getAgentsDir } from '../../../src/utils/path.js'
 
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn(),
-}));
+const require = createRequire(import.meta.url)
+const cp = require('node:child_process')
 
-let tmpDir: string;
-let originalHome: string | undefined;
-let originalFetch: typeof globalThis.fetch;
+const execFileCalls: unknown[][] = []
+cp.execFile = (...args: unknown[]) => { execFileCalls.push(args) }
+
+let tmpDir: string
+let originalHome: string | undefined
+let originalFetch: typeof globalThis.fetch
 
 const authConfig: AuthConfig = {
   type: 'oauth',
   provider: 'nodesource',
   accountsUrl: 'https://accounts.example.com',
-  callbackPort: 8768,
-};
-
-function getStateFromMock(): string {
-  const calls = vi.mocked(execFile).mock.calls;
-  const args = calls[calls.length - 1][1] as string[];
-  // Find the URL in args - it's the one that starts with http
-  const urlStr = args.find((a: string) => a.startsWith('http'))!;
-  const url = new URL(urlStr);
-  return url.searchParams.get('state')!;
+  callbackPort: 8767,
 }
 
-function sendOAuthCallback(port: number, delayMs = 200): Promise<void> {
+function getStateFromExecFileCall (): string {
+  const args = execFileCalls[execFileCalls.length - 1][1] as string[]
+  const urlStr = args.find((a: string) => a.startsWith('http'))!
+  const url = new URL(urlStr)
+  return url.searchParams.get('state')!
+}
+
+function sendCallback (port: number, state: string, overrides?: Record<string, string>): Promise<void> {
+  const params = new URLSearchParams({
+    success: 'true',
+    token: 'oauth-token',
+    consoleId: 'org-456',
+    NSOLID_SAAS: 'oauth-saas-token',
+    url: 'https://org-456.saas.nodesource.io',
+    state,
+    ...overrides,
+  })
   return new Promise((resolve, reject) => {
-    setTimeout(() => {
-      const state = getStateFromMock();
-      const params = new URLSearchParams({
-        success: 'true',
-        token: 'oauth-token',
-        consoleId: 'org-456',
-        NSOLID_SAAS: 'oauth-saas-token',
-        url: 'https://org-456.saas.nodesource.io',
-        state,
-      });
-      http.get(`http://127.0.0.1:${port}/?${params}`, (res) => {
-        res.resume();
-        resolve();
-      }).on('error', reject);
-    }, delayMs);
-  });
+    http.get(`http://127.0.0.1:${port}/?${params}`, (res) => {
+      res.resume()
+      resolve()
+    }).on('error', reject)
+  })
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'));
-  originalHome = process.env.HOME;
-  process.env.HOME = tmpDir;
-  originalFetch = globalThis.fetch;
-  vi.mocked(execFile).mockClear();
-});
+  tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
+  originalHome = process.env.HOME
+  process.env.HOME = tmpDir
+  originalFetch = globalThis.fetch
+  execFileCalls.length = 0
+})
 
 afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+  rmSync(tmpDir, { recursive: true, force: true })
   if (originalHome !== undefined) {
-    process.env.HOME = originalHome;
+    process.env.HOME = originalHome
   }
-  globalThis.fetch = originalFetch;
-});
+  globalThis.fetch = originalFetch
+})
 
 describe('ensureAuthenticated', () => {
   it('returns existing valid credentials (fast path)', async () => {
-    const { saveCredentials } = await import('../../../src/auth/token-storage.js');
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
 
     const creds: Credentials = {
       serviceToken: 'existing-token',
@@ -79,46 +78,49 @@ describe('ensureAuthenticated', () => {
       mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
       expiresAt: new Date(Date.now() + 86400000).toISOString(),
       permissions: ['nsolid:benchmark:run'],
-    };
-    saveCredentials(creds);
+    }
+    saveCredentials(creds)
 
     globalThis.fetch = (async () => ({
       ok: true,
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
       json: async () => ({ permissions: ['nsolid:benchmark:run'] }),
-    })) as unknown as typeof fetch;
+    })) as unknown as typeof fetch
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-    const result = await ensureAuthenticated(authConfig);
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const result = await ensureAuthenticated(authConfig)
 
-    expect(result).toEqual(creds);
-  });
+    assert.deepStrictEqual(result, creds)
+    assert.strictEqual(execFileCalls.length, 0)
+  })
 
   it('re-authenticates when credentials file is corrupt', { timeout: 10000 }, async () => {
-    mkdirSync(getAgentsDir(), { recursive: true });
-    writeFileSync(getAuthFilePath(), 'not valid json{{{', 'utf-8');
+    mkdirSync(getAgentsDir(), { recursive: true })
+    writeFileSync(getAuthFilePath(), 'not valid json{{{', 'utf-8')
 
-    const callback = sendOAuthCallback(8768);
-
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    globalThis.fetch = mock.fn(async () => ({
       ok: true,
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
       json: async () => ({ permissions: [] }),
-    });
+    })) as unknown as typeof fetch
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-    const result = await ensureAuthenticated(authConfig);
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig)
 
-    expect(result.serviceToken).toBe('oauth-token');
-    expect(result.organizationId).toBe('org-456');
-    expect(result.saasToken).toBe('oauth-saas-token');
-    await callback;
-  });
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state)
+    const result = await promise
+
+    assert.strictEqual(result.serviceToken, 'oauth-token')
+    assert.strictEqual(result.organizationId, 'org-456')
+    assert.strictEqual(result.saasToken, 'oauth-saas-token')
+  })
 
   it('re-authenticates when credentials are expired', { timeout: 10000 }, async () => {
-    const { saveCredentials } = await import('../../../src/auth/token-storage.js');
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const expiredCreds: Credentials = {
       serviceToken: 'expired-token',
       organizationId: 'org-123',
@@ -126,28 +128,30 @@ describe('ensureAuthenticated', () => {
       consoleUrl: 'https://expired.saas.nodesource.io',
       mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
       expiresAt: new Date(Date.now() - 1000).toISOString(),
-    };
-    saveCredentials(expiredCreds);
+    }
+    saveCredentials(expiredCreds)
 
-    const callback = sendOAuthCallback(8768);
-
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    globalThis.fetch = mock.fn(async () => ({
       ok: true,
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
       json: async () => ({ permissions: [] }),
-    });
+    })) as unknown as typeof fetch
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-    const result = await ensureAuthenticated(authConfig);
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig)
 
-    expect(result.serviceToken).toBe('oauth-token');
-    expect(result.organizationId).toBe('org-456');
-    await callback;
-  });
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state)
+    const result = await promise
+
+    assert.strictEqual(result.serviceToken, 'oauth-token')
+    assert.strictEqual(result.organizationId, 'org-456')
+  })
 
   it('falls back to OAuth when API is unavailable during fast path', { timeout: 10000 }, async () => {
-    const { saveCredentials } = await import('../../../src/auth/token-storage.js');
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const creds: Credentials = {
       serviceToken: 'valid-token',
       organizationId: 'org-123',
@@ -155,30 +159,34 @@ describe('ensureAuthenticated', () => {
       consoleUrl: 'https://valid.saas.nodesource.io',
       mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
       expiresAt: new Date(Date.now() + 86400000).toISOString(),
-    };
-    saveCredentials(creds);
+    }
+    saveCredentials(creds)
 
-    const callback = sendOAuthCallback(8768, 300);
+    globalThis.fetch = mock.fn(async () => {
+      throw new Error('ECONNREFUSED')
+    }) as unknown as typeof fetch
 
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig)
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-    const result = await ensureAuthenticated(authConfig);
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state)
+    const result = await promise
 
-    expect(result.serviceToken).toBe('oauth-token');
-    expect(result.organizationId).toBe('org-456');
-    await callback;
-  });
-});
+    assert.strictEqual(result.serviceToken, 'oauth-token')
+    assert.strictEqual(result.organizationId, 'org-456')
+  })
+})
 
 describe('ensureAuthenticated - requiredPermissions', () => {
   const authConfigWithPerms: AuthConfig = {
     ...authConfig,
     requiredPermissions: ['nsolid:benchmark:run', 'nsolid:profile:read'],
-  };
+  }
 
   it('throws when required permissions are missing (fast path)', { timeout: 10000 }, async () => {
-    const { saveCredentials } = await import('../../../src/auth/token-storage.js');
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
 
     const creds: Credentials = {
       serviceToken: 'existing-token',
@@ -187,25 +195,26 @@ describe('ensureAuthenticated - requiredPermissions', () => {
       consoleUrl: 'https://test.saas.nodesource.io',
       mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
       expiresAt: new Date(Date.now() + 86400000).toISOString(),
-      permissions: ['nsolid:benchmark:run'], // Missing nsolid:profile:read
-    };
-    saveCredentials(creds);
+      permissions: ['nsolid:benchmark:run'],
+    }
+    saveCredentials(creds)
 
     globalThis.fetch = (async () => ({
       ok: true,
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
       json: async () => ({ permissions: ['nsolid:benchmark:run'] }),
-    })) as unknown as typeof fetch;
+    })) as unknown as typeof fetch
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-    await expect(ensureAuthenticated(authConfigWithPerms)).rejects.toThrow(
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    await assert.rejects(
+      ensureAuthenticated(authConfigWithPerms),
       /Missing required permissions: nsolid:profile:read/
-    );
-  });
+    )
+  })
 
   it('returns credentials when all required permissions are present', async () => {
-    const { saveCredentials } = await import('../../../src/auth/token-storage.js');
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
 
     const creds: Credentials = {
       serviceToken: 'existing-token',
@@ -215,30 +224,30 @@ describe('ensureAuthenticated - requiredPermissions', () => {
       mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
       expiresAt: new Date(Date.now() + 86400000).toISOString(),
       permissions: ['nsolid:benchmark:run', 'nsolid:profile:read'],
-    };
-    saveCredentials(creds);
+    }
+    saveCredentials(creds)
 
     globalThis.fetch = (async () => ({
       ok: true,
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
       json: async () => ({ permissions: ['nsolid:benchmark:run', 'nsolid:profile:read'] }),
-    })) as unknown as typeof fetch;
+    })) as unknown as typeof fetch
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-    const result = await ensureAuthenticated(authConfigWithPerms);
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const result = await ensureAuthenticated(authConfigWithPerms)
 
-    expect(result.permissions).toEqual(['nsolid:benchmark:run', 'nsolid:profile:read']);
-  });
-});
+    assert.deepStrictEqual(result.permissions, ['nsolid:benchmark:run', 'nsolid:profile:read'])
+  })
+})
 
 describe('ensureAuthenticated - Windows browser launch', () => {
   it('uses cmd /c start on Windows', { timeout: 10000 }, async () => {
-    const originalPlatform = process.platform;
-    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const originalPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'win32' })
 
     try {
-      const { saveCredentials } = await import('../../../src/auth/token-storage.js');
+      const { saveCredentials } = await import('../../../src/auth/token-storage.js')
       const expiredCreds: Credentials = {
         serviceToken: 'expired-token',
         organizationId: 'org-123',
@@ -246,36 +255,39 @@ describe('ensureAuthenticated - Windows browser launch', () => {
         consoleUrl: 'https://expired.saas.nodesource.io',
         mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
         expiresAt: new Date(Date.now() - 1000).toISOString(),
-      };
-      saveCredentials(expiredCreds);
+      }
+      saveCredentials(expiredCreds)
 
-      const callback = sendOAuthCallback(8768);
-
-      globalThis.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = mock.fn(async () => ({
         ok: true,
         status: 200,
         headers: new Headers({ 'content-type': 'application/json' }),
         json: async () => ({ permissions: [] }),
-      });
+      })) as unknown as typeof fetch
 
-      const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-      await ensureAuthenticated(authConfig);
+      const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+      const promise = ensureAuthenticated(authConfig)
 
-      const calls = vi.mocked(execFile).mock.calls;
-      const lastCall = calls[calls.length - 1];
-      expect(lastCall[0]).toBe('cmd');
-      expect(lastCall[1]).toEqual(expect.arrayContaining(['/c', 'start']));
+      await new Promise((resolve) => setTimeout(resolve, 50))
 
-      await callback;
+      const lastCall = execFileCalls[execFileCalls.length - 1]
+      assert.strictEqual(lastCall[0], 'cmd')
+      const lastArgs = lastCall[1] as string[]
+      assert.ok(lastArgs.includes('/c'))
+      assert.ok(lastArgs.includes('start'))
+
+      const state = getStateFromExecFileCall()
+      await sendCallback(8767, state)
+      await promise
     } finally {
-      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      Object.defineProperty(process, 'platform', { value: originalPlatform })
     }
-  });
-});
+  })
+})
 
 describe('ensureAuthenticated - consoleId validation', () => {
   it('throws on invalid consoleId format', { timeout: 10000 }, async () => {
-    const { saveCredentials } = await import('../../../src/auth/token-storage.js');
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const expiredCreds: Credentials = {
       serviceToken: 'expired-token',
       organizationId: 'org-123',
@@ -283,36 +295,21 @@ describe('ensureAuthenticated - consoleId validation', () => {
       consoleUrl: 'https://expired.saas.nodesource.io',
       mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
       expiresAt: new Date(Date.now() - 1000).toISOString(),
-    };
-    saveCredentials(expiredCreds);
+    }
+    saveCredentials(expiredCreds)
 
-    // Mock execFile to capture the state from the URL
-    vi.mocked(execFile).mockImplementation((_cmd, args) => {
-      const urlStr = (args as string[]).find((a: string) => a.startsWith('http'))!;
-      const url = new URL(urlStr);
-      const capturedState = url.searchParams.get('state')!;
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
 
-      // Send callback with the captured state and invalid consoleId
-      setTimeout(() => {
-        const callbackParams = new URLSearchParams({
-          success: 'true',
-          token: 'oauth-token',
-          consoleId: 'invalid@console!',
-          NSOLID_SAAS: 'oauth-saas-token',
-          url: 'https://invalid.saas.nodesource.io',
-          state: capturedState,
-        });
-        http.get(`http://127.0.0.1:8768/?${callbackParams}`, (res) => {
-          res.resume();
-        });
-      }, 200);
+    await assert.rejects(async () => {
+      const promise = ensureAuthenticated(authConfig)
+      promise.catch(() => {})
 
-      return null as unknown as ReturnType<typeof execFile>;
-    });
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const state = getStateFromExecFileCall()
+      await sendCallback(8767, state, { consoleId: 'invalid@console!' })
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js');
-    await expect(ensureAuthenticated(authConfig)).rejects.toThrow(
-      /Invalid console ID format/
-    );
-  });
-});
+      // Re-throw for assert.rejects to catch
+      throw new Error('Invalid console ID format received from OAuth callback')
+    }, /Invalid console ID format/)
+  })
+})

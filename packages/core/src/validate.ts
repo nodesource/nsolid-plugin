@@ -1,5 +1,5 @@
-import { z } from 'zod';
-import type { BundleDescriptor } from './types.js';
+import { z } from 'zod'
+import type { BundleDescriptor } from './types.js'
 
 const SkillRefSchema = z.object({
   name: z.string(),
@@ -9,14 +9,14 @@ const SkillRefSchema = z.object({
     (arr) => new Set(arr).size === arr.length,
     { message: 'must have unique items' }
   ).optional()
-}).strict();
+}).strict()
 
 const McpServerRefSchema = z.object({
   name: z.string(),
   command: z.string(),
   args: z.array(z.string()),
   env: z.record(z.string(), z.string()).optional()
-}).strict();
+}).strict()
 
 const AuthConfigSchema = z.object({
   type: z.literal('oauth'),
@@ -24,7 +24,7 @@ const AuthConfigSchema = z.object({
   accountsUrl: z.string().url(),
   callbackPort: z.number().int().optional(),
   requiredPermissions: z.array(z.string()).optional()
-}).strict();
+}).strict()
 
 const BundleDescriptorSchema = z.object({
   name: z.string(),
@@ -33,15 +33,15 @@ const BundleDescriptorSchema = z.object({
   skills: z.array(SkillRefSchema).min(1),
   mcpServers: z.array(McpServerRefSchema).min(1),
   auth: AuthConfigSchema.optional()
-}).strict();
+}).strict()
 
-export function validateBundle(data: unknown): BundleDescriptor {
-  const result = BundleDescriptorSchema.safeParse(data);
+export function validateBundle (data: unknown): BundleDescriptor {
+  const result = BundleDescriptorSchema.safeParse(data)
   if (!result.success) {
     const errors = result.error.issues
       .map(e => `${e.path.join('.')} ${e.message}`)
-      .join('; ');
-    throw new Error(`Bundle validation failed: ${errors}`);
+      .join('; ')
+    throw new Error(`Bundle validation failed: ${errors}`)
   }
-  return result.data;
+  return result.data
 }

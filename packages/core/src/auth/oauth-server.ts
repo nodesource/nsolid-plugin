@@ -1,6 +1,6 @@
-import { createServer } from 'node:http';
-import { createServer as createNetServer } from 'node:net';
-import { URL } from 'node:url';
+import { createServer } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
+import { URL } from 'node:url'
 
 /**
  * Local OAuth callback server.
@@ -16,136 +16,136 @@ import { URL } from 'node:url';
 
 export type OAuthCallbackResult =
   | { success: true; token: string; consoleId: string; saasToken: string; consoleUrl: string }
-  | { success: false; reason: 'timeout' | 'auth-failed' };
+  | { success: false; reason: 'timeout' | 'auth-failed' }
 
 export type OAuthServer = {
   port: number;
   waitForCallback(): Promise<OAuthCallbackResult>;
   close(): Promise<void>;
-};
+}
 
-const DEFAULT_PORT = 8765;
-const MAX_PORT = 8770;
-const TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_PORT = 8765
+const MAX_PORT = 8770
+const TIMEOUT_MS = 5 * 60 * 1000
 
-function isPortAvailable(port: number): Promise<boolean> {
+function isPortAvailable (port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const tester = createNetServer()
       .once('error', () => resolve(false))
       .listen(port, '127.0.0.1', () => {
-        tester.close(() => resolve(true));
-      });
-  });
+        tester.close(() => resolve(true))
+      })
+  })
 }
 
-async function findAvailablePort(startPort: number): Promise<number> {
+async function findAvailablePort (startPort: number): Promise<number> {
   for (let port = startPort; port <= MAX_PORT; port++) {
     if (await isPortAvailable(port)) {
-      return port;
+      return port
     }
   }
-  throw new Error(`No available ports in range ${startPort}-${MAX_PORT}`);
+  throw new Error(`No available ports in range ${startPort}-${MAX_PORT}`)
 }
 
-export async function startOAuthServer(preferredPort?: number, expectedState?: string): Promise<OAuthServer> {
-  const startPort = preferredPort ?? DEFAULT_PORT;
-  let port = await findAvailablePort(startPort);
-  let resolveCallback: ((result: OAuthCallbackResult) => void) | null = null;
-  let settled = false;
+export async function startOAuthServer (preferredPort?: number, expectedState?: string): Promise<OAuthServer> {
+  const startPort = preferredPort ?? DEFAULT_PORT
+  let port = await findAvailablePort(startPort)
+  let resolveCallback: ((result: OAuthCallbackResult) => void) | null = null
+  let settled = false
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url ?? '/', `http://127.0.0.1`);
-    const success = url.searchParams.get('success') === 'true';
-    const token = url.searchParams.get('token');
-    const consoleId = url.searchParams.get('consoleId');
-    const saasToken = url.searchParams.get('NSOLID_SAAS');
-    const consoleUrl = url.searchParams.get('url');
-    const state = url.searchParams.get('state');
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const success = url.searchParams.get('success') === 'true'
+    const token = url.searchParams.get('token')
+    const consoleId = url.searchParams.get('consoleId')
+    const saasToken = url.searchParams.get('NSOLID_SAAS')
+    const consoleUrl = url.searchParams.get('url')
+    const state = url.searchParams.get('state')
 
     if (expectedState && state !== expectedState) {
-      res.writeHead(400, { 'Content-Type': 'text/html' });
-      res.end('<html><body><h1>Authentication failed</h1><p>Invalid state parameter.</p></body></html>');
-      return;
+      res.writeHead(400, { 'Content-Type': 'text/html' })
+      res.end('<html><body><h1>Authentication failed</h1><p>Invalid state parameter.</p></body></html>')
+      return
     }
 
     if (!success) {
-      res.writeHead(400, { 'Content-Type': 'text/html' });
-      res.end('<html><body><h1>Authentication failed</h1><p>Authentication was not successful.</p></body></html>');
+      res.writeHead(400, { 'Content-Type': 'text/html' })
+      res.end('<html><body><h1>Authentication failed</h1><p>Authentication was not successful.</p></body></html>')
       if (!settled) {
-        settled = true;
-        resolveCallback?.({ success: false, reason: 'auth-failed' });
+        settled = true
+        resolveCallback?.({ success: false, reason: 'auth-failed' })
       }
-      return;
+      return
     }
 
     if (token && consoleId && saasToken && consoleUrl && !settled) {
-      settled = true;
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>');
-      resolveCallback?.({ success: true, token, consoleId, saasToken, consoleUrl });
+      settled = true
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      res.end('<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>')
+      resolveCallback?.({ success: true, token, consoleId, saasToken, consoleUrl })
     } else {
-      res.writeHead(400, { 'Content-Type': 'text/html' });
-      res.end('<html><body><h1>Authentication failed</h1><p>Missing required parameters.</p></body></html>');
+      res.writeHead(400, { 'Content-Type': 'text/html' })
+      res.end('<html><body><h1>Authentication failed</h1><p>Missing required parameters.</p></body></html>')
     }
-  });
+  })
 
   // Retry loop to handle TOCTOU race between port check and bind
   while (port <= MAX_PORT) {
     try {
       await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
+        server.once('error', reject)
         server.listen(port, '127.0.0.1', () => {
-          server.removeListener('error', reject);
-          resolve();
-        });
-      });
-      break; // Successfully bound
+          server.removeListener('error', reject)
+          resolve()
+        })
+      })
+      break // Successfully bound
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
-        port = await findAvailablePort(port + 1);
+        port = await findAvailablePort(port + 1)
       } else {
-        throw err;
+        throw err
       }
     }
   }
 
   if (port > MAX_PORT) {
-    throw new Error(`No available ports in range ${startPort}-${MAX_PORT}`);
+    throw new Error(`No available ports in range ${startPort}-${MAX_PORT}`)
   }
 
   const timeoutId = setTimeout(() => {
     if (!settled) {
-      settled = true;
-      resolveCallback?.({ success: false, reason: 'timeout' });
+      settled = true
+      resolveCallback?.({ success: false, reason: 'timeout' })
     }
-  }, TIMEOUT_MS);
+  }, TIMEOUT_MS)
 
   return {
     port,
-    waitForCallback(): Promise<OAuthCallbackResult> {
+    waitForCallback (): Promise<OAuthCallbackResult> {
       return new Promise((resolve) => {
         if (settled) {
-          resolve({ success: false, reason: 'timeout' });
-          return;
+          resolve({ success: false, reason: 'timeout' })
+          return
         }
         resolveCallback = (result) => {
-          clearTimeout(timeoutId);
-          resolve(result);
-        };
-      });
+          clearTimeout(timeoutId)
+          resolve(result)
+        }
+      })
     },
-    close(): Promise<void> {
-      clearTimeout(timeoutId);
+    close (): Promise<void> {
+      clearTimeout(timeoutId)
       if (!settled) {
-        settled = true;
-        resolveCallback?.({ success: false, reason: 'timeout' });
+        settled = true
+        resolveCallback?.({ success: false, reason: 'timeout' })
       }
       return new Promise<void>((resolve) => {
         if ('closeAllConnections' in server) {
-          server.closeAllConnections();
+          server.closeAllConnections()
         }
-        server.close(() => resolve());
-      });
+        server.close(() => resolve())
+      })
     },
-  };
+  }
 }
