@@ -146,47 +146,47 @@
 
 ## Phase 5: Harness Adapters
 
-### Task 15: Implement base harness adapter interface
-- **Description**: Create harness-adapter.ts with abstract base class or interface. Define methods: getMcpConfigPath(), getSkillsPath(), readMcpConfig(), writeMcpConfig(), supportsMcp(). Create adapter factory function.
+### Task 15: Implement base harness adapter interface ✓
+- [x] **Description**: Create harness-adapter.ts with abstract base class or interface. Define methods: getMcpConfigPath(), getSkillsPath(), readMcpConfig(), writeMcpConfig(), supportsMcp(). Create adapter factory function.
 - **Depends on**: Task 4
 - **Files**:
   - `packages/core/src/harnesses/harness-adapter.ts`
   - `packages/core/src/harnesses/index.ts` (export factory and types)
 - **Testing**: Type checking to ensure all adapters implement interface.
 
-### Task 16: Implement Claude Code adapter
-- **Description**: Create claude-adapter.ts for Claude Code harness. Config path: `~/.claude.json` (user-scoped MCP config — note: this is outside the `~/.claude/` directory). Skills path: `~/.claude/skills/`. JSON format. Supports MCP: true.
+### Task 16: Implement Claude Code adapter ✓
+- [x] **Description**: Create claude-adapter.ts for Claude Code harness. Config path: `~/.claude.json` (user-scoped MCP config — note: this is outside the `~/.claude/` directory). Skills path: `~/.claude/skills/`. JSON format. Supports MCP: true.
 - **Depends on**: Task 15
 - **Files**:
   - `packages/core/src/harnesses/claude-adapter.ts`
 - **Testing**: Unit tests for path resolution, config read/write with JSON format.
 - **Spec reference**: Claude Code configuration scenario in specs/installation-and-auth.md
 
-### Task 17: Implement Codex CLI adapter
-- **Description**: Create codex-adapter.ts for Codex CLI harness. Config path: `~/.codex/config.toml`. Skills path: `~/.codex/skills/`. TOML format. Supports MCP: true.
+### Task 17: Implement Codex CLI adapter ✓
+- [x] **Description**: Create codex-adapter.ts for Codex CLI harness. Config path: `~/.codex/config.toml`. Skills path: `~/.codex/skills/`. TOML format. Supports MCP: true.
 - **Depends on**: Task 15
 - **Files**:
   - `packages/core/src/harnesses/codex-adapter.ts`
 - **Testing**: Unit tests for path resolution, config read/write with TOML format.
 - **Spec reference**: Codex CLI configuration scenario in specs/installation-and-auth.md
 
-### Task 18: Implement OpenCode adapter
-- **Description**: Create opencode-adapter.ts for OpenCode harness. Config path: `~/.config/opencode/opencode.jsonc`. Skills path: `~/.config/opencode/skills/`. JSONC format (JSON with comments). Supports MCP: true.
+### Task 18: Implement OpenCode adapter ✓
+- [x] **Description**: Create opencode-adapter.ts for OpenCode harness. Config path: `~/.config/opencode/opencode.jsonc`. Skills path: `~/.config/opencode/skills/`. JSONC format (JSON with comments). Supports MCP: true.
 - **Depends on**: Task 15
 - **Files**:
   - `packages/core/src/harnesses/opencode-adapter.ts`
 - **Testing**: Unit tests for path resolution, config read/write with JSONC format (preserve comments).
 
-### Task 19: Implement Pi Agent adapter
-- **Description**: Create pi-adapter.ts for Pi Agent harness. No MCP config path (returns null). Skills path: `~/.pi/agent/skills/`. Note: Pi also reads from `~/.agents/skills/` natively. Supports MCP: false. Skip MCP configuration in install flow.
+### Task 19: Implement Pi Agent adapter ✓
+- [x] **Description**: Create pi-adapter.ts for Pi Agent harness. No MCP config path (returns null). Skills path: `~/.pi/agent/skills/`. Note: Pi also reads from `~/.agents/skills/` natively. Supports MCP: false. Skip MCP configuration in install flow.
 - **Depends on**: Task 15
 - **Files**:
   - `packages/core/src/harnesses/pi-adapter.ts`
 - **Testing**: Unit tests for path resolution, verify supportsMcp() returns false.
 - **Spec reference**: Pi Agent configuration scenario in specs/installation-and-auth.md
 
-### Task 19b: Implement Antigravity adapter
-- **Description**: Create antigravity-adapter.ts for Antigravity CLI harness. Config path: `~/.gemini/antigravity-cli/mcp_config.json`. Skills path: `~/.gemini/antigravity-cli/skills/`. JSON format. Supports MCP: true. Export from `packages/core/src/harnesses/index.ts`.
+### Task 19b: Implement Antigravity adapter ✓
+- [x] **Description**: Create antigravity-adapter.ts for Antigravity CLI harness. Config path: `~/.gemini/antigravity-cli/mcp_config.json`. Skills path: `~/.gemini/antigravity-cli/skills/`. JSON format. Supports MCP: true. Export from `packages/core/src/harnesses/index.ts`.
 - **Depends on**: Task 15
 - **Files**:
   - `packages/core/src/harnesses/antigravity-adapter.ts`

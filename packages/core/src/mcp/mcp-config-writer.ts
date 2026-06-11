@@ -7,7 +7,7 @@ import { writeJsonFileSync, atomicWriteSync, ensureDir } from '../utils/fs.js'
 import { mergeMcpConfig, removeMcpServers, expandVariables } from './mcp-config-merger.js'
 import type { NormalizedMcpConfig } from './mcp-config-merger.js'
 
-type ConfigFormat = 'json' | 'toml' | 'jsonc'
+export type ConfigFormat = 'json' | 'toml' | 'jsonc'
 
 interface ConfigInfo {
   configPath: string
@@ -29,7 +29,7 @@ function getMcpConfigInfo (harness: HarnessType): ConfigInfo | null {
   }
 }
 
-function readExistingConfig (configPath: string, format: ConfigFormat): NormalizedMcpConfig {
+export function readExistingConfig (configPath: string, format: ConfigFormat): NormalizedMcpConfig {
   switch (format) {
     case 'json': {
       const data = readJsonFile<Record<string, unknown>>(configPath)
