@@ -4,6 +4,22 @@ import type { SkillRef } from '../types.js'
 import { getSkillsDir } from '../utils/path.js'
 import { ensureDir } from '../utils/fs.js'
 
+function assertSafeSkillPath (sourceDir: string, skillPath: string): string {
+  const resolved = path.resolve(sourceDir, skillPath)
+  const resolvedBase = path.resolve(sourceDir)
+  if (resolved !== resolvedBase && !resolved.startsWith(resolvedBase + path.sep)) {
+    throw new Error(`Skill path escapes source directory: ${skillPath}`)
+  }
+  return resolved
+}
+
+function assertSafeSkillName (name: string): string {
+  if (name === '.' || name !== path.basename(name) || name.includes('..') || name.includes(path.sep)) {
+    throw new Error(`Invalid skill name: ${name}`)
+  }
+  return name
+}
+
 export class SkillCopyError extends Error {
   constructor (
     public readonly skill: string,
@@ -20,8 +36,9 @@ export async function installSkills (skills: SkillRef[], sourceDir: string): Pro
   ensureDir(destDir)
 
   for (const skill of skills) {
-    const srcPath = path.join(sourceDir, skill.path)
-    const destPath = path.join(destDir, skill.name)
+    const safeName = assertSafeSkillName(skill.name)
+    const srcPath = assertSafeSkillPath(sourceDir, skill.path)
+    const destPath = path.join(destDir, safeName)
 
     try {
       await access(srcPath)
@@ -41,11 +58,15 @@ export async function uninstallSkills (skills: SkillRef[]): Promise<void> {
   const destDir = getSkillsDir()
 
   for (const skill of skills) {
-    const destPath = path.join(destDir, skill.name)
+    const safeName = assertSafeSkillName(skill.name)
+    const destPath = path.join(destDir, safeName)
     try {
       await access(destPath)
       await rm(destPath, { recursive: true, force: true })
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err
+      }
       // Best-effort: ignore missing skills
     }
   }

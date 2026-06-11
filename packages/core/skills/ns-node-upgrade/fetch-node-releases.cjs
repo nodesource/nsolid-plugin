@@ -87,7 +87,10 @@ async function fetchReleases () {
 
   if (!releases || releases.length === 0) {
     process.stderr.write('Warning: could not fetch live release schedule, using embedded fallback.\n')
+    const now = new Date()
     releases = FALLBACK
+      .filter(r => new Date(r.eol) > now)
+      .sort((a, b) => Number(b.cycle) - Number(a.cycle))
   }
 
   process.stdout.write(formatTable(releases) + '\n')

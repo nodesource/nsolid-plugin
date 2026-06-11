@@ -16,6 +16,9 @@
 //
 // Output files:
 //   .nsolid/assets/<assetType>-<appName>-<assetIdPrefix>.<ext>
+//
+// Note: This script is designed for single-process/single-user workflows.
+// Concurrent executions may race on file operations and index updates.
 
 'use strict'
 

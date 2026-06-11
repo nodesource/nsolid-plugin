@@ -504,6 +504,16 @@ function resolveSafeWorkspacePath (workspaceRoot, relativePath) {
     return null
   }
 
+  let stat
+  try {
+    stat = fs.statSync(realAbsolute)
+  } catch {
+    return null
+  }
+  if (!stat.isFile()) {
+    return null
+  }
+
   return realAbsolute
 }
 
@@ -548,6 +558,10 @@ function selectWorkspaceSlice (lines, input) {
 function buildUnifiedDiff (runtimeCode, workspaceCode) {
   const runtimeLines = runtimeCode.split(/\r?\n/)
   const workspaceLines = workspaceCode.split(/\r?\n/)
+  const MAX_DIFF_CELLS = 2_000_000
+  if ((runtimeLines.length + 1) * (workspaceLines.length + 1) > MAX_DIFF_CELLS) {
+    return '@@ runtime vs workspace @@\n... diff omitted (selection too large) ...'
+  }
   const dp = Array.from({ length: runtimeLines.length + 1 }, () => Array(workspaceLines.length + 1).fill(0))
 
   for (let i = runtimeLines.length - 1; i >= 0; i--) {

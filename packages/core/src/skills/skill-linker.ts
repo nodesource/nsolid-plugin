@@ -4,6 +4,13 @@ import type { HarnessType, SkillRef } from '../types.js'
 import { getSkillsDir, resolveHome } from '../utils/path.js'
 import { ensureDir } from '../utils/fs.js'
 
+function assertSafeSkillName (name: string): string {
+  if (name !== path.basename(name) || name.includes('..') || name.includes(path.sep)) {
+    throw new Error(`Invalid skill name: ${name}`)
+  }
+  return name
+}
+
 export type LinkStatus = 'skipped' | 'replaced' | 'backed-up' | 'created'
 
 export interface LinkResult {
@@ -40,8 +47,9 @@ export async function linkSkillsToHarness (
   const isPi = harness === 'pi'
 
   for (const skill of skills) {
-    const source = path.join(getSkillsDir(), skill.name)
-    const target = path.join(harnessDir, skill.name)
+    const safeName = assertSafeSkillName(skill.name)
+    const source = path.join(getSkillsDir(), safeName)
+    const target = path.join(harnessDir, safeName)
 
     const status = await createIdempotentLink(source, target, isPi)
     results.push({ skill: skill.name, status, target })
@@ -57,11 +65,15 @@ export async function unlinkSkillsFromHarness (
   const harnessDir = getHarnessSkillsPath(harness)
 
   for (const skill of skills) {
-    const target = path.join(harnessDir, skill.name)
+    const safeName = assertSafeSkillName(skill.name)
+    const target = path.join(harnessDir, safeName)
     try {
       await access(target)
       await rm(target, { recursive: true, force: true })
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err
+      }
       // Best-effort: ignore missing
     }
   }
@@ -79,7 +91,7 @@ async function createIdempotentLink (
       const existingTarget = await readlink(target)
       const resolvedExisting = path.resolve(path.dirname(target), existingTarget)
 
-      if (resolvedExisting === path.resolve(source)) {
+      if (!alwaysCopy && resolvedExisting === path.resolve(source)) {
         return 'skipped'
       }
 

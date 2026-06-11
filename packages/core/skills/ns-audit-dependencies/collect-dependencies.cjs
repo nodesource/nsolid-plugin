@@ -239,6 +239,14 @@ function batch (arr, size) {
   const directDeps = getDirectDeps(pkgJsonPath)
   const pkgJsonContent = fs.readFileSync(pkgJsonPath, 'utf8')
 
+  let declaredPm = null
+  try {
+    const parsedPkg = JSON.parse(pkgJsonContent)
+    if (typeof parsedPkg.packageManager === 'string') {
+      declaredPm = parsedPkg.packageManager.split('@')[0]
+    }
+  } catch {}
+
   let packageManager = 'npm'
   let deps = []
 
@@ -246,7 +254,16 @@ function batch (arr, size) {
   const yarnLock = path.join(dir, 'yarn.lock')
   const pnpmLock = path.join(dir, 'pnpm-lock.yaml')
 
-  if (fs.existsSync(npmLock)) {
+  if (declaredPm === 'npm' && fs.existsSync(npmLock)) {
+    packageManager = 'npm'
+    deps = parseNpm(fs.readFileSync(npmLock, 'utf8'), directDeps)
+  } else if (declaredPm === 'yarn' && fs.existsSync(yarnLock)) {
+    packageManager = 'yarn'
+    deps = parseYarn(fs.readFileSync(yarnLock, 'utf8'), directDeps)
+  } else if (declaredPm === 'pnpm' && fs.existsSync(pnpmLock)) {
+    packageManager = 'pnpm'
+    deps = parsePnpm(fs.readFileSync(pnpmLock, 'utf8'), directDeps)
+  } else if (fs.existsSync(npmLock)) {
     packageManager = 'npm'
     deps = parseNpm(fs.readFileSync(npmLock, 'utf8'), directDeps)
   } else if (fs.existsSync(yarnLock)) {
