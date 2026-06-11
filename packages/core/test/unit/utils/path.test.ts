@@ -37,11 +37,11 @@ describe('resolveHome', () => {
   })
 
   it('expands ~\\ on Windows-style inputs', () => {
-    assert.strictEqual(resolveHome('~\\test\\path'), path.join(os.homedir(), '\\test\\path'))
+    assert.strictEqual(resolveHome('~\\test\\path'), path.join(os.homedir(), 'test', 'path'))
   })
 
   it('expands ~\\ to home dir', () => {
-    assert.strictEqual(resolveHome('~\\'), path.join(os.homedir(), '\\'))
+    assert.strictEqual(resolveHome('~\\'), os.homedir() + path.sep)
   })
 })
 

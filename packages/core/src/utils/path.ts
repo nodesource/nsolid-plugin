@@ -3,7 +3,7 @@ import path from 'node:path'
 
 export function resolveHome (tildePath: string): string {
   if (tildePath === '~' || tildePath.startsWith('~/') || tildePath.startsWith('~\\')) {
-    return path.join(os.homedir(), tildePath.slice(1))
+    return path.join(os.homedir(), tildePath.slice(1).replace(/\\/g, path.sep))
   }
   return tildePath
 }

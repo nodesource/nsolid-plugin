@@ -52,6 +52,7 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
   let port = await findAvailablePort(startPort)
   let resolveCallback: ((result: OAuthCallbackResult) => void) | null = null
   let settled = false
+  let settledResult: OAuthCallbackResult | null = null
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -73,16 +74,18 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
       res.end('<html><body><h1>Authentication failed</h1><p>Authentication was not successful.</p></body></html>')
       if (!settled) {
         settled = true
-        resolveCallback?.({ success: false, reason: 'auth-failed' })
+        settledResult = { success: false, reason: 'auth-failed' }
+        resolveCallback?.(settledResult)
       }
       return
     }
 
     if (token && consoleId && saasToken && consoleUrl && !settled) {
       settled = true
+      settledResult = { success: true, token, consoleId, saasToken, consoleUrl }
       res.writeHead(200, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>')
-      resolveCallback?.({ success: true, token, consoleId, saasToken, consoleUrl })
+      resolveCallback?.(settledResult)
     } else {
       res.writeHead(400, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>Authentication failed</h1><p>Missing required parameters.</p></body></html>')
@@ -116,7 +119,8 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
   const timeoutId = setTimeout(() => {
     if (!settled) {
       settled = true
-      resolveCallback?.({ success: false, reason: 'timeout' })
+      settledResult = { success: false, reason: 'timeout' }
+      resolveCallback?.(settledResult)
     }
   }, TIMEOUT_MS)
 
@@ -125,7 +129,7 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
     waitForCallback (): Promise<OAuthCallbackResult> {
       return new Promise((resolve) => {
         if (settled) {
-          resolve({ success: false, reason: 'timeout' })
+          resolve(settledResult!)
           return
         }
         resolveCallback = (result) => {
@@ -138,7 +142,8 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
       clearTimeout(timeoutId)
       if (!settled) {
         settled = true
-        resolveCallback?.({ success: false, reason: 'timeout' })
+        settledResult = { success: false, reason: 'timeout' }
+        resolveCallback?.(settledResult)
       }
       return new Promise<void>((resolve) => {
         if ('closeAllConnections' in server) {
