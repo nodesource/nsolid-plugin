@@ -18,6 +18,8 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
   if (originalHome !== undefined) {
     process.env.HOME = originalHome
+  } else {
+    delete process.env.HOME
   }
 })
 
@@ -115,7 +117,10 @@ describe('uninstallSkills error handling', () => {
     chmodSync(destDir, 0o555)
 
     try {
-      await assert.rejects(uninstallSkills([{ name: 'ns-test', path: 'skills/ns-test', description: 'test' }]))
+      await assert.rejects(
+        uninstallSkills([{ name: 'ns-test', path: 'skills/ns-test', description: 'test' }]),
+        (err: Error) => (err as NodeJS.ErrnoException).code !== 'ENOENT'
+      )
     } finally {
       chmodSync(destDir, 0o755)
     }
