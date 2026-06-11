@@ -365,4 +365,26 @@ describe('removeMcpConfig', () => {
     const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
     assert.strictEqual(existsSync(configPath), false)
   })
+
+  it('removes mcpServers when it is not the last property in JSONC', async () => {
+    const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+
+    const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '{\n  "mcpServers": {\n    "ns-benchmark": { "command": "node", "args": ["a.js"] }\n  },\n  "version": "1.0"\n}\n')
+
+    await removeMcpConfig('opencode', ['ns-benchmark'])
+
+    const content = readFileSync(configPath, 'utf-8')
+    assert.ok(!content.includes('ns-benchmark'))
+    assert.ok(content.includes('"version": "1.0"'))
+
+    // Verify it's valid JSON
+    const parsed = JSON.parse(content)
+    assert.strictEqual(parsed.version, '1.0')
+    assert.ok(!('mcpServers' in parsed))
+  })
 })
