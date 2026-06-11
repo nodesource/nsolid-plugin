@@ -150,6 +150,54 @@ describe('writeMcpConfig', () => {
     assert.ok('ns-benchmark' in content.mcpServers)
   })
 
+  it('preserves other top-level keys in JSON config', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+
+    const configPath = resolveHome('~/.claude.json')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, JSON.stringify({
+      version: '1.0',
+      theme: 'dark',
+      mcpServers: {
+        'my-server': { command: 'python', args: ['server.py'] },
+      },
+    }, null, 2) + '\n')
+
+    await writeMcpConfig('claude', [serverA])
+
+    const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.strictEqual(content.version, '1.0')
+    assert.strictEqual(content.theme, 'dark')
+    assert.ok('my-server' in content.mcpServers)
+    assert.ok('ns-benchmark' in content.mcpServers)
+  })
+
+  it('preserves other top-level keys in TOML config', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+    const { parse: parseToml } = await import('smol-toml')
+
+    const configPath = resolveHome('~/.codex/config.toml')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '[model]\nname = "gpt-4"\ntemperature = 0.7\n\n[mcp_servers.existing]\ncommand = "node"\nargs = ["server.js"]\n')
+
+    await writeMcpConfig('codex', [serverA])
+
+    const content = parseToml(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+    const model = content.model as Record<string, unknown>
+    assert.strictEqual(model.name, 'gpt-4')
+    assert.strictEqual(model.temperature, 0.7)
+    assert.ok('mcp_servers' in content)
+    const servers = content.mcp_servers as Record<string, unknown>
+    assert.ok('existing' in servers)
+    assert.ok('ns-benchmark' in servers)
+  })
+
   it('skips Pi harness', async () => {
     const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
 
@@ -208,5 +256,27 @@ describe('removeMcpConfig', () => {
 
     const result = await removeMcpConfig('antigravity', ['ns-benchmark'])
     assert.strictEqual(result, undefined)
+  })
+
+  it('removes mcpServers when it is not the last property in JSONC', async () => {
+    const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+
+    const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '{\n  "mcpServers": {\n    "ns-benchmark": { "command": "node", "args": ["a.js"] }\n  },\n  "version": "1.0"\n}\n')
+
+    await removeMcpConfig('opencode', ['ns-benchmark'])
+
+    const content = readFileSync(configPath, 'utf-8')
+    assert.ok(!content.includes('ns-benchmark'))
+    assert.ok(content.includes('"version": "1.0"'))
+
+    // Verify it's valid JSON
+    const parsed = JSON.parse(content)
+    assert.strictEqual(parsed.version, '1.0')
+    assert.ok(!('mcpServers' in parsed))
   })
 })

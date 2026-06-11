@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { SkillRef } from '../../../src/types.js'
@@ -42,7 +42,6 @@ describe('installSkills security', () => {
     )
   })
 
-
   it('rejects path traversal in skill.name', async () => {
     const { installSkills } = await import('../../../src/skills/skill-copier.js')
     const sourceDir = join(tmpDir, 'source')
@@ -63,6 +62,80 @@ describe('installSkills security', () => {
     )
   })
 
+  it('rejects dot as skill name', async () => {
+    const { installSkills } = await import('../../../src/skills/skill-copier.js')
+    const sourceDir = join(tmpDir, 'source')
+    mkdirSync(sourceDir, { recursive: true })
+
+    const maliciousSkill: SkillRef = {
+      name: '.',
+      path: '.',
+      description: 'test'
+    }
+
+    await assert.rejects(
+      installSkills([maliciousSkill], sourceDir),
+      /Invalid skill name/
+    )
+  })
+
+  it('rejects empty string as skill name', async () => {
+    const { installSkills } = await import('../../../src/skills/skill-copier.js')
+    const sourceDir = join(tmpDir, 'source')
+    mkdirSync(sourceDir, { recursive: true })
+
+    const maliciousSkill: SkillRef = {
+      name: '',
+      path: '.',
+      description: 'test'
+    }
+
+    await assert.rejects(
+      installSkills([maliciousSkill], sourceDir),
+      /Invalid skill name/
+    )
+  })
+
+  it('rejects double-dot as skill name', async () => {
+    const { installSkills } = await import('../../../src/skills/skill-copier.js')
+    const sourceDir = join(tmpDir, 'source')
+    mkdirSync(sourceDir, { recursive: true })
+
+    const maliciousSkill: SkillRef = {
+      name: '..',
+      path: '.',
+      description: 'test'
+    }
+
+    await assert.rejects(
+      installSkills([maliciousSkill], sourceDir),
+      /Invalid skill name/
+    )
+  })
+
+  it('allows valid paths when sourceDir is root', async () => {
+    const { installSkills } = await import('../../../src/skills/skill-copier.js')
+
+    // Create a skill directory at root level (in tmpDir to avoid actual root)
+    const rootDir = join(tmpDir, 'root')
+    mkdirSync(rootDir, { recursive: true })
+    const skillDir = join(rootDir, 'skills', 'ns-test')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(join(skillDir, 'SKILL.md'), '# test')
+
+    const validSkill: SkillRef = {
+      name: 'ns-test',
+      path: 'skills/ns-test',
+      description: 'test'
+    }
+
+    // Should not throw
+    await installSkills([validSkill], rootDir)
+
+    // Verify skill was installed
+    const destDir = join(tmpDir, '.agents', 'skills', 'ns-test')
+    assert.ok(existsSync(destDir))
+  })
 })
 
 describe('uninstallSkills error handling', () => {

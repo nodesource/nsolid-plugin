@@ -72,9 +72,12 @@ function writeConfigFile (
   ensureDir(path.dirname(configPath))
 
   switch (format) {
-    case 'json':
-      writeJsonFileSync(configPath, config)
+    case 'json': {
+      const existingFull = readJsonFile<Record<string, unknown>>(configPath) ?? {}
+      existingFull.mcpServers = config.mcpServers
+      writeJsonFileSync(configPath, existingFull)
       break
+    }
     case 'toml':
       writeTomlConfig(configPath, config)
       break
@@ -85,7 +88,8 @@ function writeConfigFile (
 }
 
 function writeTomlConfig (configPath: string, config: NormalizedMcpConfig): void {
-  const tomlData: Record<string, unknown> = {}
+  const tomlData: Record<string, unknown> = readTomlFile<Record<string, unknown>>(configPath) ?? {}
+
   if (Object.keys(config.mcpServers).length > 0) {
     const servers: Record<string, unknown> = {}
     for (const [name, srv] of Object.entries(config.mcpServers)) {
@@ -96,6 +100,8 @@ function writeTomlConfig (configPath: string, config: NormalizedMcpConfig): void
       }
     }
     tomlData.mcp_servers = servers
+  } else {
+    delete tomlData.mcp_servers
   }
   writeTomlFileSync(configPath, tomlData)
 }
@@ -244,6 +250,12 @@ function removeMcpServersBlockFromRaw (raw: string): string {
   // Remove trailing comma before the block if present
   if (before.endsWith(',')) {
     return before.slice(0, -1) + '\n' + after.trimStart()
+  }
+
+  // Otherwise, remove leading comma from after if present
+  const trimmedAfter = after.trimStart()
+  if (trimmedAfter.startsWith(',')) {
+    return before + '\n' + trimmedAfter.slice(1).trimStart()
   }
 
   return before + after
