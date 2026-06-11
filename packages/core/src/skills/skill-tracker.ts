@@ -16,6 +16,7 @@ export interface McpTrackingEntry {
   name: string;
   configPath: string;
   harness: string;
+  configuredAt: string;
 }
 
 export interface TrackingData {

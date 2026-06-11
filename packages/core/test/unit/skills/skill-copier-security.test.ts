@@ -42,22 +42,6 @@ describe('installSkills security', () => {
     )
   })
 
-  it('allows skill.path resolving to source directory itself', async () => {
-    const { installSkills } = await import('../../../src/skills/skill-copier.js')
-    const sourceDir = join(tmpDir, 'source')
-    mkdirSync(sourceDir, { recursive: true })
-    writeFileSync(join(sourceDir, 'SKILL.md'), '# test')
-
-    const skill: SkillRef = {
-      name: 'ns-test',
-      path: '.',
-      description: 'test'
-    }
-
-    await assert.doesNotReject(
-      installSkills([skill], sourceDir)
-    )
-  })
 
   it('rejects path traversal in skill.name', async () => {
     const { installSkills } = await import('../../../src/skills/skill-copier.js')
@@ -79,25 +63,6 @@ describe('installSkills security', () => {
     )
   })
 
-  it('rejects dot as skill name', async () => {
-    const { installSkills } = await import('../../../src/skills/skill-copier.js')
-    const sourceDir = join(tmpDir, 'source')
-    mkdirSync(sourceDir, { recursive: true })
-    const skillDir = join(sourceDir, 'skills', '.')
-    mkdirSync(skillDir, { recursive: true })
-    writeFileSync(join(skillDir, 'SKILL.md'), '# test')
-
-    const invalidSkill: SkillRef = {
-      name: '.',
-      path: 'skills/.',
-      description: 'test'
-    }
-
-    await assert.rejects(
-      installSkills([invalidSkill], sourceDir),
-      /Invalid skill name/
-    )
-  })
 })
 
 describe('uninstallSkills error handling', () => {

@@ -8,11 +8,12 @@ import { assertSafeSkillName } from '../utils/skill-name.js'
 function assertSafeSkillPath (sourceDir: string, skillPath: string): string {
   const resolved = path.resolve(sourceDir, skillPath)
   const resolvedBase = path.resolve(sourceDir)
-  if (resolved !== resolvedBase && !resolved.startsWith(resolvedBase + path.sep)) {
+  if (!resolved.startsWith(resolvedBase + path.sep)) {
     throw new Error(`Skill path escapes source directory: ${skillPath}`)
   }
   return resolved
 }
+
 
 export class SkillCopyError extends Error {
   constructor (

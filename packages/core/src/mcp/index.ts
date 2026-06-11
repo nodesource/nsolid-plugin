@@ -1,0 +1,5 @@
+export { mergeMcpConfig, removeMcpServers, expandVariables } from './mcp-config-merger.js'
+export type { McpServerConfig, NormalizedMcpConfig } from './mcp-config-merger.js'
+export { writeMcpConfig, removeMcpConfig } from './mcp-config-writer.js'
+export { addTrackedMcps, removeTrackedMcps, listTrackedMcps } from './mcp-tracker.js'
+export type { McpTrackingEntry } from './mcp-tracker.js'

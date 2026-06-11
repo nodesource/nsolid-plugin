@@ -120,24 +120,24 @@
 
 ## Phase 4: MCP Configuration Module
 
-### Task 12: Implement MCP config merger
-- **Description**: Create mcp-config-merger.ts to merge NodeSource MCP servers into existing harness config without overwriting user's existing servers. Deep merge mcpServers object. Preserve all non-NodeSource entries.
+### Task 12: Implement MCP config merger ✓
+- [x] **Description**: Create mcp-config-merger.ts to merge NodeSource MCP servers into existing harness config without overwriting user's existing servers. Deep merge mcpServers object. Preserve all non-NodeSource entries.
 - **Depends on**: Task 4
 - **Files**:
   - `packages/core/src/mcp/mcp-config-merger.ts`
 - **Testing**: Unit tests for merge logic. Test with empty config, existing NodeSource entries (update), existing user entries (preserve), mixed scenario.
 - **Spec reference**: Installation with existing user configurations scenario in specs/installation-and-auth.md
 
-### Task 13: Implement MCP config writer
-- **Description**: Create mcp-config-writer.ts to write MCP configurations to harness-specific paths. Use harness adapter to get config path and format (JSON/TOML). Read existing config, merge, write back atomically.
+### Task 13: Implement MCP config writer ✓
+- [x] **Description**: Create mcp-config-writer.ts to write MCP configurations to harness-specific paths. Use harness adapter to get config path and format (JSON/TOML). Read existing config, merge, write back atomically.
 - **Depends on**: Tasks 12, 4
 - **Files**:
   - `packages/core/src/mcp/mcp-config-writer.ts`
 - **Testing**: Unit tests with mocked file system. Test JSON (Claude/OpenCode) and TOML (Codex) formats. Test handling of invalid existing config.
 - **Spec reference**: Per-harness configuration mapping in specs/installation-and-auth.md
 
-### Task 14: Implement MCP tracker module
-- **Description**: Create mcp-tracker.ts to record configured MCP servers in tracking file. Store server name, config path, configuration timestamp, and **harness** (string identifying which harness the MCP was configured for). All read/write functions (`addTrackedMcp`, `removeTrackedMcp`, `readMcpTrackingFile`, `listTrackedMcps`) persist and return harness alongside other fields. Handle missing/corrupted harness values (default to `"unknown"` or error). Support lookup by harness for targeted uninstalls. Handle missing/corrupted tracking file gracefully.
+### Task 14: Implement MCP tracker module ✓
+- [x] **Description**: Create mcp-tracker.ts to record configured MCP servers in tracking file. Store server name, config path, configuration timestamp, and **harness** (string identifying which harness the MCP was configured for). All read/write functions (`addTrackedMcp`, `removeTrackedMcp`, `readMcpTrackingFile`, `listTrackedMcps`) persist and return harness alongside other fields. Handle missing/corrupted harness values (default to `"unknown"` or error). Support lookup by harness for targeted uninstalls. Handle missing/corrupted tracking file gracefully.
 - **Depends on**: Task 13
 - **Files**:
   - `packages/core/src/mcp/mcp-tracker.ts`
