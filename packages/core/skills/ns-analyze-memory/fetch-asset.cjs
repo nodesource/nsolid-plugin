@@ -25,6 +25,8 @@
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const dns = require('dns').promises
+const net = require('net')
 
 const EXTENSIONS = {
   cpuprofile: '.cpuprofile',
@@ -172,7 +174,140 @@ function ensureFlatAsset (workspaceRoot, assetId, assetType, appName) {
   }
 }
 
-function readCredentials () {
+function expandIPv6 (ip) {
+  // IPv4-mapped/compatible addresses embed a dotted IPv4 at the end and must
+  // not be expanded with the generic :: handler below.
+  const embeddedIpv4 = extractIpv4FromIpv6(ip)
+  if (embeddedIpv4) {
+    return null
+  }
+
+  let expanded = ip.toLowerCase()
+  if (expanded.includes('::')) {
+    const [left, right] = expanded.split('::')
+    const leftParts = left ? left.split(':') : []
+    const rightParts = right ? right.split(':') : []
+    const missing = 8 - leftParts.length - rightParts.length
+    const middle = Array(Math.max(missing, 0)).fill('0000')
+    expanded = [...leftParts, ...middle, ...rightParts].join(':')
+  }
+  return expanded.split(':').map(p => p.padStart(4, '0')).join(':')
+}
+
+function extractIpv4FromIpv6 (ip) {
+  // IPv4-mapped:  ::ffff:a.b.c.d  or  0:0:0:0:0:ffff:a.b.c.d
+  const mapped = ip.match(/^(?:::|(?:0:){5})ffff:(\d+\.\d+\.\d+\.\d+)$/i)
+  if (mapped) return mapped[1]
+  // IPv4-compatible:  ::a.b.c.d  or  0:0:0:0:0:0:a.b.c.d
+  const compatible = ip.match(/^(?:::|(?:0:){6})(\d+\.\d+\.\d+\.\d+)$/i)
+  if (compatible) return compatible[1]
+  return null
+}
+
+function isPrivateOrLocalIp (ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number)
+    if (a === 127) return true // loopback 127.0.0.0/8
+    if (a === 10) return true // private 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true // private 172.16.0.0/12
+    if (a === 192 && b === 168) return true // private 192.168.0.0/16
+    if (a === 169 && b === 254) return true // link-local 169.254.0.0/16
+    if (a === 0) return true // current network 0.0.0.0/8
+    return false
+  }
+
+  if (net.isIPv6(ip)) {
+    const embeddedIpv4 = extractIpv4FromIpv6(ip)
+    if (embeddedIpv4) {
+      return isPrivateOrLocalIp(embeddedIpv4)
+    }
+
+    const normalized = expandIPv6(ip)
+    if (normalized === null) {
+      // Defensive: extractIpv4FromIpv6 should have matched any mapped/compatible
+      // address that net.isIPv6 accepted, but treat unexpected forms as unsafe.
+      return true
+    }
+
+    // URL parsers normalize IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible
+    // (::a.b.c.d) addresses to pure hex. Detect those forms by prefix.
+    if (normalized.startsWith('0000:0000:0000:0000:0000:ffff:') ||
+        normalized.startsWith('0000:0000:0000:0000:0000:0000:')) {
+      const high = parseInt(normalized.slice(30, 34), 16)
+      const low = parseInt(normalized.slice(35, 39), 16)
+      const ipv4 = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`
+      return isPrivateOrLocalIp(ipv4)
+    }
+
+    const first16 = parseInt(normalized.slice(0, 4), 16)
+    if (normalized === '0000:0000:0000:0000:0000:0000:0000:0001') return true // ::1
+    if ((first16 & 0xffc0) === 0xfe80) return true // link-local fe80::/10
+    if ((first16 & 0xfe00) === 0xfc00) return true // unique local fc00::/7
+    return false
+  }
+
+  return false
+}
+
+async function resolveHostnameIps (hostname) {
+  const raw = hostname.replace(/^\[/, '').replace(/\]$/, '')
+  const ipVersion = net.isIP(raw)
+
+  if (ipVersion === 4) {
+    return [raw]
+  }
+  if (ipVersion === 6) {
+    return [raw]
+  }
+
+  const ips = []
+  try {
+    ips.push(...await dns.resolve(raw, 'A'))
+  } catch {
+    // ignore resolution errors for A records
+  }
+  try {
+    ips.push(...await dns.resolve(raw, 'AAAA'))
+  } catch {
+    // ignore resolution errors for AAAA records
+  }
+  return ips
+}
+
+async function validateConsoleUrl (consoleUrl) {
+  let url
+  try {
+    url = new URL(consoleUrl)
+  } catch {
+    throw new Error(`Invalid consoleUrl: ${consoleUrl}`)
+  }
+
+  if (process.env.NSOLID_ALLOW_INSECURE_CONSOLE) {
+    return
+  }
+
+  if (url.protocol !== 'https:') {
+    throw new Error(`consoleUrl must use HTTPS: ${consoleUrl}`)
+  }
+
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, '')
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1') {
+    throw new Error(`consoleUrl cannot be localhost: ${consoleUrl}`)
+  }
+
+  const ips = await resolveHostnameIps(url.hostname)
+  if (ips.length === 0) {
+    throw new Error(`consoleUrl hostname could not be resolved: ${consoleUrl}`)
+  }
+
+  for (const ip of ips) {
+    if (isPrivateOrLocalIp(ip)) {
+      throw new Error(`consoleUrl resolves to a private or local address: ${consoleUrl} (${ip})`)
+    }
+  }
+}
+
+async function readCredentials () {
   const authPath = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
 
   if (!fs.existsSync(authPath)) {
@@ -197,21 +332,7 @@ function readCredentials () {
     throw new Error('Missing "serviceToken" in ~/.agents/.nodesource-auth.json')
   }
 
-  let url
-  try {
-    url = new URL(consoleUrl)
-  } catch {
-    throw new Error(`Invalid consoleUrl: ${consoleUrl}`)
-  }
-
-  if (!process.env.NSOLID_ALLOW_INSECURE_CONSOLE) {
-    if (url.protocol !== 'https:') {
-      throw new Error(`consoleUrl must use HTTPS: ${consoleUrl}`)
-    }
-    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]') {
-      throw new Error(`consoleUrl cannot be localhost: ${consoleUrl}`)
-    }
-  }
+  await validateConsoleUrl(consoleUrl)
 
   return { consoleUrl: consoleUrl.replace(/\/$/, ''), token }
 }
@@ -251,7 +372,7 @@ async function main () {
   }
 
   const workspaceRoot = process.cwd()
-  const { consoleUrl, token } = readCredentials()
+  const { consoleUrl, token } = await readCredentials()
 
   const assetsDir = getAssetsDir(workspaceRoot)
   fs.mkdirSync(assetsDir, { recursive: true })
@@ -290,7 +411,11 @@ async function main () {
   console.log(`File size: ${(fileSize / 1024).toFixed(1)} KB`)
 }
 
-main().catch((err) => {
-  console.error(`Error: ${err.message}`)
-  process.exit(1)
-})
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`Error: ${err.message}`)
+    process.exit(1)
+  })
+}
+
+module.exports = { isPrivateOrLocalIp, resolveHostnameIps, validateConsoleUrl, readCredentials, fetchAsset }
