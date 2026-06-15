@@ -283,17 +283,13 @@ export async function writeMcpConfig (
   writeConfigFile(info.configPath, info.format, merged)
 }
 
-export async function writeAdapterMcpConfig (
+export function writeAdapterMcpConfig (
   harness: HarnessType,
   config: NormalizedMcpConfig
-): Promise<void> {
-  const servers = Object.entries(config.mcpServers).map(([name, cfg]) => ({
-    name,
-    command: cfg.command,
-    args: cfg.args,
-    ...(cfg.env ? { env: cfg.env } : {}),
-  }))
-  await writeMcpConfig(harness, servers)
+): void {
+  const info = getMcpConfigInfo(harness)
+  if (!info) return
+  writeConfigFile(info.configPath, info.format, config)
 }
 
 export async function removeMcpConfig (

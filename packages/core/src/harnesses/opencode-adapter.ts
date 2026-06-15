@@ -23,6 +23,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   async writeMcpConfig (config: McpConfig): Promise<void> {
-    await writeAdapterMcpConfig(this.name, config)
+    writeAdapterMcpConfig(this.name, config)
   }
 }
