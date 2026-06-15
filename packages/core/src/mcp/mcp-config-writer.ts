@@ -14,6 +14,12 @@ interface ConfigInfo {
   format: ConfigFormat
 }
 
+function formatFromPath (configPath: string): ConfigFormat {
+  if (configPath.endsWith('.toml')) return 'toml'
+  if (configPath.endsWith('.jsonc')) return 'jsonc'
+  return 'json'
+}
+
 function getMcpConfigInfo (harness: HarnessType): ConfigInfo | null {
   switch (harness) {
     case 'claude':
@@ -268,19 +274,21 @@ function removeMcpServersBlockFromRaw (raw: string): string {
 export async function writeMcpConfig (
   harness: HarnessType,
   servers: McpServerRef[],
-  variables?: Record<string, string>
+  variables?: Record<string, string>,
+  options?: { configPath?: string }
 ): Promise<void> {
-  const info = getMcpConfigInfo(harness)
-  if (!info) return
+  const resolvedPath = options?.configPath ?? getMcpConfigInfo(harness)?.configPath
+  if (!resolvedPath) return
+  const format = options?.configPath ? formatFromPath(options.configPath) : getMcpConfigInfo(harness)!.format
 
   let resolvedServers = servers
   if (variables) {
     resolvedServers = expandVariables(servers, variables)
   }
 
-  const existing = readExistingConfig(info.configPath, info.format)
+  const existing = readExistingConfig(resolvedPath, format)
   const merged = mergeMcpConfig(existing, resolvedServers)
-  writeConfigFile(info.configPath, info.format, merged)
+  writeConfigFile(resolvedPath, format, merged)
 }
 
 export function writeAdapterMcpConfig (
@@ -294,13 +302,15 @@ export function writeAdapterMcpConfig (
 
 export async function removeMcpConfig (
   harness: HarnessType,
-  serverNames: string[]
+  serverNames: string[],
+  options?: { configPath?: string }
 ): Promise<void> {
-  const info = getMcpConfigInfo(harness)
-  if (!info) return
-  if (!existsSync(info.configPath)) return
+  const resolvedPath = options?.configPath ?? getMcpConfigInfo(harness)?.configPath
+  if (!resolvedPath) return
+  if (!existsSync(resolvedPath)) return
+  const format = options?.configPath ? formatFromPath(options.configPath) : getMcpConfigInfo(harness)!.format
 
-  const existing = readExistingConfig(info.configPath, info.format)
+  const existing = readExistingConfig(resolvedPath, format)
   const result = removeMcpServers(existing, serverNames)
-  writeConfigFile(info.configPath, info.format, result)
+  writeConfigFile(resolvedPath, format, result)
 }

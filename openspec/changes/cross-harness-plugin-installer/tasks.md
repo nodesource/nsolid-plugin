@@ -195,24 +195,24 @@
 
 ## Phase 6: Core Installer Orchestration
 
-### Task 20: Implement main installer orchestrator
-- **Description**: Create index.ts with `install()` function. Orchestrate flow: load bundle → ensure auth → install skills → configure MCP → write tracking file. Accept InstallOptions, return InstallResult. Handle errors and partial failures.
+### Task 20: Implement main installer orchestrator ✓
+- [x] **Description**: Create index.ts with `install()` function. Orchestrate flow: load bundle → ensure auth → install skills → configure MCP → write tracking file. Accept InstallOptions, return InstallResult. Handle errors and partial failures.
 - **Depends on**: Tasks 8, 11, 14, 15
 - **Files**:
   - `packages/core/src/index.ts` (main orchestrator)
 - **Testing**: Integration test with mocked modules. Test happy path, auth failure, skill copy failure, MCP config failure.
 - **Spec reference**: Installation Flow in specs/installation-and-auth.md
 
-### Task 21: Implement uninstall function
-- **Description**: Add `uninstall()` function to index.ts. Read tracking file → remove MCP configs → remove skills → delete tracking file. Preserve credentials. Handle missing tracking file gracefully.
+### Task 21: Implement uninstall function ✓
+- [x] **Description**: Add `uninstall()` function to index.ts. Read tracking file → remove MCP configs → remove skills → delete tracking file. Preserve credentials. Handle missing tracking file gracefully.
 - **Depends on**: Task 20
 - **Files**:
   - `packages/core/src/index.ts` (add uninstall function)
 - **Testing**: Integration test with mocked tracking file. Test clean uninstall, missing tracking file, partial artifacts.
 - **Spec reference**: Uninstall Flow in specs/installation-and-auth.md
 
-### Task 22: Implement doctor function
-- **Description**: Add `doctor()` function to index.ts. Check: credentials exist and valid → skills exist in harness path → MCP configs present → MCP servers reachable. Return DoctorReport with status and actionable messages.
+### Task 22: Implement doctor function ✓
+- [x] **Description**: Add `doctor()` function to index.ts. Check: credentials exist and valid → skills exist in harness path → MCP configs present → MCP servers reachable. Return DoctorReport with status and actionable messages.
 - **Depends on**: Task 20
 - **Files**:
   - `packages/core/src/index.ts` (add doctor function)
