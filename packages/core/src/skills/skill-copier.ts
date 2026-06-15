@@ -15,8 +15,6 @@ function assertSafeSkillPath (sourceDir: string, skillPath: string): string {
   return resolved
 }
 
-
-
 export class SkillCopyError extends Error {
   constructor (
     public readonly skill: string,

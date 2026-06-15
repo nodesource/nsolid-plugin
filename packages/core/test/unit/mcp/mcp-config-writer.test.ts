@@ -218,6 +218,50 @@ describe('writeMcpConfig', () => {
     assert.strictEqual(server.env.NSOLID_SERVICE_TOKEN, 'tk_123')
     assert.strictEqual(server.env.NSOLID_ORG_ID, 'org_456')
   })
+
+  it('writes JSONC with existing trailing comma', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+    const { parseJsonc } = await import('../../../src/utils/config.js')
+
+    const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '{\n  // Comment\n  "version": "1.0",\n}\n')
+
+    await writeMcpConfig('opencode', [serverA])
+
+    const content = readFileSync(configPath, 'utf-8')
+    assert.ok(content.includes('// Comment'))
+    assert.ok(content.includes('ns-benchmark'))
+
+    const parsed = parseJsonc(content) as Record<string, unknown>
+    assert.strictEqual(parsed.version, '1.0')
+    const mcpServers = parsed.mcpServers as Record<string, unknown>
+    assert.ok('ns-benchmark' in mcpServers)
+  })
+
+  it('writes JSONC with multi-property trailing comma', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+
+    const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '{\n  "version": "1.0",\n  "theme": "dark",\n}\n')
+
+    await writeMcpConfig('opencode', [serverA])
+
+    const content = readFileSync(configPath, 'utf-8')
+    assert.ok(content.includes('ns-benchmark'))
+
+    const parsed = JSON.parse(content)
+    assert.strictEqual(parsed.version, '1.0')
+    assert.strictEqual(parsed.theme, 'dark')
+    assert.ok('ns-benchmark' in parsed.mcpServers)
+  })
 })
 
 describe('removeMcpConfig', () => {
@@ -253,9 +297,11 @@ describe('removeMcpConfig', () => {
 
   it('handles nonexistent config file', async () => {
     const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
 
     const result = await removeMcpConfig('antigravity', ['ns-benchmark'])
     assert.strictEqual(result, undefined)
+    assert.strictEqual(existsSync(resolveHome('~/.gemini/antigravity-cli/mcp_config.json')), false)
   })
 
   it('removes mcpServers when it is not the last property in JSONC', async () => {
@@ -278,5 +324,45 @@ describe('removeMcpConfig', () => {
     const parsed = JSON.parse(content)
     assert.strictEqual(parsed.version, '1.0')
     assert.ok(!('mcpServers' in parsed))
+  })
+
+  it('does not create JSON config when file is missing', async () => {
+    const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+
+    await removeMcpConfig('claude', ['ns-benchmark'])
+
+    const configPath = resolveHome('~/.claude.json')
+    assert.strictEqual(existsSync(configPath), false)
+  })
+
+  it('does not create TOML config when file is missing', async () => {
+    const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+
+    await removeMcpConfig('codex', ['ns-benchmark'])
+
+    const configPath = resolveHome('~/.codex/config.toml')
+    assert.strictEqual(existsSync(configPath), false)
+  })
+
+  it('does not create JSONC config when file is missing', async () => {
+    const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+
+    await removeMcpConfig('opencode', ['ns-benchmark'])
+
+    const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
+    assert.strictEqual(existsSync(configPath), false)
+  })
+
+  it('does not create antigravity config when file is missing', async () => {
+    const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+
+    await removeMcpConfig('antigravity', ['ns-benchmark'])
+
+    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    assert.strictEqual(existsSync(configPath), false)
   })
 })

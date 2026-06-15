@@ -209,9 +209,11 @@ function insertMcpBlockBeforeClosing (
 
   const before = raw.slice(0, outerCloseBrace)
   const after = raw.slice(outerCloseBrace)
-  const hasContent = raw.slice(0, outerCloseBrace).trimEnd().length > raw.indexOf('{') + 1
+  const beforeTrimmed = before.trimEnd()
+  const hasContentAfterOpen = raw.slice(raw.indexOf('{') + 1, outerCloseBrace).trim().length > 0
+  const separator = (hasContentAfterOpen && !beforeTrimmed.endsWith(',')) ? ',\n' : '\n'
 
-  return before + (hasContent ? ',\n' : '\n') + indent + mcpServersBlock + '\n' + after
+  return before + separator + indent + mcpServersBlock + '\n' + after
 }
 
 function findOuterClosingBrace (raw: string): number {
@@ -287,6 +289,7 @@ export async function removeMcpConfig (
 ): Promise<void> {
   const info = getMcpConfigInfo(harness)
   if (!info) return
+  if (!existsSync(info.configPath)) return
 
   const existing = readExistingConfig(info.configPath, info.format)
   const result = removeMcpServers(existing, serverNames)
