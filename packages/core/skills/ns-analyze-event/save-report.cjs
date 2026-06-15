@@ -30,6 +30,8 @@ function writeStderr (message) {
   fs.writeSync(process.stderr.fd, message)
 }
 
+let saveSeq = 0
+
 function isWorkspaceRoot (dir) {
   return fs.existsSync(path.join(dir, 'package.json')) ||
     fs.existsSync(path.join(dir, '.git')) ||
@@ -201,15 +203,16 @@ function main () {
   const reportsDir = ensureReportsDir(workspaceRoot)
   const now = new Date()
   const timestamp = now.toISOString()
-  const dateStr = timestamp.replace(/[:.]/g, '-').slice(0, 19)
-  const fileName = `${type}-${dateStr}.md`
+  const dateStr = timestamp.replace(/[:.]/g, '-').slice(0, 23)
+  const seq = String(++saveSeq).padStart(3, '0')
+  const fileName = `${type}-${dateStr}-${seq}.md`
   const outputPath = path.join(reportsDir, fileName)
 
   fs.writeFileSync(outputPath, content, 'utf-8')
 
   const appName = cleanAppName(explicitAppName) || inferAppName(title, content)
   saveMetadata(reportsDir, {
-    id: `${type}-${now.getTime()}`,
+    id: `${type}-${dateStr}-${seq}`,
     title,
     type,
     timestamp,

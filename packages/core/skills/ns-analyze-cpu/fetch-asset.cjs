@@ -65,6 +65,11 @@ function readAssetIndex (workspaceRoot) {
   return []
 }
 
+function isPathWithin (parent, candidate) {
+  const rel = path.relative(parent, candidate)
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
 function writeAssetIndex (workspaceRoot, records) {
   const indexPath = path.join(getAssetsDir(workspaceRoot), 'index.json')
   fs.writeFileSync(indexPath, JSON.stringify(records, null, 2), 'utf-8')
@@ -109,8 +114,8 @@ function resolveExistingAsset (workspaceRoot, assetId, assetType, appName) {
 
   const indexRecord = readAssetIndex(workspaceRoot).find(record => record.assetId === assetId)
   if (indexRecord?.localPath) {
-    const indexedPath = path.join(assetsDir, indexRecord.localPath)
-    if (fs.existsSync(indexedPath)) {
+    const indexedPath = path.resolve(assetsDir, indexRecord.localPath)
+    if (isPathWithin(assetsDir, indexedPath) && fs.existsSync(indexedPath)) {
       return {
         filePath: indexedPath,
         localPath: indexRecord.localPath,
