@@ -11,15 +11,19 @@
 //   assetType — One of: cpuprofile, heapprofile, heapsnapshot
 //   appName   — (Optional) Application name for the filename, defaults to "unknown"
 //
-// The script reads the console URL and service token from .vscode/settings.json
-// in the workspace root (walks up from its own location to find it).
+// The script reads the console URL and service token from ~/.agents/.nodesource-auth.json.
+// Assets are saved to <cwd>/.nsolid/assets/.
 //
 // Output files:
 //   .nsolid/assets/<assetType>-<appName>-<assetIdPrefix>.<ext>
+//
+// Note: This script is designed for single-process/single-user workflows.
+// Concurrent executions may race on file operations and index updates.
 
 'use strict'
 
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 
 const EXTENSIONS = {
@@ -163,105 +167,45 @@ function ensureFlatAsset (workspaceRoot, assetId, assetType, appName) {
   }
 }
 
-function findWorkspaceRoot (startDir) {
-  let dir = startDir
-  while (dir !== path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, '.vscode', 'settings.json'))) {
-      return dir
-    }
-    if (fs.existsSync(path.join(dir, 'package.json'))) {
-      return dir
-    }
-    dir = path.dirname(dir)
-  }
-  return startDir
-}
+function readCredentials () {
+  const authPath = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
 
-function stripJsonComments (input) {
-  let output = ''
-  let inString = false
-  let escaped = false
-  let inLineComment = false
-  let inBlockComment = false
-
-  for (let index = 0; index < input.length; index++) {
-    const current = input[index]
-    const next = input[index + 1]
-
-    if (inLineComment) {
-      if (current === '\n') {
-        inLineComment = false
-        output += current
-      }
-      continue
-    }
-
-    if (inBlockComment) {
-      if (current === '*' && next === '/') {
-        inBlockComment = false
-        index++
-      }
-      continue
-    }
-
-    if (inString) {
-      output += current
-      if (escaped) {
-        escaped = false
-      } else if (current === '\\') {
-        escaped = true
-      } else if (current === '"') {
-        inString = false
-      }
-      continue
-    }
-
-    if (current === '"') {
-      inString = true
-      output += current
-      continue
-    }
-
-    if (current === '/' && next === '/') {
-      inLineComment = true
-      index++
-      continue
-    }
-
-    if (current === '/' && next === '*') {
-      inBlockComment = true
-      index++
-      continue
-    }
-
-    output += current
+  if (!fs.existsSync(authPath)) {
+    throw new Error(
+      'Credentials not found. Run "npx @nodesource/plugin-<harness> login" to authenticate.'
+    )
   }
 
-  return output
-}
-
-function stripTrailingCommas (input) {
-  return input.replace(/,\s*([}\]])/g, '$1')
-}
-
-function readSettings (workspaceRoot) {
-  const settingsPath = path.join(workspaceRoot, '.vscode', 'settings.json')
-  if (!fs.existsSync(settingsPath)) {
-    throw new Error(`Cannot find .vscode/settings.json at ${settingsPath}`)
+  let auth
+  try {
+    auth = JSON.parse(fs.readFileSync(authPath, 'utf-8'))
+  } catch (e) {
+    throw new Error(`Failed to parse ${authPath}: ${e.message}`)
   }
-
-  const raw = fs.readFileSync(settingsPath, 'utf-8')
-  const cleaned = stripTrailingCommas(stripJsonComments(raw))
-  const settings = JSON.parse(cleaned)
-
-  const consoleUrl = settings['nsolid.consoleUrl'] || settings['nsolid.apiBaseUrl']
-  const token = settings['nsolid.serviceToken'] || settings['nsolid.authToken']
+  const consoleUrl = auth.consoleUrl
+  const token = auth.serviceToken
 
   if (!consoleUrl) {
-    throw new Error('Missing "nsolid.consoleUrl" or legacy "nsolid.apiBaseUrl" in .vscode/settings.json')
+    throw new Error('Missing "consoleUrl" in ~/.agents/.nodesource-auth.json')
   }
   if (!token) {
-    throw new Error('Missing "nsolid.serviceToken" or legacy "nsolid.authToken" in .vscode/settings.json')
+    throw new Error('Missing "serviceToken" in ~/.agents/.nodesource-auth.json')
+  }
+
+  let url
+  try {
+    url = new URL(consoleUrl)
+  } catch {
+    throw new Error(`Invalid consoleUrl: ${consoleUrl}`)
+  }
+
+  if (!process.env.NSOLID_ALLOW_INSECURE_CONSOLE) {
+    if (url.protocol !== 'https:') {
+      throw new Error(`consoleUrl must use HTTPS: ${consoleUrl}`)
+    }
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]') {
+      throw new Error(`consoleUrl cannot be localhost: ${consoleUrl}`)
+    }
   }
 
   return { consoleUrl: consoleUrl.replace(/\/$/, ''), token }
@@ -301,8 +245,8 @@ async function main () {
     process.exit(1)
   }
 
-  const workspaceRoot = findWorkspaceRoot(path.resolve(__dirname))
-  const { consoleUrl, token } = readSettings(workspaceRoot)
+  const workspaceRoot = process.cwd()
+  const { consoleUrl, token } = readCredentials()
 
   const assetsDir = getAssetsDir(workspaceRoot)
   fs.mkdirSync(assetsDir, { recursive: true })

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // save-report.cjs — persists a markdown report to .nsolid/assets/ and updates reports-index.json.
 // Usage: node save-report.cjs <type> <title> <markdown-file> [appName]
+// Note: This script is designed for single-process/single-agent use.
+// Concurrent executions may race on reports-index.json updates.
 
 'use strict'
 
@@ -151,7 +153,8 @@ function readReportsIndex (reportsDir) {
     if (fs.existsSync(indexPath)) {
       return JSON.parse(fs.readFileSync(indexPath, 'utf-8'))
     }
-  } catch {
+  } catch (error) {
+    writeStderr(`Warning: Could not read reports index (${error.message}). Starting fresh.\n`)
     return []
   }
 
@@ -160,7 +163,12 @@ function readReportsIndex (reportsDir) {
 
 function writeReportsIndex (reportsDir, entries) {
   const indexPath = path.join(reportsDir, 'reports-index.json')
-  fs.writeFileSync(indexPath, JSON.stringify(entries, null, 2), 'utf-8')
+  try {
+    fs.writeFileSync(indexPath, JSON.stringify(entries, null, 2), 'utf-8')
+  } catch (error) {
+    writeStderr(`Error writing reports index: ${error.message}\n`)
+    throw error
+  }
 }
 
 function saveMetadata (reportsDir, metadata) {

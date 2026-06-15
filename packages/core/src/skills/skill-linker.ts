@@ -3,13 +3,7 @@ import path from 'node:path'
 import type { HarnessType, SkillRef } from '../types.js'
 import { getSkillsDir, resolveHome } from '../utils/path.js'
 import { ensureDir } from '../utils/fs.js'
-
-function assertSafeSkillName (name: string): string {
-  if (name !== path.basename(name) || name.includes('..') || name.includes(path.sep)) {
-    throw new Error(`Invalid skill name: ${name}`)
-  }
-  return name
-}
+import { assertSafeSkillName } from '../utils/skill-name.js'
 
 export type LinkStatus = 'skipped' | 'replaced' | 'backed-up' | 'created'
 

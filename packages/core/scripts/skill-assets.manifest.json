@@ -1,0 +1,24 @@
+{
+  "wait.cjs": [
+    "ns-advanced-memory-leak-hunter",
+    "ns-analyze-asset",
+    "ns-analyze-cpu",
+    "ns-analyze-memory",
+    "ns-benchmark-run",
+    "ns-benchmark-validate"
+  ],
+  "save-report.cjs": [
+    "ns-advanced-memory-leak-hunter",
+    "ns-analyze-asset",
+    "ns-analyze-cpu",
+    "ns-analyze-event",
+    "ns-analyze-memory",
+    "ns-benchmark-run",
+    "ns-benchmark-validate"
+  ],
+  "fetch-asset.cjs": [
+    "ns-advanced-memory-leak-hunter",
+    "ns-analyze-cpu",
+    "ns-analyze-memory"
+  ]
+}

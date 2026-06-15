@@ -3,6 +3,7 @@ import path from 'node:path'
 import type { SkillRef } from '../types.js'
 import { getSkillsDir } from '../utils/path.js'
 import { ensureDir } from '../utils/fs.js'
+import { assertSafeSkillName } from '../utils/skill-name.js'
 
 function assertSafeSkillPath (sourceDir: string, skillPath: string): string {
   const resolved = path.resolve(sourceDir, skillPath)
@@ -11,13 +12,6 @@ function assertSafeSkillPath (sourceDir: string, skillPath: string): string {
     throw new Error(`Skill path escapes source directory: ${skillPath}`)
   }
   return resolved
-}
-
-function assertSafeSkillName (name: string): string {
-  if (name === '.' || name !== path.basename(name) || name.includes('..') || name.includes(path.sep)) {
-    throw new Error(`Invalid skill name: ${name}`)
-  }
-  return name
 }
 
 export class SkillCopyError extends Error {

@@ -131,3 +131,36 @@ describe('unlinkSkillsFromHarness', () => {
     assert.strictEqual(await unlinkSkillsFromHarness('claude', skills), undefined)
   })
 })
+
+describe('assertSafeSkillName', () => {
+  it('rejects "." (would rename/delete entire harness skills dir)', async () => {
+    const { assertSafeSkillName } = await import('../../../src/utils/skill-name.js')
+    assert.throws(() => assertSafeSkillName('.'))
+  })
+
+  it('rejects ".."', async () => {
+    const { assertSafeSkillName } = await import('../../../src/utils/skill-name.js')
+    assert.throws(() => assertSafeSkillName('..'))
+  })
+
+  it('rejects empty string', async () => {
+    const { assertSafeSkillName } = await import('../../../src/utils/skill-name.js')
+    assert.throws(() => assertSafeSkillName(''))
+  })
+
+  it('rejects names containing "/"', async () => {
+    const { assertSafeSkillName } = await import('../../../src/utils/skill-name.js')
+    assert.throws(() => assertSafeSkillName('foo/bar'))
+  })
+
+  it('rejects absolute paths', async () => {
+    const { assertSafeSkillName } = await import('../../../src/utils/skill-name.js')
+    assert.throws(() => assertSafeSkillName('/etc/passwd'))
+  })
+
+  it('accepts valid skill names', async () => {
+    const { assertSafeSkillName } = await import('../../../src/utils/skill-name.js')
+    assert.strictEqual(assertSafeSkillName('ns-analyze-cpu'), 'ns-analyze-cpu')
+    assert.strictEqual(assertSafeSkillName('my-skill_v2'), 'my-skill_v2')
+  })
+})
