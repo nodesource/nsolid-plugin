@@ -276,6 +276,32 @@ function removeMcpServersBlockFromRaw (raw: string): string {
   return before + after
 }
 
+/**
+ * Apply harness-specific MCP server schema before writing to disk.
+ *
+ * Antigravity stores the endpoint as `serverUrl`; every other harness uses
+ * `url`. This is the SINGLE source of truth for that conversion: both the
+ * generic `writeMcpConfig` install path and the adapter-backed
+ * `writeAdapterMcpConfig` route through here, so the two paths can never drift
+ * (previously the conversion was duplicated inline here and again in the
+ * Antigravity adapter).
+ */
+function applyHarnessWriteFormat (
+  harness: HarnessType,
+  config: NormalizedMcpConfig
+): NormalizedMcpConfig {
+  if (harness !== 'antigravity') return config
+
+  const servers = {} as NormalizedMcpConfig['mcpServers']
+  for (const [name, srv] of Object.entries(config.mcpServers)) {
+    servers[name] = {
+      serverUrl: srv.url,
+      headers: srv.headers,
+    } as unknown as NormalizedMcpConfig['mcpServers'][string]
+  }
+  return { mcpServers: servers }
+}
+
 // --- Public API ---
 
 export async function writeMcpConfig (
@@ -296,14 +322,7 @@ export async function writeMcpConfig (
   const existing = readExistingConfig(resolvedPath, format)
   const merged = mergeMcpConfig(existing, resolvedServers)
 
-  if (harness === 'antigravity') {
-    for (const srv of Object.values(merged.mcpServers)) {
-      ;(srv as unknown as Record<string, unknown>).serverUrl = srv.url
-      delete (srv as Partial<{ url: string }>).url
-    }
-  }
-
-  writeConfigFile(resolvedPath, format, merged)
+  writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, merged))
 }
 
 export function writeAdapterMcpConfig (
@@ -312,7 +331,7 @@ export function writeAdapterMcpConfig (
 ): void {
   const info = getMcpConfigInfo(harness)
   if (!info) return
-  writeConfigFile(info.configPath, info.format, config)
+  writeConfigFile(info.configPath, info.format, applyHarnessWriteFormat(harness, config))
 }
 
 export async function removeMcpConfig (

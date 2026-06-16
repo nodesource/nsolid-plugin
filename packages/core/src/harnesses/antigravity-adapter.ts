@@ -1,24 +1,7 @@
 import type { HarnessAdapter, McpConfig } from './harness-adapter.js'
-import type { McpServerConfig, NormalizedMcpConfig } from '../mcp/mcp-config-merger.js'
 import type { HarnessType } from '../types.js'
 import { resolveHome } from '../utils/path.js'
 import { writeAdapterMcpConfig, readExistingConfig } from '../mcp/mcp-config-writer.js'
-
-interface AntigravityMcpServerConfig {
-  serverUrl: string
-  headers: Record<string, string>
-}
-
-function toAntigravityFormat (config: McpConfig): { mcpServers: Record<string, AntigravityMcpServerConfig> } {
-  const servers: Record<string, AntigravityMcpServerConfig> = {}
-  for (const [name, srv] of Object.entries(config.mcpServers)) {
-    servers[name] = {
-      serverUrl: srv.url,
-      headers: srv.headers,
-    }
-  }
-  return { mcpServers: servers }
-}
 
 export class AntigravityAdapter implements HarnessAdapter {
   readonly name: HarnessType = 'antigravity'
@@ -39,19 +22,16 @@ export class AntigravityAdapter implements HarnessAdapter {
   }
 
   async readMcpConfig (): Promise<McpConfig> {
-    const config = readExistingConfig(this.getMcpConfigPath(), 'json')
-    const mcpServers: Record<string, McpServerConfig> = {}
-    for (const [name, srv] of Object.entries(config.mcpServers)) {
-      const raw = srv as unknown as { serverUrl?: string; url?: string; headers?: Record<string, string> }
-      mcpServers[name] = {
-        url: raw.serverUrl || raw.url || '',
-        headers: raw.headers || {},
-      }
-    }
-    return { mcpServers }
+    // readExistingConfig already normalizes both `serverUrl` and `url` into the
+    // canonical `url` field (see normalizeFromJson), so no per-harness work is
+    // needed here.
+    return readExistingConfig(this.getMcpConfigPath(), 'json')
   }
 
   async writeMcpConfig (config: McpConfig): Promise<void> {
-    writeAdapterMcpConfig(this.name, toAntigravityFormat(config) as unknown as NormalizedMcpConfig)
+    // The Antigravity-specific `url -> serverUrl` schema is applied inside
+    // writeAdapterMcpConfig via applyHarnessWriteFormat, so this adapter stays
+    // symmetric with the Claude/Codex/OpenCode adapters.
+    writeAdapterMcpConfig(this.name, config)
   }
 }
