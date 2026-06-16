@@ -49,10 +49,13 @@ Supported events (complete list):
 | Purpose | Path |
 |---|---|
 | Shared MCP config (preferred) | `~/.gemini/config/mcp_config.json` |
-| Shared skills (real-world) | `~/.gemini/skills/` |
+| Global skills (all workspaces) | `~/.gemini/config/skills/` |
+| Workspace skills (per-project) | `<workspace-root>/.agents/skills/<skill>/` |
 | Agy-CLI-only paths (legacy) | `~/.gemini/antigravity-cli/mcp_config.json`, `~/.gemini/antigravity-cli/skills/` |
 
-The current core adapter (`packages/core/src/harnesses/antigravity-adapter.ts`) targets the Agy-CLI-only paths and must be updated to the shared cross-product paths.
+> **Authoritative source:** https://antigravity.google/docs/skills ("Where skills live") lists the global skill location as `~/.gemini/config/skills/`, sharing the same `~/.gemini/config/` root as `mcp_config.json`. An earlier draft of this doc and third-party blog posts cited `~/.gemini/skills/`; that path is **not** read by Antigravity at runtime and was corrected after the adapter shipped the wrong path. The Agy-CLI-only `~/.gemini/antigravity-cli/...` paths are legacy and also not used by the cross-product install.
+
+The core adapter (`packages/core/src/harnesses/antigravity-adapter.ts`) writes MCP config to `~/.gemini/config/mcp_config.json` and exposes `~/.gemini/config/skills/` as the skills path; the skill linker delegates to the adapter so the two cannot drift.
 
 ---
 
@@ -68,4 +71,4 @@ Antigravity does **not** interpolate environment variables in `mcp_config.json` 
 - Ship `scripts/install.js` that the user runs once.
 - The script copies the plugin directory to `~/.gemini/config/plugins/nodesource-nsolid/` and then calls `@nodesource/plugin-core`'s `install({ harness: 'antigravity', bundlePath, skillsSource })`.
 - Skills and MCP config are **not** bundled in the plugin; they are produced by the core installer.
-- The core Antigravity adapter is updated to write to `~/.gemini/config/mcp_config.json` and `~/.gemini/skills/`.
+- The core Antigravity adapter is updated to write to `~/.gemini/config/mcp_config.json` and `~/.gemini/config/skills/`.

@@ -8,7 +8,10 @@ import type { HarnessType } from './types.js'
 import { HARNESS_VALUES } from './types.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const CORE_PKG_ROOT = path.resolve(__dirname, '..')
+// At runtime the bin is dist/src/cli.js, so __dirname is <pkgroot>/dist/src.
+// bundle.json and skills/ ship at the package root (per package.json "files"),
+// not under dist/ — resolve up two levels to reach the package root.
+const CORE_PKG_ROOT = path.resolve(__dirname, '..', '..')
 const BUNDLE_PATH = path.join(CORE_PKG_ROOT, 'bundle.json')
 
 function printUsage (): void {

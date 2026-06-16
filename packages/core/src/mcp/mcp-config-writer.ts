@@ -298,7 +298,7 @@ export async function writeMcpConfig (
 
   if (harness === 'antigravity') {
     for (const srv of Object.values(merged.mcpServers)) {
-      ;(srv as Record<string, unknown>).serverUrl = srv.url
+      ;(srv as unknown as Record<string, unknown>).serverUrl = srv.url
       delete (srv as Partial<{ url: string }>).url
     }
   }

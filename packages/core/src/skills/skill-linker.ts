@@ -1,9 +1,10 @@
 import { symlink, readlink, lstat, rm, rename, cp, access } from 'node:fs/promises'
 import path from 'node:path'
 import type { HarnessType, SkillRef } from '../types.js'
-import { getSkillsDir, resolveHome } from '../utils/path.js'
+import { getSkillsDir } from '../utils/path.js'
 import { ensureDir } from '../utils/fs.js'
 import { assertSafeSkillName } from '../utils/skill-name.js'
+import { getAdapter } from '../harnesses/index.js'
 
 export type LinkStatus = 'skipped' | 'replaced' | 'backed-up' | 'created'
 
@@ -16,18 +17,11 @@ export interface LinkResult {
 const IS_WINDOWS = process.platform === 'win32'
 
 export function getHarnessSkillsPath (harness: HarnessType): string {
-  switch (harness) {
-    case 'claude':
-      return resolveHome('~/.claude/skills/')
-    case 'codex':
-      return resolveHome('~/.codex/skills/')
-    case 'opencode':
-      return resolveHome('~/.config/opencode/skills/')
-    case 'antigravity':
-      return resolveHome('~/.gemini/antigravity-cli/skills/')
-    case 'pi':
-      return resolveHome('~/.pi/agent/skills/')
-  }
+  // Delegate to the adapter so each harness's skills directory has a single
+  // source of truth. A duplicated hardcoded list here previously drifted out
+  // of sync with the adapter (antigravity linked into a path the runtime did
+  // not read), so install() and doctor() disagreed on whether skills existed.
+  return getAdapter(harness).getSkillsPath()
 }
 
 export async function linkSkillsToHarness (

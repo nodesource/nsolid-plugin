@@ -70,7 +70,7 @@ Installation SHALL produce harness-specific configurations for Claude Code, Code
 **Given** the user runs the Antigravity install script  
 **When** `core.install()` writes the MCP configuration  
 **Then** the MCP config is written to `~/.gemini/config/mcp_config.json`  
-**And** skills are linked/copied to `~/.gemini/skills/`  
+**And** skills are linked/copied to `~/.gemini/config/skills/`  
 **And** the plugin directory is located at `~/.gemini/config/plugins/nodesource-nsolid/`  
 **And** the core Antigravity adapter uses the cross-product shared paths, not the Agy-CLI-only paths `~/.gemini/antigravity-cli/mcp_config.json` and `~/.gemini/antigravity-cli/skills/`
 

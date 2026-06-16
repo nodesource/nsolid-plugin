@@ -28,7 +28,10 @@ export class AntigravityAdapter implements HarnessAdapter {
   }
 
   getSkillsPath (): string {
-    return resolveHome('~/.gemini/skills')
+    // Antigravity loads global skills from ~/.gemini/config/skills/ (per
+    // https://antigravity.google/docs/skills), the same root as the MCP config
+    // at ~/.gemini/config/mcp_config.json.
+    return resolveHome('~/.gemini/config/skills/')
   }
 
   supportsMcp (): boolean {

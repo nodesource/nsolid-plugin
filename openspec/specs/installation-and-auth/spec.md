@@ -213,7 +213,7 @@ The uninstaller SHALL remove only NodeSource artifacts, preserve user modificati
 **When** the user uninstalls via the harness-specific uninstall trigger (e.g., Claude Code `/plugins` → uninstall, or running the uninstall action of the shared setup script)
 **Then** the uninstaller reads the tracking file
 **And** all NodeSource MCP entries are removed from harness configs
-**And** all NodeSource skill directories, symlinks, and copies are deleted from harness-specific paths (`~/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, `~/.gemini/skills/`, `~/.pi/agent/skills/`)
+**And** all NodeSource skill directories, symlinks, and copies are deleted from harness-specific paths (`~/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, `~/.gemini/config/skills/`, `~/.pi/agent/skills/`)
 **And** the tracking file is deleted
 **And** credentials at `~/.agents/.nodesource-auth.json` are preserved (shared across installs)
 
@@ -236,7 +236,7 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 - `~/.claude/skills/ns-*` (Claude harness skill directories)
 - `~/.codex/skills/ns-*` (Codex harness skill directories)
 - `~/.config/opencode/skills/ns-*` (OpenCode harness skill directories)
-- `~/.gemini/skills/ns-*` (Antigravity harness skill directories)
+- `~/.gemini/config/skills/ns-*` (Antigravity harness skill directories)
 - `~/.pi/agent/skills/ns-*` (Pi harness skill directories)
 - `~/.agents/.nodesource-installed.json` (tracking file, if partially present)
 - MCP entries named `nsolid-console`, `ns-benchmark`, or `ncm` in harness config files:
@@ -427,7 +427,7 @@ X-Nsolid-Service-Token = "<token>"
 }
 ```
 **And** Antigravity uses `serverUrl` (not `url`) as the URL field name per its config schema
-**And** skills are linked/copied to `~/.gemini/skills/`
+**And** skills are linked/copied to `~/.gemini/config/skills/`
 **And** the plugin directory is located at `~/.gemini/config/plugins/nodesource-nsolid/`
 
 #### Scenario: Pi Agent configuration

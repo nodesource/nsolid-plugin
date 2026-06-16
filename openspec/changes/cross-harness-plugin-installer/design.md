@@ -84,7 +84,7 @@ All paths in this design use `~` as shorthand. At runtime, the path utility (`pa
 | `~/.config/opencode/skills/` | `/home/user/.config/opencode/skills/` | `C:\Users\user\.config\opencode\skills\` |
 | `~/.gemini/config/mcp_config.json` | `/home/user/.gemini/config/mcp_config.json` | `C:\Users\user\.gemini\config\mcp_config.json` |
 | `~/.gemini/config/plugins/nodesource-nsolid/` | `/home/user/.gemini/config/plugins/nodesource-nsolid/` | `C:\Users\user\.gemini\config\plugins\nodesource-nsolid\` |
-| `~/.gemini/skills/` | `/home/user/.gemini/skills/` | `C:\Users\user\.gemini\skills\` |
+| `~/.gemini/config/skills/` | `/home/user/.gemini/config/skills/` | `C:\Users\user\.gemini\config\skills\` |
 | `~/.pi/agent/skills/` | `/home/user/.pi/agent/skills/` | `C:\Users\user\.pi\agent\skills\` |
 
 **Rules:**

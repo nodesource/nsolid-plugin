@@ -186,7 +186,7 @@
 - **Spec reference**: Pi Agent configuration scenario in specs/installation-and-auth.md
 
 ### Task 19b: Implement Antigravity adapter ✓
-- [x] **Description**: Create antigravity-adapter.ts for Antigravity CLI harness. Config path: `~/.gemini/config/mcp_config.json`. Skills path: `~/.gemini/skills/`. JSON format. Supports MCP: true. Export from `packages/core/src/harnesses/index.ts`.
+- [x] **Description**: Create antigravity-adapter.ts for Antigravity CLI harness. Config path: `~/.gemini/config/mcp_config.json`. Skills path: `~/.gemini/config/skills/`. JSON format. Supports MCP: true. Export from `packages/core/src/harnesses/index.ts`.
 - **Depends on**: Task 15
 - **Files**:
   - `packages/core/src/harnesses/antigravity-adapter.ts`
@@ -242,8 +242,8 @@
   - `packages/core/scripts/setup.mjs`
 - **Testing**: Run `NSOLID_HARNESS=claude node packages/core/scripts/setup.mjs` against a throwaway HOME. Verify skills land in `~/.agents/skills/`, MCP config merges into the harness config, and the tracking file is written. Run twice to confirm idempotency.
 
-### Task 23: Create Claude Code plugin package
-- **Description**: Create `packages/claude-plugin` as a Claude Code plugin directory. Provide `.claude-plugin/plugin.json`, `hooks/hooks.json` with a `SessionStart` hook running `scripts/setup.js`, and `scripts/setup.js` that sets `NSOLID_HARNESS=claude` and invokes core's `setup.mjs`.
+### Task 23: Create Claude Code plugin package ✓
+- [x] **Description**: Create `packages/claude-plugin` as a Claude Code plugin directory. Provide `.claude-plugin/plugin.json`, `hooks/hooks.json` with a `SessionStart` hook running `scripts/setup.js`, and `scripts/setup.js` that sets `NSOLID_HARNESS=claude` and invokes core's `setup.mjs`.
 - **Depends on**: Task 22c
 - **Files**:
   - `packages/claude-plugin/.claude-plugin/plugin.json`
@@ -255,8 +255,8 @@
 - **Testing**: Manifest test validates `plugin.json` and hook command. Manual test: `claude --plugin-dir ./packages/claude-plugin --debug`; confirm SessionStart hook fires and skills/MCP are written.
 - **Spec reference**: Per-harness configuration mapping (Claude Code) in specs/installation-and-auth.md
 
-### Task 24: Create Codex CLI plugin package
-- **Description**: Create `packages/codex-plugin` as a Codex CLI plugin directory. Provide `.codex-plugin/plugin.json`, `hooks/hooks.json` (`SessionStart` → `scripts/setup.js`), and `scripts/setup.js` that sets `NSOLID_HARNESS=codex`. Document the hook trust step.
+### Task 24: Create Codex CLI plugin package ✓
+- [x] **Description**: Create `packages/codex-plugin` as a Codex CLI plugin directory. Provide `.codex-plugin/plugin.json`, `hooks/hooks.json` (`SessionStart` → `scripts/setup.js`), and `scripts/setup.js` that sets `NSOLID_HARNESS=codex`. Document the hook trust step.
 - **Depends on**: Task 22c
 - **Files**:
   - `packages/codex-plugin/.codex-plugin/plugin.json`
@@ -268,8 +268,8 @@
 - **Testing**: Manifest test. Manual test: add a personal marketplace pointing at `./packages/codex-plugin`, install, trust the hook, verify skills + MCP in `~/.codex/config.toml`.
 - **Spec reference**: Per-harness configuration mapping (Codex CLI) in specs/installation-and-auth.md
 
-### Task 25: Create OpenCode plugin package
-- **Description**: Create `packages/opencode-plugin` as an OpenCode JS module plugin. `index.js` runs the shared setup script with `NSOLID_HARNESS=opencode` on module load. OpenCode installs npm plugins with Bun, which skips lifecycle scripts by default, so do not rely on `postinstall`.
+### Task 25: Create OpenCode plugin package ✓
+- [x] **Description**: Create `packages/opencode-plugin` as an OpenCode JS module plugin. `index.js` runs the shared setup script with `NSOLID_HARNESS=opencode` on module load. OpenCode installs npm plugins with Bun, which skips lifecycle scripts by default, so do not rely on `postinstall`.
 - **Depends on**: Task 22c
 - **Files**:
   - `packages/opencode-plugin/index.js`
@@ -279,8 +279,8 @@
 - **Testing**: Manual test: add plugin to `~/.config/opencode/plugins/` or `opencode.json` `"plugin"`, start OpenCode, verify skills and MCP config.
 - **Spec reference**: Per-harness configuration mapping (OpenCode) in specs/installation-and-auth.md
 
-### Task 26: Create Antigravity plugin package
-- **Description**: Create `packages/antigravity-plugin` as a native Antigravity plugin directory. Antigravity has no install-time/session-start hook, so ship `scripts/install.js` that the user runs once. The script copies the plugin dir to `~/.gemini/config/plugins/nodesource-nsolid/` and calls `@nodesource/plugin-core`'s `install({ harness: 'antigravity', bundlePath, skillsSource })`. Skills and MCP config are not bundled; they are produced by the core installer. Update `packages/core/src/harnesses/antigravity-adapter.ts` to use the cross-product shared paths `~/.gemini/config/mcp_config.json` and `~/.gemini/skills/`.
+### Task 26: Create Antigravity plugin package ✓
+- [x] **Description**: Create `packages/antigravity-plugin` as a native Antigravity plugin directory. Antigravity has no install-time/session-start hook, so ship `scripts/install.js` that the user runs once. The script copies the plugin dir to `~/.gemini/config/plugins/nodesource-nsolid/` and calls `@nodesource/plugin-core`'s `install({ harness: 'antigravity', bundlePath, skillsSource })`. Skills and MCP config are not bundled; they are produced by the core installer. Update `packages/core/src/harnesses/antigravity-adapter.ts` to use the cross-product shared paths `~/.gemini/config/mcp_config.json` and `~/.gemini/config/skills/`.
 - **Depends on**: Task 38 (done — see `docs/antigravity-research.md`); Task 22c
 - **Files**:
   - `packages/antigravity-plugin/plugin.json`
@@ -296,8 +296,8 @@
 - **Testing**: Manual test: run `scripts/install.js` in a throwaway HOME, complete OAuth, restart Antigravity, verify `/skills` and `/mcp` output.
 - **Spec reference**: `specs/phase-7-distribution-model-fix.md`
 
-### Task 27: Create Pi Agent plugin package
-- **Description**: Create `packages/pi-plugin` as a native Pi package. Pi has no install-time hook, so use a `pi.extensions` entrypoint (`index.js`) that runs when the package loads. The extension sets `NSOLID_HARNESS=pi` and calls `@nodesource/plugin-core`'s `install()`. No MCP config is written because Pi does not support MCP yet. Skills are not bundled; they are produced by the core installer.
+### Task 27: Create Pi Agent plugin package ✓
+- [x] **Description**: Create `packages/pi-plugin` as a native Pi package. Pi has no install-time hook, so use a `pi.extensions` entrypoint (`index.js`) that runs when the package loads. The extension sets `NSOLID_HARNESS=pi` and calls `@nodesource/plugin-core`'s `install()`. No MCP config is written because Pi does not support MCP yet. Skills are not bundled; they are produced by the core installer.
 - **Depends on**: Task 22c
 - **Files**:
   - `packages/pi-plugin/package.json`
@@ -398,7 +398,7 @@
 - **Testing**: Have team member follow guide to set up dev environment and make small change.
 
 ### Task 38: Document Antigravity CLI requirements ✓
-- [x] **Description**: Research doc written at `docs/antigravity-research.md`. Confirmed Antigravity has no install-time/session-start hook. Decision: use a manual one-time `scripts/install.js` that calls the shared core installer. Core adapter paths must be updated to `~/.gemini/config/mcp_config.json` and `~/.gemini/skills/`.
+- [x] **Description**: Research doc written at `docs/antigravity-research.md`. Confirmed Antigravity has no install-time/session-start hook. Decision: use a manual one-time `scripts/install.js` that calls the shared core installer. Core adapter paths must be updated to `~/.gemini/config/mcp_config.json` and `~/.gemini/config/skills/`.
 - **Depends on**: None
 - **Files**: `docs/antigravity-research.md`
 - **Testing**: Reviewed against official docs and real-world corroboration.

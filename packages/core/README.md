@@ -44,7 +44,7 @@ Each harness has an adapter that provides its config and skills paths:
 | Claude | `~/.claude.json` | `~/.claude/skills/` | Yes |
 | Codex | `~/.codex/config.toml` | `~/.codex/skills/` | Yes |
 | OpenCode | `~/.config/opencode/opencode.jsonc` | `~/.config/opencode/skills/` | Yes |
-| Antigravity | `~/.gemini/config/mcp_config.json` | `~/.gemini/skills/` | Yes |
+| Antigravity | `~/.gemini/config/mcp_config.json` | `~/.gemini/config/skills/` | Yes |
 | Pi | `null` | `~/.pi/agent/skills/` | No |
 
 ## CLI

@@ -35,7 +35,7 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter()
 
     const skillsPath = adapter.getSkillsPath()
-    assert.ok(skillsPath.endsWith('.gemini/skills'))
+    assert.ok(skillsPath.includes('.gemini/config/skills'), `unexpected skills path: ${skillsPath}`)
   })
 
   it('supports MCP', async () => {

@@ -123,7 +123,7 @@ X-Nsolid-Service-Token = "<token>"
 }
 ```
 **And** Antigravity uses `serverUrl` (not `url`) as the URL field name per its config schema
-**And** skills are linked/copied to `~/.gemini/skills/`
+**And** skills are linked/copied to `~/.gemini/config/skills/`
 
 #### Scenario: Pi Agent configuration
 
