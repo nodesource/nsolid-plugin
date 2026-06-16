@@ -88,7 +88,7 @@ describe('install()', () => {
     assert.ok(existsSync(harnessSkillsLink), 'skill was linked to harness')
   })
 
-  it('warns when harness does not support MCP', async () => {
+  it('writes MCP config for Pi', async () => {
     const { install } = await import('../../src/index.js')
     const bundle = createBundle()
     const bundlePath = writeBundle(bundle)
@@ -100,9 +100,14 @@ describe('install()', () => {
       skillsSource,
     })
 
-    assert.strictEqual(result.success, false)
-    assert.deepStrictEqual(result.mcpServersConfigured, [])
-    assert.ok(result.errors.some((e) => e.includes('does not support MCP')))
+    assert.strictEqual(result.success, true)
+    assert.deepStrictEqual(result.mcpServersConfigured, ['ns-test-mcp'])
+
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const piConfig = readJsonFile<Record<string, unknown>>(join(tmpDir, '.pi', 'agent', 'mcp.json'))
+    assert.ok(piConfig, 'Pi MCP config file exists')
+    assert.ok(piConfig.mcpServers && typeof piConfig.mcpServers === 'object')
+    assert.ok((piConfig.mcpServers as Record<string, unknown>)['ns-test-mcp'])
   })
 
   it('returns error when bundle not found', async () => {
@@ -166,7 +171,7 @@ describe('install()', () => {
     assert.ok(tracking.mcpServers[0].configPath.includes('.claude'))
   })
 
-  it('does not track MCP when harness has no config path', async () => {
+  it('tracks MCP entries for Pi', async () => {
     const { install } = await import('../../src/index.js')
     const bundle = createBundle()
     const bundlePath = writeBundle(bundle)
@@ -179,7 +184,9 @@ describe('install()', () => {
     const tracking = readJsonFile<TrackingData>(await getTrackingFilePath())
 
     assert.ok(tracking, 'tracking file exists')
-    assert.strictEqual(tracking.mcpServers.length, 0, 'no MCP entries tracked for Pi')
+    assert.strictEqual(tracking.mcpServers.length, 1, 'MCP entry tracked for Pi')
+    assert.strictEqual(tracking.mcpServers[0].name, 'ns-test-mcp')
+    assert.ok(tracking.mcpServers[0].configPath.includes('.pi/agent/mcp.json'))
   })
 })
 
@@ -385,19 +392,16 @@ describe('doctor()', () => {
     assert.ok(report.mcpServers.unreachable.includes('ns-test-mcp'))
   })
 
-  it('returns mcpStatus ok for Pi (no MCP support)', async () => {
-    const { install, doctor } = await import('../../src/index.js')
+  it('reports unreachable MCPs for Pi when not tracked', async () => {
+    const { doctor } = await import('../../src/index.js')
     const bundle = createBundle()
     const bundlePath = writeBundle(bundle)
-    const skillsSource = createSkillSource('ns-test-skill')
-
-    await install({ harness: 'pi', bundlePath, skillsSource })
 
     const report = await doctor('pi', bundlePath)
 
-    assert.strictEqual(report.mcpServers.status, 'ok')
+    assert.strictEqual(report.mcpServers.status, 'unreachable')
     assert.deepStrictEqual(report.mcpServers.reachable, [])
-    assert.deepStrictEqual(report.mcpServers.unreachable, [])
+    assert.ok(report.mcpServers.unreachable.includes('ns-test-mcp'))
   })
 
   it('reports errors when bundle path is invalid', async () => {

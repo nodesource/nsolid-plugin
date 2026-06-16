@@ -24,7 +24,16 @@ pi list
 
 - 15 AI skills for Node.js performance and security analysis
 - Automatic authentication on first load
+- MCP configuration written to `~/.pi/agent/mcp.json`
 
-## Limitations
+## MCP Adapter Requirement
 
-- Pi does not support MCP yet, so MCP-backed skills will not have their tools
+Pi does not natively support MCP. After installing this plugin, install one of these MCP adapter extensions so Pi can use the configured NodeSource MCP servers:
+
+```bash
+pi install npm:pi-mcp-adapter
+# or
+pi install npm:@0xkobold/pi-mcp
+```
+
+Without an adapter, the MCP-backed skills will be installed but their tools will be unavailable.

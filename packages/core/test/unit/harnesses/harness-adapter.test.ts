@@ -31,7 +31,7 @@ describe('getAdapter', () => {
     const adapter = getAdapter('pi')
 
     assert.strictEqual(adapter.name, 'pi')
-    assert.strictEqual(adapter.supportsMcp(), false)
+    assert.strictEqual(adapter.supportsMcp(), true)
   })
 
   it('returns AntigravityAdapter for antigravity', async () => {
@@ -55,7 +55,7 @@ describe('getAdapter', () => {
     assert.ok(opencode.getMcpConfigPath()?.endsWith('.config/opencode/opencode.jsonc'))
 
     const pi = getAdapter('pi')
-    assert.strictEqual(pi.getMcpConfigPath(), null)
+    assert.ok(pi.getMcpConfigPath()?.endsWith('.pi/agent/mcp.json'))
 
     const antigravity = getAdapter('antigravity')
     assert.ok(antigravity.getMcpConfigPath()?.endsWith('.gemini/config/mcp_config.json'))

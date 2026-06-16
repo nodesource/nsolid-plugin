@@ -1,12 +1,13 @@
 import type { HarnessAdapter, McpConfig } from './harness-adapter.js'
 import type { HarnessType } from '../types.js'
 import { resolveHome } from '../utils/path.js'
+import { writeAdapterMcpConfig, readExistingConfig } from '../mcp/mcp-config-writer.js'
 
 export class PiAdapter implements HarnessAdapter {
   readonly name: HarnessType = 'pi'
 
-  getMcpConfigPath (): string | null {
-    return null
+  getMcpConfigPath (): string {
+    return resolveHome('~/.pi/agent/mcp.json')
   }
 
   getSkillsPath (): string {
@@ -14,14 +15,14 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   supportsMcp (): boolean {
-    return false
+    return true
   }
 
   async readMcpConfig (): Promise<McpConfig> {
-    return { mcpServers: {} }
+    return readExistingConfig(this.getMcpConfigPath(), 'json')
   }
 
-  async writeMcpConfig (_config: McpConfig): Promise<void> {
-    // No-op: Pi does not support MCP
+  async writeMcpConfig (config: McpConfig): Promise<void> {
+    writeAdapterMcpConfig(this.name, config)
   }
 }

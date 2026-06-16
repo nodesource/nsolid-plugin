@@ -55,7 +55,8 @@ The installer SHALL support first-time installation, reinstallation, idempotent 
 - **WHEN** the package is loaded by Pi Agent (via `pi.extensions`)
 - **THEN** the `index.js` extension entrypoint invokes `core.install()` with `NSOLID_HARNESS=pi`
 - **AND** auth and skill copy run
-- **AND** no MCP config is written because Pi does not support MCP today
+- **AND** MCP configuration is written to `~/.pi/agent/mcp.json`
+- **AND** an MCP adapter extension (such as `pi-mcp-adapter` or `@0xkobold/pi-mcp`) is required for Pi to use the configured MCP servers
 
 #### Scenario: Reinstallation with valid existing credentials
 
@@ -244,6 +245,7 @@ When no tracking file is present, the uninstaller scans only these predefined pa
   - `~/.codex/config.toml`
   - `~/.config/opencode/opencode.jsonc`
   - `~/.gemini/config/mcp_config.json`
+  - `~/.pi/agent/mcp.json`
 
 **Algorithm**:
 1. Scan only the predefined patterns above (no recursive or broad searches)
@@ -437,8 +439,32 @@ X-Nsolid-Service-Token = "<token>"
 **Then** the `pi.extensions` entrypoint (`index.js`) runs `core.install()` with `NSOLID_HARNESS=pi`
 **And** the OAuth flow runs if no valid credentials exist
 **And** skills are copied to `~/.agents/skills/` and linked to `~/.pi/agent/skills/`
+**And** MCP configuration is written to `~/.pi/agent/mcp.json` using the standard `mcpServers` format with `url` and `headers`
+**And** the MCP configuration uses the same three server entries as the other harnesses: `nsolid-console`, `ns-benchmark`, and `ncm`
 **And** a tracking file entry is created for Pi
-**And** no MCP configuration is written because Pi does not support MCP in the current version
+**And** the user is informed that Pi requires an additional MCP adapter extension (such as `pi-mcp-adapter` or `@0xkobold/pi-mcp`) to use the configured MCP servers
+
+---
+
+### Requirement: Pi MCP Adapter Dependency Documentation
+
+The project SHALL document that Pi Agent does not natively support MCP and that users must install a separate MCP adapter extension to consume the NodeSource MCP configuration.
+
+#### Scenario: README documents the adapter requirement
+
+**Given** a Pi user reads the project README or the Pi plugin README
+**When** they follow the Pi installation instructions
+**Then** they see a clear note that `@nodesource/pi-plugin` writes `~/.pi/agent/mcp.json`
+**And** they see instructions to install one of the supported MCP adapter extensions, such as `pi-mcp-adapter` or `@0xkobold/pi-mcp`
+**And** they understand that without the adapter the MCP-backed skills will not have working tools
+
+#### Scenario: Supported adapter configurations
+
+**Given** a supported MCP adapter extension is installed
+**When** it reads its configuration sources
+**Then** it discovers the NodeSource MCP servers in `~/.pi/agent/mcp.json`
+**And** the servers use standard `url` and `headers` fields
+**And** no additional user configuration is required beyond installing the adapter
 
 ---
 

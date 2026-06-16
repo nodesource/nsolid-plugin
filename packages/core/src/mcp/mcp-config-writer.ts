@@ -31,7 +31,7 @@ function getMcpConfigInfo (harness: HarnessType): ConfigInfo | null {
     case 'antigravity':
       return { configPath: resolveHome('~/.gemini/config/mcp_config.json'), format: 'json' }
     case 'pi':
-      return null
+      return { configPath: resolveHome('~/.pi/agent/mcp.json'), format: 'json' }
   }
 }
 

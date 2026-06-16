@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import path, { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 describe('PiAdapter', () => {
@@ -21,11 +21,13 @@ describe('PiAdapter', () => {
     }
   })
 
-  it('returns null for MCP config path', async () => {
+  it('returns Pi MCP config path', async () => {
     const { PiAdapter } = await import('../../../src/harnesses/pi-adapter.js')
     const adapter = new PiAdapter()
 
-    assert.strictEqual(adapter.getMcpConfigPath(), null)
+    const configPath = adapter.getMcpConfigPath()
+    assert.ok(configPath)
+    assert.ok(configPath.includes('.pi/agent/mcp.json'))
   })
 
   it('returns correct skills path', async () => {
@@ -36,32 +38,50 @@ describe('PiAdapter', () => {
     assert.ok(skillsPath.includes('.pi/agent/skills'))
   })
 
-  it('does not support MCP', async () => {
+  it('supports MCP', async () => {
     const { PiAdapter } = await import('../../../src/harnesses/pi-adapter.js')
     const adapter = new PiAdapter()
 
-    assert.strictEqual(adapter.supportsMcp(), false)
+    assert.strictEqual(adapter.supportsMcp(), true)
   })
 
-  it('returns empty config on read', async () => {
+  it('reads existing MCP config', async () => {
     const { PiAdapter } = await import('../../../src/harnesses/pi-adapter.js')
     const adapter = new PiAdapter()
+    const configPath = adapter.getMcpConfigPath()
+
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    writeFileSync(configPath, JSON.stringify({
+      mcpServers: {
+        'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {} },
+      },
+    }, null, 2))
 
     const config = await adapter.readMcpConfig()
-    assert.deepStrictEqual(config, { mcpServers: {} })
+    assert.deepStrictEqual(config, {
+      mcpServers: {
+        'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {} },
+      },
+    })
   })
 
-  it('writeMcpConfig is a no-op', async () => {
+  it('writes MCP config', async () => {
     const { PiAdapter } = await import('../../../src/harnesses/pi-adapter.js')
     const adapter = new PiAdapter()
+    const configPath = adapter.getMcpConfigPath()
 
-    const result = await adapter.writeMcpConfig({
+    await adapter.writeMcpConfig({
       mcpServers: {
         'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {} },
       },
     })
 
-    assert.strictEqual(result, undefined)
+    const written = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.deepStrictEqual(written, {
+      mcpServers: {
+        'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {} },
+      },
+    })
   })
 
   it('returns correct name', async () => {
