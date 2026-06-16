@@ -11,7 +11,8 @@
     ".": {
       "import": "./dist/src/index.js",
       "types": "./dist/src/index.d.ts"
-    }
+    },
+    "./scripts/setup.mjs": "./scripts/setup.mjs"
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",

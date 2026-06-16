@@ -280,11 +280,11 @@ function removeMcpServersBlockFromRaw (raw: string): string {
  * Apply harness-specific MCP server schema before writing to disk.
  *
  * Antigravity stores the endpoint as `serverUrl`; every other harness uses
- * `url`. This is the SINGLE source of truth for that conversion: both the
- * generic `writeMcpConfig` install path and the adapter-backed
- * `writeAdapterMcpConfig` route through here, so the two paths can never drift
- * (previously the conversion was duplicated inline here and again in the
- * Antigravity adapter).
+ * `url`. This is the SINGLE source of truth for that conversion: the install
+ * path (`writeMcpConfig`), the adapter-backed `writeAdapterMcpConfig`, and
+ * the uninstall path (`removeMcpConfig`) all route through here, so they can
+ * never drift (previously the conversion was duplicated inline here and again
+ * in the Antigravity adapter, and removeMcpConfig skipped it entirely).
  */
 function applyHarnessWriteFormat (
   harness: HarnessType,
@@ -346,5 +346,5 @@ export async function removeMcpConfig (
 
   const existing = readExistingConfig(resolvedPath, format)
   const result = removeMcpServers(existing, serverNames)
-  writeConfigFile(resolvedPath, format, result)
+  writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, result))
 }

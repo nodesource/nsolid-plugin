@@ -566,6 +566,24 @@ describe('removeMcpConfig', () => {
     assert.strictEqual(existsSync(resolveHome('~/.gemini/config/mcp_config.json')), false)
   })
 
+  it('antigravity round-trip: removing one server keeps survivors as serverUrl', async () => {
+    const { writeMcpConfig, removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+
+    await writeMcpConfig('antigravity', [
+      { name: 'ns-benchmark', url: 'https://benchmark.example.com', headers: {} },
+      { name: 'ns-solid', url: 'https://nsolid.example.com', headers: {} },
+    ])
+    await removeMcpConfig('antigravity', ['ns-benchmark'])
+
+    const content = JSON.parse(readFileSync(resolveHome('~/.gemini/config/mcp_config.json'), 'utf-8'))
+    assert.ok(!('ns-benchmark' in content.mcpServers))
+    assert.ok('ns-solid' in content.mcpServers)
+    // Survivor must be written back in Antigravity's serverUrl schema, not url.
+    assert.strictEqual(content.mcpServers['ns-solid'].serverUrl, 'https://nsolid.example.com')
+    assert.strictEqual(content.mcpServers['ns-solid'].url, undefined)
+  })
+
   it('removes mcpServers when it is not the last property in JSONC', async () => {
     const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
