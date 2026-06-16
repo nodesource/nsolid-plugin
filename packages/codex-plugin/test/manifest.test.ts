@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,6 +23,8 @@ describe('Codex plugin manifest', () => {
     const manifest = loadManifest()
     assert.ok(manifest.hooks, 'manifest must have hooks')
     assert.ok(manifest.hooks.endsWith('.json'))
+    const hookPath = join(PLUGIN_DIR, manifest.hooks)
+    assert.ok(existsSync(hookPath), 'manifest hooks file must exist')
   })
 
   it('has version field', () => {

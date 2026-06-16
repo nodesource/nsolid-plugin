@@ -17,7 +17,12 @@ cpSync(pluginDir, targetDir, { recursive: true, force: true, dereference: true }
 
 process.env.NSOLID_HARNESS = 'antigravity'
 
-const corePkgRoot = resolve(__dirname, '..', 'node_modules', '@nodesource/plugin-core')
+let corePkgRoot
+try {
+  corePkgRoot = dirname(fileURLToPath(await import.meta.resolve('@nodesource/plugin-core/package.json')))
+} catch {
+  corePkgRoot = resolve(__dirname, '..', 'node_modules', '@nodesource/plugin-core')
+}
 const bundlePath = join(corePkgRoot, 'bundle.json')
 const skillsSource = corePkgRoot
 

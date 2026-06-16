@@ -18,7 +18,6 @@ async function resolveSetupScript () {
 
 async function ensureInstalled () {
   if (installed) return
-  installed = true
   try {
     process.env.NSOLID_HARNESS = 'opencode'
     const setupScript = await resolveSetupScript()
@@ -31,6 +30,7 @@ async function ensureInstalled () {
       child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`Setup exited with code ${code}`)))
       child.on('error', reject)
     })
+    installed = true
   } catch (e) {
     console.error('NodeSource setup failed:', e.message)
   }

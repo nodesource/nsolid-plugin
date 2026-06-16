@@ -11,6 +11,12 @@ const skillsSource = corePkgRoot
 const harness = process.env.NSOLID_HARNESS
 const action = process.argv[2] ?? 'install'
 
+const VALID_ACTIONS = ['install', 'uninstall']
+if (!VALID_ACTIONS.includes(action)) {
+  console.error(`Invalid action: ${action}. Must be: ${VALID_ACTIONS.join(', ')}`)
+  process.exit(1)
+}
+
 if (!harness) {
   console.error('NSOLID_HARNESS env var is required')
   process.exit(1)

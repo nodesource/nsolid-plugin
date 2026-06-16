@@ -57,7 +57,15 @@ export function readExistingConfig (configPath: string, format: ConfigFormat): N
 
 function normalizeFromJson (data: Record<string, unknown>): NormalizedMcpConfig {
   if (data.mcpServers && typeof data.mcpServers === 'object' && !Array.isArray(data.mcpServers)) {
-    return { mcpServers: data.mcpServers as NormalizedMcpConfig['mcpServers'] }
+    const raw = data.mcpServers as Record<string, Record<string, unknown>>
+    const servers: Record<string, { url: string; headers: Record<string, string> }> = {}
+    for (const [name, srv] of Object.entries(raw)) {
+      servers[name] = {
+        url: (srv.url || srv.serverUrl || '') as string,
+        headers: (srv.headers || {}) as Record<string, string>,
+      }
+    }
+    return { mcpServers: servers }
   }
   return { mcpServers: {} }
 }
@@ -287,6 +295,14 @@ export async function writeMcpConfig (
 
   const existing = readExistingConfig(resolvedPath, format)
   const merged = mergeMcpConfig(existing, resolvedServers)
+
+  if (harness === 'antigravity') {
+    for (const srv of Object.values(merged.mcpServers)) {
+      ;(srv as Record<string, unknown>).serverUrl = srv.url
+      delete (srv as Partial<{ url: string }>).url
+    }
+  }
+
   writeConfigFile(resolvedPath, format, merged)
 }
 

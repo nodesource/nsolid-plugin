@@ -454,21 +454,6 @@ X-Nsolid-Service-Token = "<token>"
 }
 ```
 
-```json
-{
-  "mcpServers": {
-    "ns-benchmark": {
-      "command": "node",
-      "args": ["/path/to/ns-benchmark/src/mcp-entrypoint.js"],
-      "env": {
-        "NSOLID_SERVICE_TOKEN": "<token>",
-        "NSOLID_ORG_ID": "<orgId>"
-      }
-    }
-  }
-}
-```
-
 ## Data Flow
 
 ### Installation Sequence

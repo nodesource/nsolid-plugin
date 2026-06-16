@@ -3,7 +3,13 @@ import path from 'node:path'
 import { install } from '@nodesource/plugin-core'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const corePkgRoot = path.resolve(__dirname, 'node_modules', '@nodesource/plugin-core')
+
+let corePkgRoot
+try {
+  corePkgRoot = path.dirname(fileURLToPath(await import.meta.resolve('@nodesource/plugin-core/package.json')))
+} catch {
+  corePkgRoot = path.resolve(__dirname, 'node_modules', '@nodesource/plugin-core')
+}
 const bundlePath = path.join(corePkgRoot, 'bundle.json')
 const skillsSource = corePkgRoot
 

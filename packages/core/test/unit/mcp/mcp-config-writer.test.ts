@@ -461,8 +461,8 @@ describe('writeAdapterMcpConfig', () => {
     assert.strictEqual(model.name, 'gpt-4')
   })
 
-  it('writes Antigravity JSON config replacing existing', async () => {
-    const { writeAdapterMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+  it('writes Antigravity JSON config with serverUrl field merging existing', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
     const { mkdirSync } = await import('node:fs')
     const { dirname } = await import('node:path')
@@ -473,15 +473,47 @@ describe('writeAdapterMcpConfig', () => {
       mcpServers: { 'old-server': { url: 'http://old:8080', headers: {} } },
     }, null, 2))
 
-    writeAdapterMcpConfig('antigravity', {
-      mcpServers: {
-        'new-server': { url: 'http://new:9000', headers: {} },
-      },
-    })
+    await writeMcpConfig('antigravity', [{
+      name: 'new-server',
+      url: 'http://new:9000',
+      headers: {},
+    }])
 
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))
     assert.ok('new-server' in content.mcpServers)
-    assert.ok(!('old-server' in content.mcpServers))
+    assert.ok('old-server' in content.mcpServers)
+    assert.strictEqual(content.mcpServers['new-server'].serverUrl, 'http://new:9000')
+    assert.strictEqual(content.mcpServers['new-server'].url, undefined)
+  })
+
+  it('antigravity round-trip: re-read preserves serverUrl across installs', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
+    mkdirSync(dirname(configPath), { recursive: true })
+
+    await writeMcpConfig('antigravity', [{
+      name: 'ns-benchmark',
+      url: 'https://benchmark.example.com',
+      headers: {},
+    }])
+
+    await writeMcpConfig('antigravity', [{
+      name: 'ns-solid',
+      url: 'https://nsolid.example.com',
+      headers: {},
+    }])
+
+    const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.ok('ns-benchmark' in content.mcpServers)
+    assert.ok('ns-solid' in content.mcpServers)
+    assert.strictEqual(content.mcpServers['ns-benchmark'].serverUrl, 'https://benchmark.example.com')
+    assert.strictEqual(content.mcpServers['ns-solid'].serverUrl, 'https://nsolid.example.com')
+    assert.strictEqual(content.mcpServers['ns-benchmark'].url, undefined)
+    assert.strictEqual(content.mcpServers['ns-solid'].url, undefined)
   })
 
   it('Pi is a no-op', async () => {

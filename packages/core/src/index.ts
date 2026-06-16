@@ -104,7 +104,12 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   if (credentials) {
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
-    variables.MCP_URL = credentials.mcpUrl || credentials.consoleUrl.replace('.saas.', '.mcp.saas.')
+    const derivedMcpUrl = credentials.consoleUrl.replaceAll('.saas.', '.mcp.saas.')
+    if (!credentials.mcpUrl && derivedMcpUrl === credentials.consoleUrl) {
+      result.errors.push('Could not derive MCP URL from console URL pattern')
+      return result
+    }
+    variables.MCP_URL = credentials.mcpUrl || derivedMcpUrl
   }
 
   const mcpConfigPath = adapter.getMcpConfigPath()

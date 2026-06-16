@@ -1,7 +1,7 @@
 {
   "name": "@nodesource/opencode-plugin",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "main": "index.js",
   "description": "NodeSource AI Skills plugin for OpenCode",
