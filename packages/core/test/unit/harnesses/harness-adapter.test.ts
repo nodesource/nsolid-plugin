@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 
 describe('getAdapter', () => {
   it('returns ClaudeAdapter for claude', async () => {
@@ -49,15 +50,15 @@ describe('getAdapter', () => {
     assert.ok(claude.getMcpConfigPath()?.endsWith('.claude.json'))
 
     const codex = getAdapter('codex')
-    assert.ok(codex.getMcpConfigPath()?.endsWith('.codex/config.toml'))
+    assert.ok(codex.getMcpConfigPath()?.endsWith(['.codex', 'config.toml'].join(path.sep)))
 
     const opencode = getAdapter('opencode')
-    assert.ok(opencode.getMcpConfigPath()?.endsWith('.config/opencode/opencode.jsonc'))
+    assert.ok(opencode.getMcpConfigPath()?.endsWith(['.config', 'opencode', 'opencode.jsonc'].join(path.sep)))
 
     const pi = getAdapter('pi')
-    assert.ok(pi.getMcpConfigPath()?.endsWith('.pi/agent/mcp.json'))
+    assert.ok(pi.getMcpConfigPath()?.endsWith(['.pi', 'agent', 'mcp.json'].join(path.sep)))
 
     const antigravity = getAdapter('antigravity')
-    assert.ok(antigravity.getMcpConfigPath()?.endsWith('.gemini/config/mcp_config.json'))
+    assert.ok(antigravity.getMcpConfigPath()?.endsWith(['.gemini', 'config', 'mcp_config.json'].join(path.sep)))
   })
 })

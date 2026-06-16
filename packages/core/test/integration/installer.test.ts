@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { BundleDescriptor } from '../../src/types.js'
 import type { TrackingData } from '../../src/skills/skill-tracker.js'
@@ -186,7 +186,7 @@ describe('install()', () => {
     assert.ok(tracking, 'tracking file exists')
     assert.strictEqual(tracking.mcpServers.length, 1, 'MCP entry tracked for Pi')
     assert.strictEqual(tracking.mcpServers[0].name, 'ns-test-mcp')
-    assert.ok(tracking.mcpServers[0].configPath.includes('.pi/agent/mcp.json'))
+    assert.ok(tracking.mcpServers[0].configPath.includes(['.pi', 'agent', 'mcp.json'].join(sep)))
   })
 })
 

@@ -7,17 +7,27 @@ import { tmpdir } from 'node:os'
 describe('PiAdapter', () => {
   let tmpDir: string
   let originalHome: string | undefined
+  let originalUserProfile: string | undefined
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
     originalHome = process.env.HOME
+    originalUserProfile = process.env.USERPROFILE
     process.env.HOME = tmpDir
+    process.env.USERPROFILE = tmpDir
   })
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true })
     if (originalHome !== undefined) {
       process.env.HOME = originalHome
+    } else {
+      delete process.env.HOME
+    }
+    if (originalUserProfile !== undefined) {
+      process.env.USERPROFILE = originalUserProfile
+    } else {
+      delete process.env.USERPROFILE
     }
   })
 
@@ -27,7 +37,7 @@ describe('PiAdapter', () => {
 
     const configPath = adapter.getMcpConfigPath()
     assert.ok(configPath)
-    assert.ok(configPath.includes('.pi/agent/mcp.json'))
+    assert.ok(configPath.includes(['.pi', 'agent', 'mcp.json'].join(path.sep)))
   })
 
   it('returns correct skills path', async () => {
@@ -35,7 +45,7 @@ describe('PiAdapter', () => {
     const adapter = new PiAdapter()
 
     const skillsPath = adapter.getSkillsPath()
-    assert.ok(skillsPath.includes('.pi/agent/skills'))
+    assert.ok(skillsPath.includes(['.pi', 'agent', 'skills'].join(path.sep)))
   })
 
   it('supports MCP', async () => {

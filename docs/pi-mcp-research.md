@@ -84,7 +84,7 @@ pi install npm:pi-mcp-adapter
 
 Because Pi has no native MCP configuration target, the NodeSource plugin should:
 
-1. **Write a Pi-owned MCP config file** at `~/.pi/agent/mcp.json` during installation. This file uses the standard `mcpServers` format with `url` and `headers` that both `pi-mcp-adapter` and `@0xkobold/pi-mcp` can consume.
+1. **Write a Pi-owned MCP config file** at `~/.pi/agent/mcp.json` during installation. This file uses the standard `mcpServers` format with `url` and `headers` that `pi-mcp-adapter` consumes directly. Note that `@0xkobold/pi-mcp` reads a separate file (`~/.0xkobold/mcp.json`) using a different `servers[]` format, so it does **not** auto-consume this config; only `pi-mcp-adapter` is directly compatible with this setup.
 2. **Document the adapter requirement** so users know they must also install an MCP adapter extension for Pi to actually use the NodeSource MCP servers.
 
 This is the smallest code change and reuses the existing cross-harness MCP config pipeline.
@@ -156,11 +156,12 @@ Pi users should install in this order:
 # 1. Install the NodeSource plugin (writes ~/.pi/agent/mcp.json and skills)
 pi install npm:@nodesource/pi-plugin
 
-# 2. Install an MCP adapter so Pi can use the configured servers
+# 2. Install pi-mcp-adapter so Pi can use the configured servers.
+#    It reads ~/.pi/agent/mcp.json automatically.
 pi install npm:pi-mcp-adapter
-# or
-pi install npm:@0xkobold/pi-mcp
 ```
+
+> `@0xkobold/pi-mcp` is an alternative adapter, but it reads `~/.0xkobold/mcp.json` in a different (`servers[]`) format and does not pick up the NodeSource config automatically. Use `pi-mcp-adapter` unless you are willing to maintain a separate `~/.0xkobold/mcp.json`.
 
 Without step 2, the MCP config file exists but Pi has no MCP client, so the skills will still show `requiresMcp` warnings and their tools will be unavailable.
 

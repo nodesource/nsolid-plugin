@@ -460,11 +460,19 @@ The project SHALL document that Pi Agent does not natively support MCP and that 
 
 #### Scenario: Supported adapter configurations
 
-**Given** a supported MCP adapter extension is installed
+**Given** the `pi-mcp-adapter` extension is installed
 **When** it reads its configuration sources
 **Then** it discovers the NodeSource MCP servers in `~/.pi/agent/mcp.json`
 **And** the servers use standard `url` and `headers` fields
-**And** no additional user configuration is required beyond installing the adapter
+**And** no additional user configuration is required beyond installing `pi-mcp-adapter`
+
+#### Scenario: Alternative adapter requires separate configuration
+
+**Given** the `@0xkobold/pi-mcp` extension is installed instead of `pi-mcp-adapter`
+**When** it reads its configuration sources
+**Then** it reads `~/.0xkobold/mcp.json` in a `servers[]` format rather than `~/.pi/agent/mcp.json`
+**And** the NodeSource MCP servers are not discovered automatically
+**And** the user must configure `~/.0xkobold/mcp.json` manually if they choose this adapter
 
 ---
 
