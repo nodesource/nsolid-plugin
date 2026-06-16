@@ -59,13 +59,13 @@ describe('OpenCodeAdapter', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // Comment\n  "mcpServers": {\n    "my-server": { "command": "python", "args": [] }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // Comment\n  "mcpServers": {\n    "my-server": { "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
 
     const adapter = new OpenCodeAdapter()
     const config = await adapter.readMcpConfig()
 
     assert.ok('my-server' in config.mcpServers)
-    assert.strictEqual(config.mcpServers['my-server'].command, 'python')
+    assert.strictEqual(config.mcpServers['my-server'].url, 'http://localhost:8080')
   })
 
   it('writes MCP config preserving comments', async () => {
@@ -74,12 +74,12 @@ describe('OpenCodeAdapter', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // Comment\n  "mcpServers": {\n    "my-server": { "command": "python", "args": [] }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // Comment\n  "mcpServers": {\n    "my-server": { "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
 
     const adapter = new OpenCodeAdapter()
     await adapter.writeMcpConfig({
       mcpServers: {
-        'ns-benchmark': { command: 'node', args: ['server.js'] },
+        'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {} },
       },
     })
 

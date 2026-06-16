@@ -1,9 +1,8 @@
 import type { McpServerRef } from '../types.js'
 
 export interface McpServerConfig {
-  command: string
-  args: string[]
-  env?: Record<string, string>
+  url: string
+  headers: Record<string, string>
 }
 
 export interface NormalizedMcpConfig {
@@ -18,9 +17,8 @@ export function mergeMcpConfig (
 
   for (const server of newServers) {
     merged[server.name] = {
-      command: server.command,
-      args: [...server.args],
-      env: server.env ? { ...server.env } : undefined,
+      url: server.url,
+      headers: { ...server.headers },
     }
   }
 
@@ -48,12 +46,10 @@ export function expandVariables (
 ): McpServerRef[] {
   return servers.map((server) => ({
     ...server,
-    args: server.args.map((arg) => expandString(arg, variables)),
-    env: server.env
-      ? Object.fromEntries(
-        Object.entries(server.env).map(([k, v]) => [k, expandString(v, variables)])
-      )
-      : undefined,
+    url: expandString(server.url, variables),
+    headers: Object.fromEntries(
+      Object.entries(server.headers).map(([k, v]) => [k, expandString(v, variables)])
+    ),
   }))
 }
 

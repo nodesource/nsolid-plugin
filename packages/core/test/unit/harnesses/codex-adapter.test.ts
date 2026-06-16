@@ -59,7 +59,7 @@ describe('CodexAdapter', () => {
 
     const configPath = resolveHome('~/.codex/config.toml')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '[mcp_servers.my-server]\ncommand = "python"\nargs = ["server.py"]\n')
+    writeFileSync(configPath, '[mcp_servers.my-server]\nurl = "http://localhost:8080"\nheaders = {}\n')
 
     const adapter = new CodexAdapter()
     const config = await adapter.readMcpConfig()
@@ -76,9 +76,8 @@ describe('CodexAdapter', () => {
     await adapter.writeMcpConfig({
       mcpServers: {
         'ns-benchmark': {
-          command: 'node',
-          args: ['/path/to/server.js'],
-          env: { TOKEN: 'abc' },
+          url: 'https://benchmark.mcp.saas.nodesource.io/mcp',
+          headers: { Authorization: 'Bearer abc' },
         },
       },
     })

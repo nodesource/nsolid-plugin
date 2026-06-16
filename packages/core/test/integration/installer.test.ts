@@ -40,7 +40,7 @@ function createBundle (overrides?: Partial<BundleDescriptor>): BundleDescriptor 
       { name: 'ns-test-skill', path: 'skills/ns-test-skill', description: 'Test skill' },
     ],
     mcpServers: [
-      { name: 'ns-test-mcp', command: 'node', args: ['test.js'] },
+      { name: 'ns-test-mcp', url: 'https://mcp.example.com', headers: { Authorization: 'Bearer test' } },
     ],
     ...overrides,
   }

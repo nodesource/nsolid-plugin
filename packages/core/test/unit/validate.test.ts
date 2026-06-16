@@ -11,7 +11,7 @@ const validBundle: BundleDescriptor = {
     { name: 'ns-test', path: 'skills/ns-test', description: 'Test skill' }
   ],
   mcpServers: [
-    { name: 'test-mcp', command: 'node', args: ['server.js'] }
+    { name: 'test-mcp', url: 'https://mcp.example.com', headers: { Authorization: 'Bearer token' } }
   ]
 }
 
@@ -31,27 +31,26 @@ describe('validateBundle', () => {
           name: 'ns-analyze-cpu',
           path: 'skills/ns-analyze-cpu',
           description: 'Analyze CPU usage',
-          requiresMcp: ['nsolid-mcp']
+          requiresMcp: ['nsolid-console']
         }
       ],
       mcpServers: [
         {
-          name: 'nsolid-mcp',
-          command: 'node',
+          name: 'nsolid-console',
           // eslint-disable-next-line no-template-curly-in-string
-          args: ['${MCP_ROOT}/nsolid-mcp/src/mcp-entrypoint.js'],
-          env: {
+          url: '${MCP_URL}',
+          headers: {
             // eslint-disable-next-line no-template-curly-in-string
-            NSOLID_SERVICE_TOKEN: '${AUTH_TOKEN}',
-            // eslint-disable-next-line no-template-curly-in-string
-            NSOLID_ORG_ID: '${AUTH_ORG_ID}'
+            'X-Nsolid-Service-Token': '${AUTH_TOKEN}',
           }
         },
         {
-          name: 'ncm-mcp',
-          command: 'node',
-          // eslint-disable-next-line no-template-curly-in-string
-          args: ['${MCP_ROOT}/ncm-mcp/src/mcp-entrypoint.js']
+          name: 'ncm',
+          url: 'https://mcp.ncm.nodesource.com',
+          headers: {
+            // eslint-disable-next-line no-template-curly-in-string
+            'X-Nsolid-Service-Token': '${AUTH_TOKEN}',
+          }
         }
       ],
       auth: {
@@ -105,7 +104,7 @@ describe('validateBundle', () => {
         name: 'ns-test',
         path: 'skills/ns-test',
         description: 'Test skill',
-        requiresMcp: ['nsolid-mcp', 'nsolid-mcp']
+        requiresMcp: ['nsolid-console', 'nsolid-console']
       }]
     }
     assert.throws(() => validateBundle(bad), /validation failed/i)

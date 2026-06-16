@@ -22,7 +22,7 @@ afterEach(() => {
 
 const entries = [
   { name: 'ns-benchmark', configPath: '~/.claude.json' },
-  { name: 'nsolid-mcp', configPath: '~/.claude.json' },
+  { name: 'nsolid-console', configPath: '~/.claude.json' },
 ]
 
 describe('addTrackedMcps', () => {
@@ -99,7 +99,7 @@ describe('removeTrackedMcps', () => {
 
     const listed = await listTrackedMcps()
     assert.strictEqual(listed.length, 2)
-    // Claude's ns-benchmark removed, Codex's ns-benchmark + Claude's nsolid-mcp remain
+    // Claude's ns-benchmark removed, Codex's ns-benchmark + Claude's nsolid-console remain
     const benchmarkEntries = listed.filter((m) => m.name === 'ns-benchmark')
     assert.strictEqual(benchmarkEntries.length, 1)
     assert.strictEqual(benchmarkEntries[0].harness, 'codex')
@@ -164,7 +164,7 @@ describe('listTrackedMcps', () => {
     assert.strictEqual(listed.length, 2)
     assert.deepStrictEqual(
       listed.map((m) => m.name),
-      ['ns-benchmark', 'nsolid-mcp']
+      ['ns-benchmark', 'nsolid-console']
     )
   })
 
@@ -180,6 +180,6 @@ describe('listTrackedMcps', () => {
 
     const codexEntries = await listTrackedMcps('codex')
     assert.strictEqual(codexEntries.length, 1)
-    assert.strictEqual(codexEntries[0].name, 'nsolid-mcp')
+    assert.strictEqual(codexEntries[0].name, 'nsolid-console')
   })
 })

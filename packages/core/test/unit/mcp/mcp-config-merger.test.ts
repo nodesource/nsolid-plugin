@@ -5,15 +5,14 @@ import type { McpServerRef } from '../../../src/types.js'
 
 const serverA: McpServerRef = {
   name: 'ns-benchmark',
-  command: 'node',
-  args: ['/path/to/ns-benchmark/src/mcp-entrypoint.js'],
-  env: { NSOLID_SERVICE_TOKEN: '${AUTH_TOKEN}', NSOLID_ORG_ID: '${AUTH_ORG_ID}' },
+  url: 'https://benchmark.mcp.saas.nodesource.io/mcp',
+  headers: { 'X-Nsolid-Service-Token': '${AUTH_TOKEN}', 'X-Nsolid-Org-Id': '${AUTH_ORG_ID}' },
 }
 
 const serverB: McpServerRef = {
-  name: 'nsolid-mcp',
-  command: 'node',
-  args: ['/path/to/nsolid-mcp/src/mcp-entrypoint.js'],
+  name: 'nsolid-console',
+  url: '${MCP_URL}',
+  headers: { 'X-Nsolid-Service-Token': '${AUTH_TOKEN}' },
 }
 
 describe('mergeMcpConfig', () => {
@@ -23,9 +22,8 @@ describe('mergeMcpConfig', () => {
     const result = mergeMcpConfig({ mcpServers: {} }, [serverA])
 
     assert.ok('ns-benchmark' in result.mcpServers)
-    assert.strictEqual(result.mcpServers['ns-benchmark'].command, 'node')
-    assert.strictEqual(result.mcpServers['ns-benchmark'].args[0], '/path/to/ns-benchmark/src/mcp-entrypoint.js')
-    assert.ok(result.mcpServers['ns-benchmark'].env)
+    assert.strictEqual(result.mcpServers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
+    assert.ok(result.mcpServers['ns-benchmark'].headers)
   })
 
   it('preserves existing user servers', async () => {
@@ -33,7 +31,7 @@ describe('mergeMcpConfig', () => {
 
     const existing = {
       mcpServers: {
-        'my-custom-server': { command: 'python', args: ['server.py'] },
+        'my-custom-server': { url: 'http://localhost:8080', headers: { Authorization: 'Bearer abc' } },
       },
     }
 
@@ -48,13 +46,13 @@ describe('mergeMcpConfig', () => {
 
     const existing = {
       mcpServers: {
-        'ns-benchmark': { command: 'node', args: ['old-path.js'] },
+        'ns-benchmark': { url: 'https://old-url.example.com', headers: {} },
       },
     }
 
     const result = mergeMcpConfig(existing, [serverA])
 
-    assert.strictEqual(result.mcpServers['ns-benchmark'].args[0], '/path/to/ns-benchmark/src/mcp-entrypoint.js')
+    assert.strictEqual(result.mcpServers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
   })
 
   it('handles mixed scenario (preserves and updates)', async () => {
@@ -62,8 +60,8 @@ describe('mergeMcpConfig', () => {
 
     const existing = {
       mcpServers: {
-        'my-server': { command: 'go', args: ['run'] },
-        'ns-benchmark': { command: 'node', args: ['old.js'] },
+        'my-server': { url: 'http://localhost:3000', headers: {} },
+        'ns-benchmark': { url: 'https://old.example.com', headers: {} },
       },
     }
 
@@ -72,8 +70,8 @@ describe('mergeMcpConfig', () => {
     assert.strictEqual(Object.keys(result.mcpServers).length, 3)
     assert.ok('my-server' in result.mcpServers)
     assert.ok('ns-benchmark' in result.mcpServers)
-    assert.ok('nsolid-mcp' in result.mcpServers)
-    assert.strictEqual(result.mcpServers['ns-benchmark'].args[0], '/path/to/ns-benchmark/src/mcp-entrypoint.js')
+    assert.ok('nsolid-console' in result.mcpServers)
+    assert.strictEqual(result.mcpServers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
   })
 
   it('does not mutate original config', async () => {
@@ -81,7 +79,7 @@ describe('mergeMcpConfig', () => {
 
     const existing = {
       mcpServers: {
-        'my-server': { command: 'go', args: ['run'] },
+        'my-server': { url: 'http://localhost:3000', headers: {} },
       },
     }
 
@@ -98,9 +96,9 @@ describe('removeMcpServers', () => {
 
     const existing = {
       mcpServers: {
-        'ns-benchmark': { command: 'node', args: ['a.js'] },
-        'nsolid-mcp': { command: 'node', args: ['b.js'] },
-        'my-server': { command: 'go', args: ['run'] },
+        'ns-benchmark': { url: 'https://a.example.com', headers: {} },
+        'nsolid-console': { url: 'https://b.example.com', headers: {} },
+        'my-server': { url: 'http://localhost:3000', headers: {} },
       },
     }
 
@@ -108,7 +106,7 @@ describe('removeMcpServers', () => {
 
     assert.strictEqual(Object.keys(result.mcpServers).length, 2)
     assert.ok(!('ns-benchmark' in result.mcpServers))
-    assert.ok('nsolid-mcp' in result.mcpServers)
+    assert.ok('nsolid-console' in result.mcpServers)
     assert.ok('my-server' in result.mcpServers)
   })
 
@@ -117,18 +115,18 @@ describe('removeMcpServers', () => {
 
     const existing = {
       mcpServers: {
-        'ns-benchmark': { command: 'node', args: ['a.js'] },
-        'nsolid-mcp': { command: 'node', args: ['b.js'] },
-        'ncm-mcp': { command: 'node', args: ['c.js'] },
+        'ns-benchmark': { url: 'https://a.example.com', headers: {} },
+        'nsolid-console': { url: 'https://b.example.com', headers: {} },
+        ncm: { url: 'https://c.example.com', headers: {} },
       },
     }
 
-    const result = removeMcpServers(existing, ['ns-benchmark', 'nsolid-mcp'])
+    const result = removeMcpServers(existing, ['ns-benchmark', 'nsolid-console'])
 
     assert.strictEqual(Object.keys(result.mcpServers).length, 1)
     assert.ok(!('ns-benchmark' in result.mcpServers))
-    assert.ok(!('nsolid-mcp' in result.mcpServers))
-    assert.ok('ncm-mcp' in result.mcpServers)
+    assert.ok(!('nsolid-console' in result.mcpServers))
+    assert.ok('ncm' in result.mcpServers)
   })
 
   it('handles nonexistent server name', async () => {
@@ -136,7 +134,7 @@ describe('removeMcpServers', () => {
 
     const existing = {
       mcpServers: {
-        'ns-benchmark': { command: 'node', args: ['a.js'] },
+        'ns-benchmark': { url: 'https://a.example.com', headers: {} },
       },
     }
 
@@ -151,7 +149,7 @@ describe('removeMcpServers', () => {
 
     const existing = {
       mcpServers: {
-        'ns-benchmark': { command: 'node', args: ['a.js'] },
+        'ns-benchmark': { url: 'https://a.example.com', headers: {} },
       },
     }
 
@@ -163,28 +161,27 @@ describe('removeMcpServers', () => {
 })
 
 describe('expandVariables', () => {
-  it('replaces variables in args', async () => {
+  it('replaces variables in url', async () => {
     const { expandVariables } = await import('../../../src/mcp/mcp-config-merger.js')
 
     const servers: McpServerRef[] = [{
       name: 'test',
-      command: 'node',
-      args: ['${MCP_ROOT}/entry.js'],
+      url: '${MCP_URL}/entry',
+      headers: {},
     }]
 
-    const result = expandVariables(servers, { MCP_ROOT: '/home/user/.agents/mcp-servers' })
+    const result = expandVariables(servers, { MCP_URL: 'https://abc.mcp.saas.nodesource.io' })
 
-    assert.strictEqual(result[0].args[0], '/home/user/.agents/mcp-servers/entry.js')
+    assert.strictEqual(result[0].url, 'https://abc.mcp.saas.nodesource.io/entry')
   })
 
-  it('replaces variables in env', async () => {
+  it('replaces variables in headers', async () => {
     const { expandVariables } = await import('../../../src/mcp/mcp-config-merger.js')
 
     const servers: McpServerRef[] = [{
       name: 'test',
-      command: 'node',
-      args: [],
-      env: {
+      url: 'https://example.com',
+      headers: {
         TOKEN: '${AUTH_TOKEN}',
         ORG: '${AUTH_ORG_ID}',
       },
@@ -192,8 +189,8 @@ describe('expandVariables', () => {
 
     const result = expandVariables(servers, { AUTH_TOKEN: 'tk_123', AUTH_ORG_ID: 'org_456' })
 
-    assert.strictEqual(result[0].env!.TOKEN, 'tk_123')
-    assert.strictEqual(result[0].env!.ORG, 'org_456')
+    assert.strictEqual(result[0].headers.TOKEN, 'tk_123')
+    assert.strictEqual(result[0].headers.ORG, 'org_456')
   })
 
   it('leaves missing variables as-is', async () => {
@@ -201,13 +198,13 @@ describe('expandVariables', () => {
 
     const servers: McpServerRef[] = [{
       name: 'test',
-      command: 'node',
-      args: ['${UNKNOWN_VAR}/entry.js'],
+      url: '${UNKNOWN_VAR}/entry',
+      headers: {},
     }]
 
     const result = expandVariables(servers, {})
 
-    assert.strictEqual(result[0].args[0], '${UNKNOWN_VAR}/entry.js')
+    assert.strictEqual(result[0].url, '${UNKNOWN_VAR}/entry')
   })
 
   it('handles multiple variables in one string', async () => {
@@ -215,12 +212,12 @@ describe('expandVariables', () => {
 
     const servers: McpServerRef[] = [{
       name: 'test',
-      command: 'node',
-      args: ['${ROOT}/${SUB}/file.js'],
+      url: '${PROTOCOL}://${HOST}/${PATH}',
+      headers: {},
     }]
 
-    const result = expandVariables(servers, { ROOT: '/a', SUB: 'b' })
+    const result = expandVariables(servers, { PROTOCOL: 'https', HOST: 'example.com', PATH: 'mcp' })
 
-    assert.strictEqual(result[0].args[0], '/a/b/file.js')
+    assert.strictEqual(result[0].url, 'https://example.com/mcp')
   })
 })

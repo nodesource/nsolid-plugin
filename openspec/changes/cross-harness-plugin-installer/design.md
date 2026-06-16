@@ -2,7 +2,7 @@
 
 ## Architecture
 
-The cross-harness plugin installer follows a **shared core + marketplace wrappers** architecture. A single monorepo contains the shared installation logic, while each marketplace gets its own package with native manifest format.
+The cross-harness plugin installer follows a **shared core + marketplace wrappers** architecture. A single monorepo contains the shared installation logic, while each marketplace gets its own package with native manifest format. Each package uses the harness's native trigger to invoke the shared core installer; npm `postinstall` is NOT used as the universal trigger.
 
 ```
 nsolid-plugin/
@@ -15,30 +15,36 @@ nsolid-plugin/
 │   │   │   ├── mcp/             # MCP config writer module
 │   │   │   ├── harnesses/       # Per-harness config adapters
 │   │   │   └── utils/           # Shared utilities
+│   │   ├── scripts/
+│   │   │   └── setup.mjs        # Shared setup script invoked by per-package wrappers
 │   │   └── package.json
 │   ├── claude-plugin/           # Claude Code marketplace package
 │   │   ├── .claude-plugin/
 │   │   │   └── plugin.json
-│   │   ├── postinstall.js       # Invokes shared core
+│   │   ├── hooks/
+│   │   │   └── hooks.json       # SessionStart → scripts/setup.js
+│   │   ├── scripts/setup.js     # Invokes packages/core/scripts/setup.mjs
 │   │   └── package.json
 │   ├── codex-plugin/            # Codex CLI marketplace package
 │   │   ├── .codex-plugin/
 │   │   │   └── plugin.json
-│   │   ├── postinstall.js
+│   │   ├── hooks/
+│   │   │   └── hooks.json       # SessionStart → scripts/setup.js
+│   │   ├── scripts/setup.js     # Invokes packages/core/scripts/setup.mjs
 │   │   └── package.json
 │   ├── opencode-plugin/         # OpenCode marketplace package
-│   │   ├── opencode.jsonc
-│   │   ├── postinstall.js
+│   │   ├── index.js             # Plugin module loaded by OpenCode → invokes setup script
 │   │   └── package.json
 │   ├── antigravity-plugin/      # Antigravity CLI marketplace package
-│   │   ├── manifest.json
-│   │   ├── postinstall.js
+│   │   ├── plugin.json          # Native discovery manifest
+│   │   ├── scripts/
+│   │   │   └── install.js       # Manual one-time install → copies dir + invokes core.install()
 │   │   └── package.json
-│   └── pi-plugin/               # Pi Agent marketplace package (skills only)
-│       ├── postinstall.js
-│       └── package.json
+│   └── pi-plugin/               # Pi Agent marketplace package
+│       ├── package.json         # pi.extensions → index.js
+│       ├── index.js             # Extension entrypoint → invokes core.install()
+│       └── README.md
 ├── bundle.json                  # Canonical bundle descriptor
-├── skills/                      # Symlinked from skills-poc
 └── package.json                 # Workspace root
 ```
 
@@ -46,7 +52,12 @@ nsolid-plugin/
 
 1. **Shared core as npm package**: All marketplace packages depend on `@nodesource/plugin-core`, ensuring consistent behavior across harnesses.
 
-2. **Post-install hooks**: Each marketplace package uses npm's `postinstall` lifecycle script to invoke the shared core installer. This works across all marketplaces that support npm packages.
+2. **Harness-native triggers**: Each marketplace package uses the harness's native trigger to invoke the shared core installer:
+   - Claude Code and Codex CLI: `SessionStart` hook in `hooks/hooks.json`.
+   - OpenCode: plugin module loaded by OpenCode on startup.
+   - Antigravity CLI: manual one-time `scripts/install.js` (no install-time hook exists).
+   - Pi Agent: `pi.extensions` entrypoint loaded when the Pi package loads.
+   npm `postinstall` is NOT used as a universal trigger because Claude, Codex, OpenCode, and Antigravity do not run npm lifecycle scripts reliably (OpenCode uses Bun which is default-secure; Antigravity has no such hook at all).
 
 3. **Bundle descriptor pattern**: A single `bundle.json` file defines all skills and MCP servers. The core installer reads this and adapts it per-harness.
 
@@ -71,8 +82,9 @@ All paths in this design use `~` as shorthand. At runtime, the path utility (`pa
 | `~/.codex/skills/` | `/home/user/.codex/skills/` | `C:\Users\user\.codex\skills\` |
 | `~/.config/opencode/opencode.jsonc` | `/home/user/.config/opencode/opencode.jsonc` | `C:\Users\user\.config\opencode\opencode.jsonc` |
 | `~/.config/opencode/skills/` | `/home/user/.config/opencode/skills/` | `C:\Users\user\.config\opencode\skills\` |
-| `~/.gemini/antigravity-cli/mcp_config.json` | `/home/user/.gemini/antigravity-cli/mcp_config.json` | `C:\Users\user\.gemini\antigravity-cli\mcp_config.json` |
-| `~/.gemini/antigravity-cli/skills/` | `/home/user/.gemini/antigravity-cli/skills/` | `C:\Users\user\.gemini\antigravity-cli\skills\` |
+| `~/.gemini/config/mcp_config.json` | `/home/user/.gemini/config/mcp_config.json` | `C:\Users\user\.gemini\config\mcp_config.json` |
+| `~/.gemini/config/plugins/nodesource-nsolid/` | `/home/user/.gemini/config/plugins/nodesource-nsolid/` | `C:\Users\user\.gemini\config\plugins\nodesource-nsolid\` |
+| `~/.gemini/skills/` | `/home/user/.gemini/skills/` | `C:\Users\user\.gemini\skills\` |
 | `~/.pi/agent/skills/` | `/home/user/.pi/agent/skills/` | `C:\Users\user\.pi\agent\skills\` |
 
 **Rules:**
@@ -203,13 +215,12 @@ export async function linkSkillsToHarness(harness: HarnessType, skills: SkillRef
 ```typescript
 export interface McpServerRef {
   name: string;
-  command: string;
-  args: string[];
-  env: Record<string, string>;
+  url: string;
+  headers: Record<string, string>;
 }
 
 export async function configureMcpServers(harness: HarnessType, servers: McpServerRef[]): Promise<void>;
-export async function removeMcpServers(harness: HarnessType, servers: McpServerRef[]): Promise<void>;
+export async function removeMcpServers(harness: HarnessType, serverNames: string[]): Promise<void>;
 ```
 
 ### Harness Adapters (`packages/core/src/harnesses/`)
@@ -254,17 +265,30 @@ export function getAdapter(harness: HarnessType): HarnessAdapter;
       "name": "ns-analyze-vulnerabilities",
       "path": "skills/ns-analyze-vulnerabilities",
       "description": "Scan running production memory for actively-exploitable CVEs",
-      "requiresMcp": ["nsolid-mcp"]
+      "requiresMcp": ["nsolid-console"]
     }
   ],
   "mcpServers": [
     {
+      "name": "nsolid-console",
+      "url": "${MCP_URL}",
+      "headers": {
+        "X-Nsolid-Service-Token": "${AUTH_TOKEN}"
+      }
+    },
+    {
       "name": "ns-benchmark",
-      "command": "node",
-      "args": ["${MCP_ROOT}/ns-benchmark/src/mcp-entrypoint.js"],
-      "env": {
-        "NSOLID_SERVICE_TOKEN": "${AUTH_TOKEN}",
-        "NSOLID_ORG_ID": "${AUTH_ORG_ID}"
+      "url": "https://benchmark.mcp.saas.nodesource.io/mcp",
+      "headers": {
+        "X-Nsolid-Org-Id": "${AUTH_ORG_ID}",
+        "X-Nsolid-Service-Token": "${AUTH_TOKEN}"
+      }
+    },
+    {
+      "name": "ncm",
+      "url": "https://mcp.ncm.nodesource.com",
+      "headers": {
+        "X-Nsolid-Service-Token": "${AUTH_TOKEN}"
       }
     }
   ],
@@ -282,9 +306,9 @@ export function getAdapter(harness: HarnessType): HarnessAdapter;
 
 #### Variable Expansion
 
-Placeholders in `mcpServers[].args` and `mcpServers[].env` are expanded at **install time** (not runtime):
+Placeholders in `mcpServers[].url` and `mcpServers[].headers` are expanded at **install time** (not runtime):
 
-- `${MCP_ROOT}` — resolved to the absolute path where MCP server sources are installed (e.g., `~/.agents/mcp-servers/`)
+- `${MCP_URL}` — derived from `consoleUrl` credential using the pattern `consoleUrl.replace('.saas.', '.mcp.saas.')` (e.g. `https://abc123.saas.nodesource.io` → `https://abc123.mcp.saas.nodesource.io`)
 - `${AUTH_TOKEN}` — resolved from credentials at `~/.agents/.nodesource-auth.json` (`serviceToken` field)
 - `${AUTH_ORG_ID}` — resolved from credentials at `~/.agents/.nodesource-auth.json` (`organizationId` field)
 
@@ -300,6 +324,8 @@ Skills may declare MCP dependencies via `requiresMcp: string[]`. During install:
 2. If a required MCP server name is not in the install list, log a warning but continue (the MCP may be provided externally)
 3. If MCP config writing fails for a required server, the dependent skill remains installed but a warning is logged
 4. Automatic MCP installation from external registries is **not** allowed — only bundled MCP servers are installed
+
+**Valid MCP server names:** `nsolid-console`, `ns-benchmark`, `ncm` (cloud endpoints, Streamable HTTP transport).
 
 ### Credentials Storage (`~/.agents/.nodesource-auth.json`)
 
@@ -342,18 +368,24 @@ Skills may declare MCP dependencies via `requiresMcp: string[]`. During install:
 
 ### Harness Config Formats
 
+All MCP servers are cloud endpoints accessed via Streamable HTTP. Auth tokens are passed as HTTP headers.
+
 **Claude Code (`~/.claude.json`):**
 > **Note**: User-scoped MCP servers are stored in `~/.claude.json` (outside the `~/.claude/` directory). Project-scoped servers use `.mcp.json` in the project root. We write to the user-scoped file.
 ```json
 {
   "mcpServers": {
+    "nsolid-console": {
+      "url": "https://<id>.mcp.saas.nodesource.io",
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
+    },
     "ns-benchmark": {
-      "command": "node",
-      "args": ["/path/to/ns-benchmark/src/mcp-entrypoint.js"],
-      "env": {
-        "NSOLID_SERVICE_TOKEN": "<token>",
-        "NSOLID_ORG_ID": "<orgId>"
-      }
+      "url": "https://benchmark.mcp.saas.nodesource.io/mcp",
+      "headers": { "X-Nsolid-Org-Id": "<orgId>", "X-Nsolid-Service-Token": "<token>" }
+    },
+    "ncm": {
+      "url": "https://mcp.ncm.nodesource.com",
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
     }
   }
 }
@@ -361,30 +393,66 @@ Skills may declare MCP dependencies via `requiresMcp: string[]`. During install:
 
 **Codex CLI (`~/.codex/config.toml`):**
 ```toml
+[mcp_servers.nsolid-console]
+url = "https://<id>.mcp.saas.nodesource.io"
+
+[mcp_servers.nsolid-console.headers]
+X-Nsolid-Service-Token = "<token>"
+
 [mcp_servers.ns-benchmark]
-command = "node"
-args = ["/path/to/ns-benchmark/src/mcp-entrypoint.js"]
-env = { NSOLID_SERVICE_TOKEN = "<token>", NSOLID_ORG_ID = "<orgId>" }
+url = "https://benchmark.mcp.saas.nodesource.io/mcp"
+
+[mcp_servers.ns-benchmark.headers]
+X-Nsolid-Org-Id = "<orgId>"
+X-Nsolid-Service-Token = "<token>"
+
+[mcp_servers.ncm]
+url = "https://mcp.ncm.nodesource.com"
+
+[mcp_servers.ncm.headers]
+X-Nsolid-Service-Token = "<token>"
 ```
 
 **OpenCode (`~/.config/opencode/opencode.jsonc`):**
 ```jsonc
 {
   "mcpServers": {
+    "nsolid-console": {
+      "url": "https://<id>.mcp.saas.nodesource.io",
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
+    },
     "ns-benchmark": {
-      "command": "node",
-      "args": ["/path/to/ns-benchmark/src/mcp-entrypoint.js"],
-      "env": {
-        "NSOLID_SERVICE_TOKEN": "<token>",
-        "NSOLID_ORG_ID": "<orgId>"
-      }
+      "url": "https://benchmark.mcp.saas.nodesource.io/mcp",
+      "headers": { "X-Nsolid-Org-Id": "<orgId>", "X-Nsolid-Service-Token": "<token>" }
+    },
+    "ncm": {
+      "url": "https://mcp.ncm.nodesource.com",
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
     }
   }
 }
 ```
 
-**Antigravity CLI (`~/.gemini/antigravity-cli/mcp_config.json`):**
-> **Note**: Antigravity uses a dedicated `mcp_config.json` file (not inline in `settings.json` like the legacy Gemini CLI). Shared MCP configs across all Antigravity tools go in `~/.gemini/config/mcp_config.json`; CLI-specific configs go in `~/.gemini/antigravity-cli/mcp_config.json`.
+**Antigravity CLI (`~/.gemini/config/mcp_config.json`):**
+> **Note**: Antigravity uses `serverUrl` (not `url`) as the URL field name. Shared MCP configs across all Antigravity tools go in `~/.gemini/config/mcp_config.json`.
+```json
+{
+  "mcpServers": {
+    "nsolid-console": {
+      "serverUrl": "https://<id>.mcp.saas.nodesource.io",
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
+    },
+    "ns-benchmark": {
+      "serverUrl": "https://benchmark.mcp.saas.nodesource.io/mcp",
+      "headers": { "X-Nsolid-Org-Id": "<orgId>", "X-Nsolid-Service-Token": "<token>" }
+    },
+    "ncm": {
+      "serverUrl": "https://mcp.ncm.nodesource.com",
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
+    }
+  }
+}
+```
 
 ```json
 {
@@ -642,13 +710,20 @@ env = { NSOLID_SERVICE_TOKEN = "<token>", NSOLID_ORG_ID = "<orgId>" }
 2. **TOML**: Rejected - not universally supported in Node.js
 3. **JSON**: Chosen - native support, simple, sufficient for this use case
 
-### Why post-install hooks?
+### Why harness-native triggers instead of npm `postinstall`?
 
 **Rationale:**
-- All marketplaces support npm packages
-- `postinstall` runs automatically after package download
-- No user action required beyond marketplace install
-- Works for both CLI and GUI marketplace interfaces
+- Claude Code and Codex CLI copy plugin directories and do not run npm lifecycle scripts.
+- OpenCode installs npm plugins with Bun, which is default-secure and skips `postinstall` unless the package is in the user's `trustedDependencies` allowlist.
+- Antigravity CLI has no install-time or session-start hook at all (only tool/invocation hooks).
+- Pi Agent packages are loaded via the `pi` manifest and have no install-time hook, but `pi.extensions` runs on package load.
+- Therefore each harness's native trigger is used:
+  - Claude/Codex: `SessionStart` hook → `scripts/setup.js` → `packages/core/scripts/setup.mjs`.
+  - OpenCode: plugin module load → `index.js` → shared setup script.
+  - Antigravity: manual one-time `scripts/install.js` → `core.install()`.
+  - Pi: `pi.extensions` entrypoint → `core.install()`.
+
+**Tradeoff:** Antigravity requires a manual install step because no hook exists. This is the least-bad option and keeps auth/MCP/skills consistent with the other harnesses.
 
 ## Migration Strategy
 

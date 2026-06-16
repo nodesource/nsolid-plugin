@@ -1,0 +1,14 @@
+{
+  "name": "@nodesource/codex-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "NodeSource AI Skills plugin for Codex CLI",
+  "license": "MIT",
+  "dependencies": {
+    "@nodesource/plugin-core": "workspace:*"
+  },
+  "scripts": {
+    "lint": "eslint scripts/ test/"
+  }
+}

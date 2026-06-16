@@ -10,3 +10,5 @@ dist/
 .opencode/logs/
 .codegraph/
 .opencode/plans
+.opencode/reviews
+

@@ -1,4 +1,6 @@
-export type HarnessType = 'claude' | 'codex' | 'opencode' | 'antigravity' | 'pi'
+export const HARNESS_VALUES = ['claude', 'codex', 'opencode', 'antigravity', 'pi'] as const
+
+export type HarnessType = (typeof HARNESS_VALUES)[number]
 
 export interface SkillRef {
   name: string;
@@ -9,9 +11,8 @@ export interface SkillRef {
 
 export interface McpServerRef {
   name: string;
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
+  url: string;
+  headers: Record<string, string>;
 }
 
 export interface Credentials {

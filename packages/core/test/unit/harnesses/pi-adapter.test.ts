@@ -57,7 +57,7 @@ describe('PiAdapter', () => {
 
     const result = await adapter.writeMcpConfig({
       mcpServers: {
-        'ns-benchmark': { command: 'node', args: [] },
+        'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {} },
       },
     })
 

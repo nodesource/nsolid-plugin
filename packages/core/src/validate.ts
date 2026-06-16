@@ -13,9 +13,8 @@ const SkillRefSchema = z.object({
 
 const McpServerRefSchema = z.object({
   name: z.string(),
-  command: z.string(),
-  args: z.array(z.string()),
-  env: z.record(z.string(), z.string()).optional()
+  url: z.string(),
+  headers: z.record(z.string(), z.string())
 }).strict()
 
 const AuthConfigSchema = z.object({

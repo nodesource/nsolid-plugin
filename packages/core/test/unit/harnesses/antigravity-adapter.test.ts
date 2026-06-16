@@ -26,7 +26,7 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter()
 
     const configPath = adapter.getMcpConfigPath()
-    assert.ok(configPath.endsWith('.gemini/antigravity-cli/mcp_config.json'))
+    assert.ok(configPath.endsWith('.gemini/config/mcp_config.json'))
     assert.ok(configPath.startsWith(tmpDir))
   })
 
@@ -35,7 +35,7 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter()
 
     const skillsPath = adapter.getSkillsPath()
-    assert.ok(skillsPath.includes('.gemini/antigravity-cli/skills'))
+    assert.ok(skillsPath.endsWith('.gemini/skills'))
   })
 
   it('supports MCP', async () => {
@@ -57,11 +57,11 @@ describe('AntigravityAdapter', () => {
     const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify({
       mcpServers: {
-        'my-server': { command: 'python', args: ['server.py'] },
+        'my-server': { url: 'http://localhost:8080', headers: { Authorization: 'Bearer abc' } },
       },
     }, null, 2))
 
@@ -69,7 +69,7 @@ describe('AntigravityAdapter', () => {
     const config = await adapter.readMcpConfig()
 
     assert.ok('my-server' in config.mcpServers)
-    assert.strictEqual(config.mcpServers['my-server'].command, 'python')
+    assert.strictEqual(config.mcpServers['my-server'].url, 'http://localhost:8080')
   })
 
   it('writes MCP config using JSON format', async () => {
@@ -80,19 +80,18 @@ describe('AntigravityAdapter', () => {
     await adapter.writeMcpConfig({
       mcpServers: {
         'ns-benchmark': {
-          command: 'node',
-          args: ['/path/to/server.js'],
-          env: { TOKEN: 'abc' },
+          url: 'https://benchmark.mcp.saas.nodesource.io/mcp',
+          headers: { Authorization: 'Bearer abc' },
         },
       },
     })
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     assert.ok(existsSync(configPath))
 
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))
     assert.ok('ns-benchmark' in content.mcpServers)
-    assert.strictEqual(content.mcpServers['ns-benchmark'].command, 'node')
+    assert.strictEqual(content.mcpServers['ns-benchmark'].serverUrl, 'https://benchmark.mcp.saas.nodesource.io/mcp')
   })
 
   it('returns correct name', async () => {
@@ -100,5 +99,32 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter()
 
     assert.strictEqual(adapter.name, 'antigravity')
+  })
+
+  it('round-trips config through write and read', async () => {
+    const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
+    const adapter = new AntigravityAdapter()
+
+    const input = {
+      mcpServers: {
+        'ns-benchmark': {
+          url: 'https://benchmark.mcp.saas.nodesource.io/mcp',
+          headers: { Authorization: 'Bearer abc' },
+        },
+        'ns-monitor': {
+          url: 'https://monitor.mcp.saas.nodesource.io/mcp',
+          headers: { Authorization: 'Bearer xyz' },
+        },
+      },
+    }
+
+    await adapter.writeMcpConfig(input)
+    const read = await adapter.readMcpConfig()
+
+    assert.strictEqual(Object.keys(read.mcpServers).length, 2)
+    assert.strictEqual(read.mcpServers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
+    assert.strictEqual(read.mcpServers['ns-benchmark'].headers.Authorization, 'Bearer abc')
+    assert.strictEqual(read.mcpServers['ns-monitor'].url, 'https://monitor.mcp.saas.nodesource.io/mcp')
+    assert.strictEqual(read.mcpServers['ns-monitor'].headers.Authorization, 'Bearer xyz')
   })
 })

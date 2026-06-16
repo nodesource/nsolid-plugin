@@ -34,7 +34,7 @@ import type { HarnessAdapter } from './harnesses/index.js'
 import { readJsonFile } from './utils/config.js'
 import { getSkillsDir } from './utils/path.js'
 
-const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-mcp', 'ncm-mcp']
+const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
 
 export async function install (options: InstallOptions): Promise<InstallResult> {
   const result: InstallResult = {
@@ -104,6 +104,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   if (credentials) {
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
+    variables.MCP_URL = credentials.mcpUrl || credentials.consoleUrl.replace('.saas.', '.mcp.saas.')
   }
 
   const mcpConfigPath = adapter.getMcpConfigPath()

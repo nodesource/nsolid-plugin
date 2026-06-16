@@ -61,7 +61,7 @@ describe('ClaudeAdapter', () => {
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify({
       mcpServers: {
-        'my-server': { command: 'python', args: ['server.py'] },
+        'my-server': { url: 'http://localhost:8080', headers: { Authorization: 'Bearer abc' } },
       },
     }, null, 2))
 
@@ -69,7 +69,7 @@ describe('ClaudeAdapter', () => {
     const config = await adapter.readMcpConfig()
 
     assert.ok('my-server' in config.mcpServers)
-    assert.strictEqual(config.mcpServers['my-server'].command, 'python')
+    assert.strictEqual(config.mcpServers['my-server'].url, 'http://localhost:8080')
   })
 
   it('writes MCP config using JSON format', async () => {
@@ -80,9 +80,8 @@ describe('ClaudeAdapter', () => {
     await adapter.writeMcpConfig({
       mcpServers: {
         'ns-benchmark': {
-          command: 'node',
-          args: ['/path/to/server.js'],
-          env: { TOKEN: 'abc' },
+          url: 'https://benchmark.mcp.saas.nodesource.io/mcp',
+          headers: { Authorization: 'Bearer abc' },
         },
       },
     })
@@ -92,7 +91,7 @@ describe('ClaudeAdapter', () => {
 
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))
     assert.ok('ns-benchmark' in content.mcpServers)
-    assert.strictEqual(content.mcpServers['ns-benchmark'].command, 'node')
+    assert.strictEqual(content.mcpServers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
   })
 
   it('returns correct name', async () => {

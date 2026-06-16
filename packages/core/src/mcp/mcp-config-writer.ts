@@ -29,7 +29,7 @@ function getMcpConfigInfo (harness: HarnessType): ConfigInfo | null {
     case 'opencode':
       return { configPath: resolveHome('~/.config/opencode/opencode.jsonc'), format: 'jsonc' }
     case 'antigravity':
-      return { configPath: resolveHome('~/.gemini/antigravity-cli/mcp_config.json'), format: 'json' }
+      return { configPath: resolveHome('~/.gemini/config/mcp_config.json'), format: 'json' }
     case 'pi':
       return null
   }
@@ -100,9 +100,8 @@ function writeTomlConfig (configPath: string, config: NormalizedMcpConfig): void
     const servers: Record<string, unknown> = {}
     for (const [name, srv] of Object.entries(config.mcpServers)) {
       servers[name] = {
-        command: srv.command,
-        args: srv.args,
-        ...(srv.env ? { env: srv.env } : {})
+        url: srv.url,
+        headers: srv.headers,
       }
     }
     tomlData.mcp_servers = servers
