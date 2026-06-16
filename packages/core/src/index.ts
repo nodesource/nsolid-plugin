@@ -170,8 +170,12 @@ export async function uninstall (
         path: s.path,
         description: '',
       }))
-      await unlinkSkillsFromHarness(harness, skillRefs)
-      await removeTrackedSkills(skillRefs, harness)
+      try {
+        await unlinkSkillsFromHarness(harness, skillRefs)
+        await removeTrackedSkills(skillRefs, harness)
+      } catch (err) {
+        errors.push(`Skill removal failed: ${(err as Error).message}`)
+      }
     }
   } else {
     const warnings = await bestEffortCleanup(harness, adapter, options)
@@ -283,7 +287,9 @@ export async function doctor (
     const expectedMcps = bundle.mcpServers.map((s) => s.name)
 
     const trackedSkills = await readTrackingFile()
-    const trackedNames = new Set(trackedSkills?.skills.map((s) => s.name) ?? [])
+    const trackedNames = new Set(
+      trackedSkills?.skills.filter((s) => s.harnesses.includes(harness)).map((s) => s.name) ?? []
+    )
     const harnessSkillsDir = adapter.getSkillsPath()
 
     for (const skill of bundle.skills) {

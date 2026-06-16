@@ -8,17 +8,27 @@ import type { TrackingData } from '../../src/skills/skill-tracker.js'
 
 let tmpDir: string
 let originalHome: string | undefined
+let originalUserProfile: string | undefined
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-installer-'))
   originalHome = process.env.HOME
+  originalUserProfile = process.env.USERPROFILE
   process.env.HOME = tmpDir
+  process.env.USERPROFILE = tmpDir
 })
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
   if (originalHome !== undefined) {
     process.env.HOME = originalHome
+  } else {
+    delete process.env.HOME
+  }
+  if (originalUserProfile !== undefined) {
+    process.env.USERPROFILE = originalUserProfile
+  } else {
+    delete process.env.USERPROFILE
   }
 })
 
