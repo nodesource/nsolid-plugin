@@ -199,6 +199,9 @@ describe('uninstall()', () => {
 
     assert.ok(!existsSync(harnessSkillsPath), 'skill unlinked after uninstall')
 
+    const sharedSkillsPath = join(tmpDir, '.agents', 'skills', 'ns-test-skill')
+    assert.ok(!existsSync(sharedSkillsPath), 'shared skill source removed after uninstall')
+
     const { readJsonFile } = await import('../../src/utils/config.js')
     const { getTrackingFilePath } = await import('../../src/utils/path.js')
     const tracking = readJsonFile<TrackingData>(await getTrackingFilePath())
@@ -242,7 +245,7 @@ describe('uninstall()', () => {
 
     await uninstall('claude')
 
-    assert.ok(existsSync(skillsDir), 'orphan skill preserved in shared directory')
+    assert.ok(!existsSync(skillsDir), 'orphan skill removed from shared directory')
   })
 
   it('does nothing when no tracking and no orphan skills', async () => {
@@ -361,7 +364,7 @@ describe('doctor()', () => {
     tracking.skills = tracking.skills.filter((s) => s.name === 'ns-test-skill')
     await writeJsonFile(trackingPath, tracking)
 
-    rmSync(join(tmpDir, '.claude', 'skills', 'ns-another-skill'), { recursive: true, force: true })
+    rmSync(join(tmpDir, '.agents', 'skills', 'ns-another-skill'), { recursive: true, force: true })
 
     const report = await doctor('claude', bundlePath)
 

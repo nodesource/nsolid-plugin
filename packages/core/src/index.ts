@@ -15,7 +15,7 @@ import type {
 } from './types.js'
 import { validateBundle } from './validate.js'
 import { ensureAuthenticated, loadCredentials, isExpired } from './auth/index.js'
-import { installSkills, SkillCopyError } from './skills/skill-copier.js'
+import { installSkills, uninstallSkills, SkillCopyError } from './skills/skill-copier.js'
 import { linkSkillsToHarness, unlinkSkillsFromHarness } from './skills/skill-linker.js'
 import {
   readTrackingFile,
@@ -170,9 +170,19 @@ export async function uninstall (
         path: s.path,
         description: '',
       }))
+      // Skills tracked only by this harness are orphaned once it is removed,
+      // so also delete their shared source copy in ~/.agents/skills/ (spec:
+      // a clean uninstall removes the shared skill dir). Skills still
+      // referenced by other harnesses are left intact.
+      const orphaned = harnessSkills
+        .filter((s) => s.harnesses.length === 1)
+        .map((s) => ({ name: s.name, path: s.path, description: '' }))
       try {
         await unlinkSkillsFromHarness(harness, skillRefs)
         await removeTrackedSkills(skillRefs, harness)
+        if (orphaned.length > 0) {
+          await uninstallSkills(orphaned)
+        }
       } catch (err) {
         errors.push(`Skill removal failed: ${(err as Error).message}`)
       }
@@ -204,6 +214,7 @@ async function bestEffortCleanup (
 
     if (nsSkills.length > 0) {
       await unlinkSkillsFromHarness(harness, nsSkills)
+      await uninstallSkills(nsSkills)
     }
   } catch {
     // Skills directory doesn't exist or is unreadable — nothing to clean
@@ -290,11 +301,15 @@ export async function doctor (
     const trackedNames = new Set(
       trackedSkills?.skills.filter((s) => s.harnesses.includes(harness)).map((s) => s.name) ?? []
     )
-    const harnessSkillsDir = adapter.getSkillsPath()
+    // Per spec, an "installed" skill is gated on the shared skill source in
+    // ~/.agents/skills/ (what installSkills() populates), not the per-harness
+    // link/copy. Checking the harness path alone can mask a missing/stale core
+    // install — especially for Pi, which receives copies rather than symlinks.
+    const sharedSkillsDir = getSkillsDir()
 
     for (const skill of bundle.skills) {
       const inTracking = trackedNames.has(skill.name)
-      const onDisk = existsSync(path.join(harnessSkillsDir, skill.name))
+      const onDisk = existsSync(path.join(sharedSkillsDir, skill.name))
       if (inTracking || onDisk) {
         report.skills.installed.push(skill.name)
         if (inTracking && !onDisk) {
