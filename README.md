@@ -76,13 +76,14 @@ Copies the plugin directory and runs auth + MCP config.
 # 1. Install the NodeSource plugin (writes ~/.pi/agent/mcp.json and skills)
 pi install npm:@nodesource/pi-plugin
 
-# 2. Install an MCP adapter so Pi can use the configured servers
+# 2. Install pi-mcp-adapter so Pi can use the configured servers
+#    (it reads ~/.pi/agent/mcp.json directly, so no extra config is needed)
 pi install npm:pi-mcp-adapter
-# or
-pi install npm:@0xkobold/pi-mcp
 ```
 
 The `pi.extensions` entrypoint runs auth + skill installation on package load, including the MCP configuration at `~/.pi/agent/mcp.json`. Pi does not natively support MCP, so an adapter extension is required for the MCP-backed skills to have working tools.
+
+> **Using `@0xkobold/pi-mcp` instead?** It is an alternative adapter, but it reads `~/.0xkobold/mcp.json` in a different (`servers[]`) format and does **not** pick up the config this plugin writes (`~/.pi/agent/mcp.json`). You would need to create and maintain a separate `~/.0xkobold/mcp.json` manually. Prefer `pi-mcp-adapter` for automatic setup.
 
 ## Development
 

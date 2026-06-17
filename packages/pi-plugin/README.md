@@ -28,12 +28,12 @@ pi list
 
 ## MCP Adapter Requirement
 
-Pi does not natively support MCP. After installing this plugin, install one of these MCP adapter extensions so Pi can use the configured NodeSource MCP servers:
+Pi does not natively support MCP. After installing this plugin, install the `pi-mcp-adapter` extension so Pi can use the configured NodeSource MCP servers. It reads `~/.pi/agent/mcp.json` directly, so no extra configuration is needed:
 
 ```bash
 pi install npm:pi-mcp-adapter
-# or
-pi install npm:@0xkobold/pi-mcp
 ```
 
 Without an adapter, the MCP-backed skills will be installed but their tools will be unavailable.
+
+> **Using `@0xkobold/pi-mcp` instead?** It is an alternative adapter, but it reads `~/.0xkobold/mcp.json` in a different (`servers[]`) format and does **not** pick up the config this plugin writes (`~/.pi/agent/mcp.json`). You would need to create and maintain a separate `~/.0xkobold/mcp.json` manually. Prefer `pi-mcp-adapter` for automatic setup.
