@@ -64,11 +64,14 @@ export async function ensureAuthenticated (authConfig: AuthConfig): Promise<Cred
   }
 
   const state = randomUUID()
-  const signInUrl = `${authConfig.accountsUrl}/sign-in?extension=nsolid-plugin&state=${state}`
-
   const server = await startOAuthServer(authConfig.callbackPort, state)
 
-  openBrowser(signInUrl)
+  const signInUrl = new URL('/sign-in', authConfig.accountsUrl)
+  signInUrl.searchParams.set('extension', 'nsolid-plugin')
+  signInUrl.searchParams.set('port', String(server.port))
+  signInUrl.searchParams.set('state', state)
+
+  openBrowser(signInUrl.toString())
 
   const callback = await server.waitForCallback()
   await server.close()

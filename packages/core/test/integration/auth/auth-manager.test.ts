@@ -26,11 +26,14 @@ const authConfig: AuthConfig = {
   callbackPort: 8767,
 }
 
-function getStateFromExecFileCall (): string {
+function getUrlFromExecFileCall (): URL {
   const args = execFileCalls[execFileCalls.length - 1][1] as string[]
   const urlStr = args.find((a: string) => a.startsWith('http'))!
-  const url = new URL(urlStr)
-  return url.searchParams.get('state')!
+  return new URL(urlStr)
+}
+
+function getStateFromExecFileCall (): string {
+  return getUrlFromExecFileCall().searchParams.get('state')!
 }
 
 function sendCallback (port: number, state: string, overrides?: Record<string, string>): Promise<void> {
@@ -114,6 +117,11 @@ describe('ensureAuthenticated', () => {
     const promise = ensureAuthenticated(authConfig)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
+    const signInUrl = getUrlFromExecFileCall()
+    assert.strictEqual(signInUrl.origin, 'https://accounts.example.com')
+    assert.strictEqual(signInUrl.pathname, '/sign-in')
+    assert.strictEqual(signInUrl.searchParams.get('extension'), 'nsolid-plugin')
+    assert.strictEqual(signInUrl.searchParams.get('port'), '8767')
     const state = getStateFromExecFileCall()
     await sendCallback(8767, state)
     const result = await promise
