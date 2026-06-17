@@ -167,6 +167,10 @@ Re-run install. It is idempotent and replaces broken symlinks with correct ones.
 NSOLID_HARNESS=<harness> node packages/core/scripts/setup.mjs uninstall
 ```
 
+```powershell
+$env:NSOLID_HARNESS="<harness>"; node packages/core/scripts/setup.mjs uninstall
+```
+
 Credentials are preserved.
 
 ### Pi MCP not working

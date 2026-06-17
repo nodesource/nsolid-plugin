@@ -6,6 +6,8 @@ import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
+const SETUP_TIMEOUT_MS = 120000
+
 // fileURLToPath correctly handles the platform-specific file:// URL, including
 // Windows drive letters (new URL(...).pathname yields an invalid "/D:/..." path
 // on Windows, which would make every existsSync check fail).
@@ -75,11 +77,17 @@ for (const h of HARNESS_LIST) {
 process.exit(failed ? 1 : 0)
 
 function run (cwd, env, args) {
-  const r = spawnSync(process.execPath, args, { cwd, env, encoding: 'utf8' })
+  const r = spawnSync(process.execPath, args, {
+    cwd,
+    env,
+    encoding: 'utf8',
+    timeout: SETUP_TIMEOUT_MS
+  })
   return r
 }
 
 function assertOk (r, label) {
+  if (r.error) throw new Error(`${label} (${r.error.message})`)
   if (r.status !== 0) throw new Error(`${label} (exit ${r.status}, stderr: ${(r.stderr || '').trim()})`)
 }
 

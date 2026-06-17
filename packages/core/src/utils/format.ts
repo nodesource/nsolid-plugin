@@ -50,7 +50,7 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   out.push(skillsLine(report.skills, color))
   out.push(mcpLine(report.mcpServers, color))
 
-  if (harness === 'pi' && report.mcpServers.reachable.length > 0) {
+  if (harness === 'pi' && report.mcpServers.status !== 'unknown' && report.mcpServers.reachable.length > 0) {
     const note = 'ℹ Pi needs an MCP adapter extension to use these servers — run: pi install npm:pi-mcp-adapter'
     out.push(color ? C.yellow('  ' + note) : '  ' + note)
   }

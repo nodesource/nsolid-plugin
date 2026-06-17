@@ -21,7 +21,13 @@ describe('OpenCodeAdapter', () => {
     rmSync(tmpDir, { recursive: true, force: true })
     if (originalHome !== undefined) {
       process.env.HOME = originalHome
+    } else {
+      delete process.env.HOME
+    }
+    if (originalUserProfile !== undefined) {
       process.env.USERPROFILE = originalUserProfile
+    } else {
+      delete process.env.USERPROFILE
     }
   })
 

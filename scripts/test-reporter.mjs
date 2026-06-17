@@ -152,9 +152,17 @@ function renderSummary (diag, failures, perFile) {
   const totalNote = total != null ? dim(` of ${total}`) : ''
   const bar = '─'.repeat(60)
 
-  if (failN === 0 || failures.length === 0) {
+  if (failN === 0) {
     const label = passN != null ? `${passN} tests passed` : 'all tests passed'
     return `\n${bar}\n${green('✓ ' + label)}${suiteNote}\n${renderBreakdown(perFile)}${bar}\n`
+  }
+
+  if (failures.length === 0) {
+    return `\n${bar}\n` +
+      bold(red(`FAILURES (${failN})`)) + dim(`  —  details unavailable in reporter events${totalNote}`) + `${suiteNote}\n\n` +
+      red(`${failN} failed`) + dim(`, ${passN ?? '?'} passed${totalNote}`) + '\n' +
+      dim(`full detail → ${basename(LOG_PATH)}`) + '\n' +
+      bar + '\n'
   }
 
   // Group failures by file for scannability.
