@@ -8,18 +8,23 @@ import type { SkillRef } from '../../../src/types.js'
 let tmpDir: string
 let originalHome: string | undefined
 
+let originalUserProfile: string | undefined
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
   originalHome = process.env.HOME
+  originalUserProfile = process.env.USERPROFILE
   process.env.HOME = tmpDir
+  process.env.USERPROFILE = tmpDir
 })
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
   if (originalHome !== undefined) {
     process.env.HOME = originalHome
+    process.env.USERPROFILE = originalUserProfile
   } else {
     delete process.env.HOME
+    delete process.env.USERPROFILE
   }
 })
 
@@ -139,7 +144,11 @@ describe('installSkills security', () => {
 })
 
 describe('uninstallSkills error handling', () => {
-  it('throws on permission errors, not ENOENT', async () => {
+  it('throws on permission errors, not ENOENT', {
+    skip: process.platform === 'win32'
+      ? 'POSIX chmod permission simulation is not reliable on Windows'
+      : false
+  }, async () => {
     const { installSkills, uninstallSkills } = await import('../../../src/skills/skill-copier.js')
     const sourceDir = join(tmpDir, 'source')
     mkdirSync(sourceDir, { recursive: true })
@@ -149,8 +158,10 @@ describe('uninstallSkills error handling', () => {
 
     await installSkills([{ name: 'ns-test', path: 'skills/ns-test', description: 'test' }], sourceDir)
 
-    // Make directory read-only to simulate permission error
+    // Make directory read-only to simulate permission error.
+    // This relies on POSIX chmod semantics and is skipped on Windows above.
     const destDir = join(tmpDir, '.agents', 'skills', 'ns-test')
+    assert.ok(existsSync(destDir), 'expected skill to be installed before chmod')
     const { chmodSync } = await import('node:fs')
     chmodSync(destDir, 0o555)
 

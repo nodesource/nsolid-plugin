@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -22,7 +22,9 @@ afterEach(() => {
 })
 
 async function loadFetchAsset () {
-  const mod = await import(fetchAssetPath)
+  // On Windows, dynamic import() requires a file:// URL, not a bare path —
+  // a D:\... path is parsed as protocol 'd:' and throws ERR_UNSUPPORTED_ESM_URL_SCHEME.
+  const mod = await import(pathToFileURL(fetchAssetPath).href)
   return mod as {
     isPrivateOrLocalIp: (ip: string) => boolean
     resolveHostnameIps: (hostname: string) => Promise<string[]>

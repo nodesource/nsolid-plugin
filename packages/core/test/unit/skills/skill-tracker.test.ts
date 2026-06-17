@@ -1,23 +1,27 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, isAbsolute } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { SkillRef } from '../../../src/types.js'
 
 let tmpDir: string
 let originalHome: string | undefined
 
+let originalUserProfile: string | undefined
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
   originalHome = process.env.HOME
+  originalUserProfile = process.env.USERPROFILE
   process.env.HOME = tmpDir
+  process.env.USERPROFILE = tmpDir
 })
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
   if (originalHome !== undefined) {
     process.env.HOME = originalHome
+    process.env.USERPROFILE = originalUserProfile
   }
 })
 
@@ -87,7 +91,7 @@ describe('addTrackedSkills', () => {
 
     const tracking = await readTrackingFile()
     const entry = tracking!.skills[0]
-    assert.ok(/^[/\\]/.test(entry.path))
+    assert.ok(isAbsolute(entry.path), `expected absolute path, got ${entry.path}`)
     assert.ok(entry.path.includes('ns-analyze-cpu'))
   })
 

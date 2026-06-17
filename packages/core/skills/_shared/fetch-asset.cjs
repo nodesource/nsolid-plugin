@@ -261,15 +261,16 @@ async function resolveHostnameIps (hostname) {
   }
 
   const ips = []
+  // Use dns.lookup (libuv/getaddrinfo), which honors /etc/hosts and the
+  // system resolver — not dns.resolve (c-ares), which bypasses /etc/hosts and
+  // therefore fails to resolve hostnames like `localhost` on platforms where
+  // they only exist in the hosts file (e.g. macOS). This also matches the real
+  // resolution an outbound fetch would use, which is what SSRF validation needs.
   try {
-    ips.push(...await dns.resolve(raw, 'A'))
+    const records = await dns.lookup(raw, { all: true, verbatim: true })
+    ips.push(...records.map((r) => r.address))
   } catch {
-    // ignore resolution errors for A records
-  }
-  try {
-    ips.push(...await dns.resolve(raw, 'AAAA'))
-  } catch {
-    // ignore resolution errors for AAAA records
+    // hostname could not be resolved; caller treats empty as an error
   }
   return ips
 }

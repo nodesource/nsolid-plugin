@@ -26,6 +26,8 @@ Options:
   --harness <harness>   Target harness (required): ${HARNESS_VALUES.join(', ')}
   --bundle <path>       Path to bundle.json (default: core package bundle.json)
   --skills-source <path> Path to skills source directory (default: core package root)
+  --json                Output doctor report as JSON (machine-readable)
+  --no-color            Disable colored output
   --help                Show this help message`)
 }
 
@@ -36,6 +38,8 @@ async function main (): Promise<void> {
       harness: { type: 'string', short: 'h' },
       bundle: { type: 'string', short: 'b' },
       'skills-source': { type: 'string', short: 's' },
+      json: { type: 'boolean' },
+      'no-color': { type: 'boolean' },
       help: { type: 'boolean', short: 'H' },
     },
   })
@@ -72,6 +76,16 @@ async function main (): Promise<void> {
       if (result.mcpServersConfigured.length > 0) {
         console.log(`Configured MCP servers: ${result.mcpServersConfigured.join(', ')}`)
       }
+      if (harness === 'pi' && result.mcpServersConfigured.length > 0) {
+        const { supportsColor } = await import('./utils/format.js')
+        const { getAdapter } = await import('./harnesses/index.js')
+        const color = values['no-color'] !== true && supportsColor()
+        const fmt = (s: string) => color ? `\x1b[33m${s}\x1b[0m` : s
+        console.log(fmt('⚠ Pi does not support MCP natively. To use these servers, install an MCP adapter:'))
+        console.log(fmt('    pi install npm:pi-mcp-adapter'))
+        console.log(fmt('    (alt: @0xkobold/pi-mcp — needs separate ~/.0xkobold/mcp.json setup)'))
+        console.log(fmt(`  MCP config written to ${getAdapter('pi').getMcpConfigPath()}`))
+      }
       break
     }
     case 'uninstall': {
@@ -88,7 +102,13 @@ async function main (): Promise<void> {
     }
     case 'doctor': {
       const report = await doctor(harness, bundlePath)
-      console.log(JSON.stringify(report, null, 2))
+      if (values.json === true) {
+        console.log(JSON.stringify(report, null, 2))
+      } else {
+        const { formatDoctorReport, supportsColor } = await import('./utils/format.js')
+        const color = values['no-color'] !== true && supportsColor()
+        console.log(formatDoctorReport(report, harness, color))
+      }
       if (!report.healthy) {
         process.exit(1)
       }

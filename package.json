@@ -8,10 +8,11 @@
   ],
   "scripts": {
     "build": "pnpm -r build",
-    "test": "node --experimental-test-module-mocks --import tsx/esm --test 'packages/*/test/**/*.test.ts'",
+    "test": "node scripts/run-tests.mjs",
     "test:unit": "node --experimental-test-module-mocks --import tsx/esm --test 'packages/*/test/unit/**/*.test.ts'",
     "test:integration": "node --experimental-test-module-mocks --import tsx/esm --test 'packages/*/test/integration/**/*.test.ts'",
     "lint": "pnpm -r lint",
+    "test:marketplace": "node scripts/test-marketplace-install.js",
     "prepare": "husky"
   },
   "engines": {

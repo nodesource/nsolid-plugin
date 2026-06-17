@@ -5,6 +5,9 @@ dist/
 .env
 .env.*
 
+# Test artifacts
+test-results.log
+
 # OpenCode
 .opencode/sessions/
 .opencode/logs/

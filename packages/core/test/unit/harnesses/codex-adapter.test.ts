@@ -1,23 +1,27 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 
 describe('CodexAdapter', () => {
   let tmpDir: string
   let originalHome: string | undefined
 
+  let originalUserProfile: string | undefined
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
     originalHome = process.env.HOME
+    originalUserProfile = process.env.USERPROFILE
     process.env.HOME = tmpDir
+    process.env.USERPROFILE = tmpDir
   })
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true })
     if (originalHome !== undefined) {
       process.env.HOME = originalHome
+      process.env.USERPROFILE = originalUserProfile
     }
   })
 
@@ -26,7 +30,7 @@ describe('CodexAdapter', () => {
     const adapter = new CodexAdapter()
 
     const configPath = adapter.getMcpConfigPath()
-    assert.ok(configPath.endsWith('.codex/config.toml'))
+    assert.ok(configPath.endsWith(['.codex', 'config.toml'].join(sep)))
     assert.ok(configPath.startsWith(tmpDir))
   })
 
@@ -35,7 +39,7 @@ describe('CodexAdapter', () => {
     const adapter = new CodexAdapter()
 
     const skillsPath = adapter.getSkillsPath()
-    assert.ok(skillsPath.includes('.codex/skills'))
+    assert.ok(skillsPath.includes(['.codex', 'skills'].join(sep)))
   })
 
   it('supports MCP', async () => {

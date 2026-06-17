@@ -45,7 +45,7 @@ Each harness has an adapter that provides its config and skills paths:
 | Codex | `~/.codex/config.toml` | `~/.codex/skills/` | Yes |
 | OpenCode | `~/.config/opencode/opencode.jsonc` | `~/.config/opencode/skills/` | Yes |
 | Antigravity | `~/.gemini/config/mcp_config.json` | `~/.gemini/config/skills/` | Yes |
-| Pi | `null` | `~/.pi/agent/skills/` | No |
+| Pi | `~/.pi/agent/mcp.json` | `~/.pi/agent/skills/` | Yes |
 
 ## CLI
 
@@ -55,7 +55,12 @@ A thin CLI is provided as `nsolid-plugin`:
 nsolid-plugin install --harness claude
 nsolid-plugin uninstall --harness claude
 nsolid-plugin doctor --harness claude
+nsolid-plugin doctor --harness claude --json
 ```
+
+## Troubleshooting
+
+Run `nsolid-plugin doctor --harness <harness>` for a health check. Use `--json` for machine-readable output. See the [root README](../../README.md#troubleshooting) for common issues (permissions, port conflicts, stale symlinks, Pi MCP adapter).
 
 ## Development
 

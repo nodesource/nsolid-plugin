@@ -1,23 +1,27 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 
 describe('ClaudeAdapter', () => {
   let tmpDir: string
   let originalHome: string | undefined
 
+  let originalUserProfile: string | undefined
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
     originalHome = process.env.HOME
+    originalUserProfile = process.env.USERPROFILE
     process.env.HOME = tmpDir
+    process.env.USERPROFILE = tmpDir
   })
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true })
     if (originalHome !== undefined) {
       process.env.HOME = originalHome
+      process.env.USERPROFILE = originalUserProfile
     }
   })
 
@@ -35,7 +39,7 @@ describe('ClaudeAdapter', () => {
     const adapter = new ClaudeAdapter()
 
     const skillsPath = adapter.getSkillsPath()
-    assert.ok(skillsPath.includes('.claude/skills'))
+    assert.ok(skillsPath.includes(['.claude', 'skills'].join(sep)))
   })
 
   it('supports MCP', async () => {

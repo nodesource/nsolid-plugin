@@ -38,6 +38,24 @@ pnpm test
 pnpm lint
 ```
 
+## Authentication
+
+The plugin uses OAuth to authenticate with NodeSource's accounts service. On first install:
+
+1. Your browser opens `accounts.nodesource.com/sign-in` for login.
+2. A local HTTP server starts on port **8765** (fallback: 8766–8770) to receive the callback.
+3. The OAuth callback provides a `serviceToken`, `consoleId`, `saasToken`, and `consoleUrl`.
+4. An `mcpUrl` is derived from the callback's `consoleId` (or via string transform from `consoleUrl`).
+5. Credentials are stored at `~/.agents/.nodesource-auth.json` with mode `0600`.
+
+**What is stored:** `serviceToken`, `organizationId`, `saasToken`, `consoleUrl`, `mcpUrl`, `expiresAt`, `permissions`.
+
+**Token lifecycle:** Expired credentials trigger re-authentication automatically. Credentials are shared across all harness installs — authenticating once covers every harness.
+
+**`mcpUrl` derivation:** Two paths exist:
+1. **Primary (at OAuth time):** Built from the callback's `consoleId` as `https://<consoleId>.mcp.saas.nodesource.io` and stored on the credentials.
+2. **Fallback (at install time):** If `credentials.mcpUrl` is absent, the installer derives it via `consoleUrl.replaceAll('.saas.', '.mcp.saas.')`. If that transform doesn't change the URL, installation fails with an actionable error.
+
 ## Per-harness install
 
 ### Claude Code
@@ -97,7 +115,7 @@ pnpm -r build       # Same thing
 ### Test
 
 ```bash
-pnpm test           # All tests (282 tests)
+pnpm test           # All tests (unit + integration)
 pnpm test:unit      # Unit tests only
 pnpm test:integration  # Integration tests only
 ```
@@ -114,6 +132,52 @@ pnpm lint           # Lint all packages
 pnpm --filter @nodesource/plugin-core bundle:check   # Check if bundle.json is in sync
 pnpm --filter @nodesource/plugin-core bundle:sync    # Copy root bundle.json into core
 ```
+
+## Troubleshooting
+
+### Run the doctor command
+
+```bash
+nsolid-plugin doctor --harness <harness>
+nsolid-plugin doctor --harness <harness> --json    # machine-readable
+```
+
+The output shows green/yellow/red status for credentials, skills, and MCP servers.
+
+### Permission denied writing config
+
+- **macOS/Linux:** `sudo chown -R $USER ~/.claude.json` (replace with the relevant harness config path).
+- **Windows:** Run as Administrator, or `icacls C:\Users\<you>\.claude.json /grant %USERNAME%:F`.
+
+### Port conflict during auth (8765)
+
+Close the application using the port, or let the fallback (8766–8770) try automatically. If all fail, free a port in the 8765–8770 range.
+
+### OAuth timed out / cancelled
+
+Re-run the install command. No cleanup is needed — the local callback server cleans up automatically.
+
+### Stale or broken symlinks
+
+Re-run install. It is idempotent and replaces broken symlinks with correct ones.
+
+### Manual uninstall / cleanup
+
+```bash
+NSOLID_HARNESS=<harness> node packages/core/scripts/setup.mjs uninstall
+```
+
+Credentials are preserved.
+
+### Pi MCP not working
+
+Pi does not natively support MCP. Install an adapter:
+
+```bash
+pi install npm:pi-mcp-adapter
+```
+
+`pi-mcp-adapter` auto-reads `~/.pi/agent/mcp.json`. The alternative `@0xkobold/pi-mcp` reads a separate `~/.0xkobold/mcp.json` in a different format — it does not pick up the NodeSource config automatically.
 
 ## License
 

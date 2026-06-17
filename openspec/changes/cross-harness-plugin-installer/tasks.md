@@ -310,41 +310,41 @@
 - **Testing**: Manual test: `pi install ./packages/pi-plugin`, verify OAuth runs and skills appear in `~/.pi/agent/skills/`.
 - **Spec reference**: `specs/phase-7-distribution-model-fix.md`
 
-## Phase 8: Testing and Verification
+## Phase 8: Testing and Verification ✓
 
-### Task 28: Write integration tests for core installer
-- **Description**: Create comprehensive integration tests in `packages/core/test/integration.test.ts`. Test full install/uninstall cycle with real file system (use temp directory). Test all harness types. Test error scenarios.
+### Task 28: Write integration tests for core installer ✓
+- [x] **Description**: Create comprehensive integration tests in `packages/core/test/integration.test.ts`. Test full install/uninstall cycle with real file system (use temp directory). Test all harness types. Test error scenarios.
 - **Depends on**: Task 22
 - **Files**:
   - `packages/core/test/integration.test.ts`
 - **Testing**: Run `npm test` in packages/core. All tests pass.
 
-### Task 29: Create manual test script
-- **Description**: Create `scripts/test-marketplace-install.js` (Node.js for cross-platform compatibility) to manually test marketplace installation. Script installs each plugin package in isolated temp directory, verifies skills and MCP configs, then uninstalls. Alternatively, provide both `scripts/test-marketplace-install.sh` (bash) and `scripts/test-marketplace-install.ps1` (PowerShell) versions.
+### Task 29: Create manual test script ✓
+- [x] **Description**: Create `scripts/test-marketplace-install.js` (Node.js for cross-platform compatibility) to manually test marketplace installation. Script installs each plugin package in isolated temp directory, verifies skills and MCP configs, then uninstalls. Alternatively, provide both `scripts/test-marketplace-install.sh` (bash) and `scripts/test-marketplace-install.ps1` (PowerShell) versions.
 - **Depends on**: Tasks 23-27
 - **Files**:
   - `scripts/test-marketplace-install.js` (preferred: cross-platform Node.js script)
   - OR `scripts/test-marketplace-install.sh` + `scripts/test-marketplace-install.ps1`
 - **Testing**: Run script manually on macOS, Linux, and Windows. Verify all 5 plugins install/uninstall cleanly.
 
-### Task 30: Implement doctor CLI command
-- **Description**: Create `packages/core/src/cli.ts` with CLI interface using commander or similar. Add `doctor` command that calls doctor() function and displays results with colored output (green/yellow/red).
+### Task 30: Implement doctor CLI command ✓
+- [x] **Description**: Create `packages/core/src/cli.ts` with CLI interface using commander or similar. Add `doctor` command that calls doctor() function and displays results with colored output (green/yellow/red).
 - **Depends on**: Task 22
 - **Files**:
   - `packages/core/src/cli.ts`
   - `packages/core/package.json` (add bin entry)
 - **Testing**: Run `npx @nodesource/plugin-core doctor --harness claude`. Verify output format and colors.
 
-### Task 31: Write README documentation
-- **Description**: Create comprehensive README.md with installation instructions for each marketplace, authentication flow explanation, troubleshooting guide, and development setup.
+### Task 31: Write README documentation ✓
+- [x] **Description**: Create comprehensive README.md with installation instructions for each marketplace, authentication flow explanation, troubleshooting guide, and development setup.
 - **Depends on**: Tasks 23-27
 - **Files**:
   - `README.md` (update root README)
   - `packages/core/README.md`
 - **Testing**: Review for clarity and completeness. Test all commands mentioned in README.
 
-### Task 32: Set up CI/CD pipeline
-- **Description**: Create GitHub Actions workflow for automated testing. Run unit tests, integration tests, and lint on PR. Build and publish packages on release tag.
+### Task 32: Set up CI/CD pipeline ✓
+- [x] **Description**: Create GitHub Actions workflow for automated testing. Run unit tests, integration tests, and lint on PR. Build and publish packages on release tag.
 - **Depends on**: Task 28
 - **Files**:
   - `.github/workflows/test.yml`

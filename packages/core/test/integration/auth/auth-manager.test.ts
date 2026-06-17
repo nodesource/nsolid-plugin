@@ -16,6 +16,7 @@ cp.execFile = (...args: unknown[]) => { execFileCalls.push(args) }
 
 let tmpDir: string
 let originalHome: string | undefined
+let originalUserProfile: string | undefined
 let originalFetch: typeof globalThis.fetch
 
 const authConfig: AuthConfig = {
@@ -53,7 +54,9 @@ function sendCallback (port: number, state: string, overrides?: Record<string, s
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
   originalHome = process.env.HOME
+  originalUserProfile = process.env.USERPROFILE
   process.env.HOME = tmpDir
+  process.env.USERPROFILE = tmpDir
   originalFetch = globalThis.fetch
   execFileCalls.length = 0
 })
@@ -62,6 +65,7 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
   if (originalHome !== undefined) {
     process.env.HOME = originalHome
+    process.env.USERPROFILE = originalUserProfile
   }
   globalThis.fetch = originalFetch
 })
@@ -166,16 +170,31 @@ describe('ensureAuthenticated', () => {
       throw new Error('ECONNREFUSED')
     }) as unknown as typeof fetch
 
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig)
+    // The API being unavailable triggers an expected console.warn from
+    // auth-manager ("Could not validate token. Storing credentials optimistically.").
+    // Capture it so the warning doesn't pollute the test reporter's dot row,
+    // and assert it fired — this documents the degraded-mode behavior we rely on.
+    const originalWarn = console.warn
+    const warnings: string[] = []
+    console.warn = (msg: string) => { warnings.push(String(msg)) }
+    try {
+      const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+      const promise = ensureAuthenticated(authConfig)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    const state = getStateFromExecFileCall()
-    await sendCallback(8767, state)
-    const result = await promise
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const state = getStateFromExecFileCall()
+      await sendCallback(8767, state)
+      const result = await promise
 
-    assert.strictEqual(result.serviceToken, 'oauth-token')
-    assert.strictEqual(result.organizationId, 'org-456')
+      assert.strictEqual(result.serviceToken, 'oauth-token')
+      assert.strictEqual(result.organizationId, 'org-456')
+      assert.ok(
+        warnings.some((w) => w.includes('Could not validate token')),
+        'expected an optimistic-storage warning when validation API is unavailable'
+      )
+    } finally {
+      console.warn = originalWarn
+    }
   })
 })
 
