@@ -37,13 +37,34 @@ function findTestFiles (dir, acc) {
 // Collect every *.test.ts under packages/<pkg>/test/ (recursive).
 // Optional argv[2] scopes to a single package (e.g. `run-tests.mjs core`),
 // so per-package scripts can reuse this runner and stay cross-platform too.
+// Always discover the real package list and validate `onlyPackage` against it:
+// an unvalidated argv lets `run-tests.mjs ../etc` (or any path) escape the
+// `packages/` scope via `join(packagesDir, name, 'test')`, which `node --test`
+// would then execute. Reject unknown packages up front instead.
 const onlyPackage = process.argv[2]
 const packagesDir = join(ROOT, 'packages')
-const packageNames = onlyPackage
-  ? [onlyPackage]
-  : readdirSync(packagesDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name)
+const discoveredPackages = readdirSync(packagesDir, { withFileTypes: true })
+  .filter((e) => e.isDirectory())
+  .map((e) => e.name)
+  .sort()
+
+if (onlyPackage) {
+  if (!discoveredPackages.includes(onlyPackage)) {
+    console.error(
+      `Unknown package: "${onlyPackage}"\n` +
+      `Known packages: ${discoveredPackages.join(', ')}`
+    )
+    process.exit(1)
+  }
+  // Guard against path-traversal-style input even if it happens to be a
+  // substring match; package names are plain identifiers, never paths.
+  if (/[\/\\]/.test(onlyPackage)) {
+    console.error(`Invalid package name: "${onlyPackage}" (must be a plain package name, not a path)`)
+    process.exit(1)
+  }
+}
+
+const packageNames = onlyPackage ? [onlyPackage] : discoveredPackages
 
 const files = []
 for (const name of packageNames) {

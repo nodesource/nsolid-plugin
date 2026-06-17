@@ -83,7 +83,11 @@ export default async function * summaryReporter (source) {
         if (err?.failureType === 'subtestsFailed') break
 
         bumpFile(data.file, false)
-        const file = data.file ? basename(data.file) : '<unknown file>'
+        // Package-relative key (e.g. core/test/unit/x.test.ts), NOT bare
+        // basename — every plugin ships identically-named files (manifest.test.ts)
+        // and basename would collapse failures from different packages into one
+        // ambiguous `byFile` group, hiding which package actually failed.
+        const file = data.file ? fileKey(data.file) : '<unknown file>'
         const name = data.name || '<unnamed>'
         const message = extractMessage(err)
         const stack = typeof err?.stack === 'string' ? err.stack : ''

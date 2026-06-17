@@ -30,7 +30,23 @@ const McpServerRefSchema = z.object({
 const AuthConfigSchema = z.object({
   type: z.literal('oauth'),
   provider: z.string(),
-  accountsUrl: z.string().url(),
+  accountsUrl: z.string().url().refine(
+    (value) => {
+      // Try/catch defensively: in Zod v4 a `.refine` can receive a value that
+      // failed an earlier `url()` check (checks aren't strictly short-circuited),
+      // and `new URL` would throw and crash the validator instead of returning
+      // a clean validation failure.
+      let u
+      try { u = new URL(value) } catch { return false }
+      // Origin-only: no path (beyond "/"), query, or hash. The auth manager
+      // builds endpoints via `new URL('/sign-in', accountsUrl)`, and the URL
+      // constructor REPLACES the entire base path when given a leading-slash
+      // path, so a base like "https://host/api/v1" would silently drop
+      // "/api/v1" and OAuth would hit the wrong endpoint.
+      return (u.pathname === '/' || u.pathname === '') && u.search === '' && u.hash === ''
+    },
+    { message: 'must be an origin-only URL with no path, query, or hash (e.g. https://accounts.nodesource.com)' }
+  ),
   callbackPort: z.number().int().optional(),
   requiredPermissions: z.array(z.string()).optional()
 }).strict()

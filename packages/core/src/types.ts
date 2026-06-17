@@ -28,6 +28,15 @@ export interface Credentials {
 export interface AuthConfig {
   type: 'oauth';
   provider: string;
+  /**
+   * Origin-only URL of the accounts/auth service (e.g.
+   * `https://accounts.nodesource.com`). Must NOT include a path, query, or
+   * hash: the auth manager builds endpoints with
+   * `new URL('/sign-in', accountsUrl)`, and the URL constructor REPLACES the
+   * entire base path when given a leading-slash path — so a base like
+   * `https://host/api/v1` would silently lose `/api/v1` and OAuth would hit
+   * the wrong endpoint. Validated as origin-only by the bundle schema.
+   */
   accountsUrl: string;
   callbackPort?: number;
   requiredPermissions?: string[];
