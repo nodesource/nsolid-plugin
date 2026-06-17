@@ -161,6 +161,43 @@ Re-run the install command. No cleanup is needed — the local callback server c
 
 Re-run install. It is idempotent and replaces broken symlinks with correct ones.
 
+### Config backup and restore
+
+Every harness MCP config is backed up automatically before the installer changes it:
+
+```text
+~/.agents/.config-backup/<harness>/<timestamp>.<ext>
+```
+
+Restore the latest backup:
+
+```bash
+nsolid-plugin restore --harness <harness>
+```
+
+List available backups:
+
+```bash
+nsolid-plugin restore --harness <harness> --list
+```
+
+Restore a specific backup:
+
+```bash
+nsolid-plugin restore --harness <harness> --backup ~/.agents/.config-backup/<harness>/<file>
+```
+
+### Verbose logging
+
+For detailed, timestamped logs written to stderr:
+
+```bash
+nsolid-plugin install --harness <harness> --verbose
+NSOLID_PLUGIN_VERBOSE=1 nsolid-plugin doctor --harness <harness>
+```
+
+Tokens and auth headers are redacted automatically.
+
 ### Manual uninstall / cleanup
 
 ```bash

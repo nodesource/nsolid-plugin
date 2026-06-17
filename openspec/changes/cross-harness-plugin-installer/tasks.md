@@ -351,18 +351,18 @@
   - `.github/workflows/publish.yml`
 - **Testing**: Push to branch, verify CI runs. Create test release, verify publish workflow.
 
-## Phase 9: Polish and Edge Cases
+## Phase 9: Polish and Edge Cases ✓
 
-### Task 33: Implement idempotent installation
-- **Description**: Review and enhance install() to ensure idempotency. Re-running install should not create duplicate entries, should update existing configs, should handle already-installed state gracefully.
+### Task 33: Implement idempotent installation ✓
+- [x] **Description**: Review and enhance install() to ensure idempotency. Re-running install should not create duplicate entries, should update existing configs, should handle already-installed state gracefully. Implemented in `19a6a0e`: skill-copy rollback on partial failure (`skill-copier.ts`), harness-aware tracking de-dup (`skill-tracker.ts`, `mcp-tracker.ts`), and idempotency coverage in `test/integration/idempotency.test.ts`.
 - **Depends on**: Task 28
 - **Files**:
   - `packages/core/src/index.ts` (review and enhance)
 - **Testing**: Run install twice in integration test. Verify no duplicates, no errors.
 - **Spec reference**: Idempotent installation scenario in specs/installation-and-auth.md
 
-### Task 34: Add comprehensive error messages
-- **Description**: Review all error paths in core installer. Add actionable, platform-aware error messages with specific guidance. Detect OS via `process.platform` and suggest appropriate remediation:
+### Task 34: Add comprehensive error messages ✓
+- [x] **Description**: Review all error paths in core installer. Add actionable, platform-aware error messages with specific guidance. Detect OS via `process.platform` and suggest appropriate remediation: Implemented in `19a6a0e`: shared `PluginError` with stable codes (`packages/core/src/errors.ts`), `permissionGuidance()`, `toPluginError()`, `formatPluginError()`, platform-aware permission hints, and CLI top-level error rendering. Covered by `test/unit/errors.test.ts`.
   - Unix: `"Permission denied writing to ~/.claude.json. Try: sudo chown -R $USER ~/.claude.json"`
   - Windows: `"Permission denied writing to C:\Users\<user>\.claude.json. Try running as Administrator, or: icacls C:\Users\<user>\.claude.json /grant %USERNAME%:F"`
   Use error codes for programmatic handling.
@@ -372,16 +372,16 @@
   - Update all modules to use structured errors
 - **Testing**: Trigger each error scenario, verify message clarity and actionability on all platforms.
 
-### Task 35: Implement config backup and restore
-- **Description**: Before modifying harness configs, create backup at `~/.agents/.config-backup/<harness>/<timestamp>.json`. Add restore command to CLI for manual recovery. Document backup location in README.
+### Task 35: Implement config backup and restore ✓
+- [x] **Description**: Before modifying harness configs, create backup at `~/.agents/.config-backup/<harness>/<timestamp>.json`. Add restore command to CLI for manual recovery. Document backup location in README. Implemented in `19a6a0e`: `utils/backup.ts` (create/list/restore), `getConfigBackupDir()` in `utils/path.ts`, backups wired into `mcp-config-writer.ts` before mutation, `nsolid-plugin restore` CLI command (latest/specific/`--list`), README docs, and `test/integration/backup-restore.test.ts` + `test/unit/utils/backup.test.ts`.
 - **Depends on**: Task 20
 - **Files**:
   - `packages/core/src/utils/backup.ts`
   - `packages/core/src/cli.ts` (add restore command)
 - **Testing**: Install plugin, verify backup created. Manually corrupt config, run restore, verify recovery.
 
-### Task 36: Add verbose logging mode
-- **Description**: Add `--verbose` flag to CLI and environment variable support (NSOLID_PLUGIN_VERBOSE). Log all file operations, API calls, and decisions. Use structured logging with timestamps.
+### Task 36: Add verbose logging mode ✓
+- [x] **Description**: Add `--verbose` flag to CLI and environment variable support (NSOLID_PLUGIN_VERBOSE). Log all file operations, API calls, and decisions. Use structured logging with timestamps. Implemented in `19a6a0e`: `utils/logger.ts` (`createLogger`, `isVerboseEnabled`, `--verbose` flag + `NSOLID_PLUGIN_VERBOSE` env), logger threaded through install/uninstall/doctor/auth/mcp/skills, token/header redaction, and `test/unit/utils/logger.test.ts`.
 - **Depends on**: Task 30
 - **Files**:
   - `packages/core/src/utils/logger.ts`

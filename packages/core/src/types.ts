@@ -51,10 +51,19 @@ export interface BundleDescriptor {
   auth?: AuthConfig;
 }
 
+export interface Logger {
+  debug(message: string, meta?: Record<string, unknown>): void
+  info(message: string, meta?: Record<string, unknown>): void
+  warn(message: string, meta?: Record<string, unknown>): void
+  error(message: string, meta?: Record<string, unknown>): void
+}
+
 export interface InstallOptions {
   harness: HarnessType;
   bundlePath: string;
   skillsSource: string;
+  verbose?: boolean;
+  logger?: Logger;
 }
 
 /**

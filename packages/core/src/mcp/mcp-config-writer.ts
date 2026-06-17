@@ -6,6 +6,8 @@ import { readJsonFile, readTomlFile, readJsoncFile, writeTomlFileSync } from '..
 import { writeJsonFileSync, atomicWriteSync, ensureDir } from '../utils/fs.js'
 import { mergeMcpConfig, removeMcpServers, expandVariables } from './mcp-config-merger.js'
 import type { NormalizedMcpConfig } from './mcp-config-merger.js'
+import { createConfigBackup } from '../utils/backup.js'
+import type { Logger } from '../types.js'
 
 export type ConfigFormat = 'json' | 'toml' | 'jsonc'
 
@@ -286,6 +288,20 @@ function removeMcpServersBlockFromRaw (raw: string): string {
  * never drift (previously the conversion was duplicated inline here and again
  * in the Antigravity adapter, and removeMcpConfig skipped it entirely).
  */
+function backupMcpConfig (
+  harness: HarnessType,
+  configPath: string,
+  logger?: Logger
+): void {
+  try {
+    createConfigBackup(harness, configPath, { reason: 'pre-write' })
+  } catch (err) {
+    // Backup failure is a warning, not fatal. The user can still retry from
+    // version control or manual backups.
+    logger?.warn('mcp.config.backup.failed', { harness, configPath, error: (err as Error).message })
+  }
+}
+
 function applyHarnessWriteFormat (
   harness: HarnessType,
   config: NormalizedMcpConfig
@@ -308,7 +324,7 @@ export async function writeMcpConfig (
   harness: HarnessType,
   servers: McpServerRef[],
   variables?: Record<string, string>,
-  options?: { configPath?: string }
+  options?: { configPath?: string; logger?: Logger }
 ): Promise<void> {
   const resolvedPath = options?.configPath ?? getMcpConfigInfo(harness)?.configPath
   if (!resolvedPath) return
@@ -322,22 +338,27 @@ export async function writeMcpConfig (
   const existing = readExistingConfig(resolvedPath, format)
   const merged = mergeMcpConfig(existing, resolvedServers)
 
+  backupMcpConfig(harness, resolvedPath, options?.logger)
   writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, merged))
+  options?.logger?.info('mcp.config.write', { harness, configPath: resolvedPath })
 }
 
 export function writeAdapterMcpConfig (
   harness: HarnessType,
-  config: NormalizedMcpConfig
+  config: NormalizedMcpConfig,
+  logger?: Logger
 ): void {
   const info = getMcpConfigInfo(harness)
   if (!info) return
+  backupMcpConfig(harness, info.configPath, logger)
   writeConfigFile(info.configPath, info.format, applyHarnessWriteFormat(harness, config))
+  logger?.info('mcp.config.write', { harness, configPath: info.configPath })
 }
 
 export async function removeMcpConfig (
   harness: HarnessType,
   serverNames: string[],
-  options?: { configPath?: string }
+  options?: { configPath?: string; logger?: Logger }
 ): Promise<void> {
   const resolvedPath = options?.configPath ?? getMcpConfigInfo(harness)?.configPath
   if (!resolvedPath) return
@@ -346,5 +367,8 @@ export async function removeMcpConfig (
 
   const existing = readExistingConfig(resolvedPath, format)
   const result = removeMcpServers(existing, serverNames)
+
+  backupMcpConfig(harness, resolvedPath, options?.logger)
   writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, result))
+  options?.logger?.info('mcp.config.remove', { harness, configPath: resolvedPath, serverNames })
 }

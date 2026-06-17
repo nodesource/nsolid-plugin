@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { existsSync, unlinkSync } from 'node:fs'
-import type { HarnessType } from '../types.js'
+import type { HarnessType, Logger } from '../types.js'
 import type { McpTrackingEntry, TrackingData } from '../skills/skill-tracker.js'
 import { readTrackingFile, writeTrackingFile } from '../skills/skill-tracker.js'
 import { getTrackingFilePath, resolveHome } from '../utils/path.js'
@@ -19,9 +19,10 @@ function createEmptyTracking (harness: HarnessType): TrackingData {
 
 export async function addTrackedMcps (
   entries: { name: string; configPath: string }[],
-  harness: HarnessType
+  harness: HarnessType,
+  logger?: Logger
 ): Promise<void> {
-  const tracking = (await readTrackingFile()) ?? createEmptyTracking(harness)
+  const tracking = (await readTrackingFile(logger)) ?? createEmptyTracking(harness)
   const now = new Date().toISOString()
 
   for (const entry of entries) {
@@ -42,14 +43,15 @@ export async function addTrackedMcps (
     }
   }
 
-  await writeTrackingFile(tracking)
+  await writeTrackingFile(tracking, logger)
 }
 
 export async function removeTrackedMcps (
   serverNames: string[],
-  harness?: HarnessType
+  harness?: HarnessType,
+  logger?: Logger
 ): Promise<void> {
-  const tracking = await readTrackingFile()
+  const tracking = await readTrackingFile(logger)
   if (!tracking) return
 
   tracking.mcpServers = tracking.mcpServers.filter((entry) => {
@@ -65,14 +67,15 @@ export async function removeTrackedMcps (
       unlinkSync(filePath)
     }
   } else {
-    await writeTrackingFile(tracking)
+    await writeTrackingFile(tracking, logger)
   }
 }
 
 export async function listTrackedMcps (
-  harness?: HarnessType
+  harness?: HarnessType,
+  logger?: Logger
 ): Promise<McpTrackingEntry[]> {
-  const tracking = await readTrackingFile()
+  const tracking = await readTrackingFile(logger)
   if (!tracking) return []
 
   if (harness !== undefined) {

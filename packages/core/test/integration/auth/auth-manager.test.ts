@@ -178,31 +178,32 @@ describe('ensureAuthenticated', () => {
       throw new Error('ECONNREFUSED')
     }) as unknown as typeof fetch
 
-    // The API being unavailable triggers an expected console.warn from
+    // The API being unavailable triggers an expected logger.warn from
     // auth-manager ("Could not validate token. Storing credentials optimistically.").
-    // Capture it so the warning doesn't pollute the test reporter's dot row,
-    // and assert it fired — this documents the degraded-mode behavior we rely on.
-    const originalWarn = console.warn
+    // Inject a capturing logger so the warning doesn't pollute the test reporter's
+    // dot row, and assert it fired — this documents the degraded-mode behavior.
     const warnings: string[] = []
-    console.warn = (msg: string) => { warnings.push(String(msg)) }
-    try {
-      const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-      const promise = ensureAuthenticated(authConfig)
-
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      const state = getStateFromExecFileCall()
-      await sendCallback(8767, state)
-      const result = await promise
-
-      assert.strictEqual(result.serviceToken, 'oauth-token')
-      assert.strictEqual(result.organizationId, 'org-456')
-      assert.ok(
-        warnings.some((w) => w.includes('Could not validate token')),
-        'expected an optimistic-storage warning when validation API is unavailable'
-      )
-    } finally {
-      console.warn = originalWarn
+    const logger = {
+      debug: () => {},
+      info: () => {},
+      warn: (msg: string) => { warnings.push(String(msg)) },
+      error: () => {},
     }
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig, logger)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state)
+    const result = await promise
+
+    assert.strictEqual(result.serviceToken, 'oauth-token')
+    assert.strictEqual(result.organizationId, 'org-456')
+    assert.ok(
+      warnings.some((w) => w.includes('Could not validate token')),
+      'expected an optimistic-storage warning when validation API is unavailable'
+    )
   })
 })
 

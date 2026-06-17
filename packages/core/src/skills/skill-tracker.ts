@@ -1,9 +1,10 @@
 import path from 'node:path'
 import { existsSync, unlinkSync } from 'node:fs'
-import type { HarnessType, SkillRef } from '../types.js'
+import type { HarnessType, Logger, SkillRef } from '../types.js'
 import { getSkillsDir, getTrackingFilePath } from '../utils/path.js'
 import { readJsonFile } from '../utils/config.js'
 import { writeJsonFile, ensureDir } from '../utils/fs.js'
+import { formatPluginError, toPluginError } from '../errors.js'
 
 export interface SkillTrackingEntry {
   name: string;
@@ -27,25 +28,33 @@ export interface TrackingData {
   mcpServers: McpTrackingEntry[];
 }
 
-export async function readTrackingFile (): Promise<TrackingData | null> {
+export async function readTrackingFile (logger?: Logger): Promise<TrackingData | null> {
   try {
     return readJsonFile<TrackingData>(getTrackingFilePath())
-  } catch {
+  } catch (err) {
+    logger?.warn('tracking.read.failed', { error: (err as Error).message })
     return null
   }
 }
 
-export async function writeTrackingFile (data: TrackingData): Promise<void> {
+export async function writeTrackingFile (data: TrackingData, logger?: Logger): Promise<void> {
   const filePath = getTrackingFilePath()
   ensureDir(path.dirname(filePath))
-  await writeJsonFile(filePath, data)
+  try {
+    await writeJsonFile(filePath, data)
+    logger?.debug('tracking.write', { skills: data.skills.length, mcpServers: data.mcpServers.length })
+  } catch (err) {
+    const pluginErr = toPluginError(err, 'TRACKING_UPDATE_FAILED', { path: filePath })
+    throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
+  }
 }
 
 export async function addTrackedSkills (
   skills: SkillRef[],
-  harness: HarnessType
+  harness: HarnessType,
+  logger?: Logger
 ): Promise<void> {
-  const tracking = (await readTrackingFile()) ?? createEmptyTracking(harness)
+  const tracking = (await readTrackingFile(logger)) ?? createEmptyTracking(harness)
   const now = new Date().toISOString()
 
   for (const skill of skills) {
@@ -66,14 +75,15 @@ export async function addTrackedSkills (
     }
   }
 
-  await writeTrackingFile(tracking)
+  await writeTrackingFile(tracking, logger)
 }
 
 export async function removeTrackedSkills (
   skills: SkillRef[],
-  harness?: HarnessType
+  harness?: HarnessType,
+  logger?: Logger
 ): Promise<void> {
-  const tracking = await readTrackingFile()
+  const tracking = await readTrackingFile(logger)
   if (!tracking) return
 
   for (const skill of skills) {
@@ -93,10 +103,16 @@ export async function removeTrackedSkills (
   if (tracking.skills.length === 0 && tracking.mcpServers.length === 0) {
     const filePath = getTrackingFilePath()
     if (existsSync(filePath)) {
-      unlinkSync(filePath)
+      try {
+        unlinkSync(filePath)
+        logger?.debug('tracking.delete', { reason: 'empty' })
+      } catch (err) {
+        const pluginErr = toPluginError(err, 'TRACKING_UPDATE_FAILED', { path: filePath })
+        throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
+      }
     }
   } else {
-    await writeTrackingFile(tracking)
+    await writeTrackingFile(tracking, logger)
   }
 }
 

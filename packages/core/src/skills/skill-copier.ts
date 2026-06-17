@@ -1,9 +1,11 @@
 import { cp, rm, access } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
-import type { SkillRef } from '../types.js'
+import type { Logger, SkillRef } from '../types.js'
 import { getSkillsDir } from '../utils/path.js'
 import { ensureDir } from '../utils/fs.js'
 import { assertSafeSkillName } from '../utils/skill-name.js'
+import { formatPluginError, toPluginError } from '../errors.js'
 
 function assertSafeSkillPath (sourceDir: string, skillPath: string): string {
   const resolved = path.resolve(sourceDir, skillPath)
@@ -26,9 +28,20 @@ export class SkillCopyError extends Error {
   }
 }
 
-export async function installSkills (skills: SkillRef[], sourceDir: string): Promise<void> {
+function wrapSkillCopyError (skill: string, err: unknown): SkillCopyError {
+  const pluginErr = toPluginError(err, 'SKILL_COPY_FAILED')
+  return new SkillCopyError(skill, new Error(formatPluginError(pluginErr), { cause: pluginErr }))
+}
+
+export async function installSkills (
+  skills: SkillRef[],
+  sourceDir: string,
+  logger?: Logger
+): Promise<void> {
   const destDir = getSkillsDir()
   ensureDir(destDir)
+
+  const completed: { skill: string; destPath: string; existed: boolean }[] = []
 
   for (const skill of skills) {
     const safeName = assertSafeSkillName(skill.name)
@@ -38,18 +51,30 @@ export async function installSkills (skills: SkillRef[], sourceDir: string): Pro
     try {
       await access(srcPath)
     } catch {
-      throw new SkillCopyError(skill.name, new Error(`Source not found: ${srcPath}`))
+      throw wrapSkillCopyError(skill.name, new Error(`Source not found: ${srcPath}`))
     }
 
+    const existed = existsSync(destPath)
     try {
+      logger?.debug('skills.copy.start', { skill: skill.name, srcPath, destPath, existed })
       await cp(srcPath, destPath, { recursive: true, force: true })
+      completed.push({ skill: skill.name, destPath, existed })
+      logger?.debug('skills.copy.done', { skill: skill.name, destPath })
     } catch (err) {
-      throw new SkillCopyError(skill.name, err as Error)
+      logger?.error('skills.copy.failed', { skill: skill.name, destPath, error: (err as Error).message })
+      // Roll back newly-created directories so a partial failure does not
+      // leave stale state that interferes with the next install attempt.
+      for (const done of completed) {
+        if (!done.existed) {
+          try { await rm(done.destPath, { recursive: true, force: true }) } catch { /* ignore */ }
+        }
+      }
+      throw wrapSkillCopyError(skill.name, err)
     }
   }
 }
 
-export async function uninstallSkills (skills: SkillRef[]): Promise<void> {
+export async function uninstallSkills (skills: SkillRef[], logger?: Logger): Promise<void> {
   const destDir = getSkillsDir()
 
   for (const skill of skills) {
@@ -57,10 +82,11 @@ export async function uninstallSkills (skills: SkillRef[]): Promise<void> {
     const destPath = path.join(destDir, safeName)
     try {
       await access(destPath)
+      logger?.debug('skills.uninstall', { skill: skill.name, destPath })
       await rm(destPath, { recursive: true, force: true })
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw err
+        throw toPluginError(err, 'SKILL_COPY_FAILED', { path: destPath })
       }
       // Best-effort: ignore missing skills
     }

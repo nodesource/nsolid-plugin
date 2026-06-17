@@ -1,10 +1,11 @@
 import { symlink, readlink, lstat, rm, rename, cp, access } from 'node:fs/promises'
 import path from 'node:path'
-import type { HarnessType, SkillRef } from '../types.js'
+import type { HarnessType, Logger, SkillRef } from '../types.js'
 import { getSkillsDir } from '../utils/path.js'
 import { ensureDir } from '../utils/fs.js'
 import { assertSafeSkillName } from '../utils/skill-name.js'
 import { getAdapter } from '../harnesses/index.js'
+import { toPluginError } from '../errors.js'
 
 export type LinkStatus = 'skipped' | 'replaced' | 'backed-up' | 'created'
 
@@ -26,7 +27,8 @@ export function getHarnessSkillsPath (harness: HarnessType): string {
 
 export async function linkSkillsToHarness (
   harness: HarnessType,
-  skills: SkillRef[]
+  skills: SkillRef[],
+  logger?: Logger
 ): Promise<LinkResult[]> {
   const harnessDir = getHarnessSkillsPath(harness)
   ensureDir(harnessDir)
@@ -40,6 +42,7 @@ export async function linkSkillsToHarness (
     const target = path.join(harnessDir, safeName)
 
     const status = await createIdempotentLink(source, target, isPi)
+    logger?.debug('skills.link', { harness, skill: skill.name, target, status })
     results.push({ skill: skill.name, status, target })
   }
 
@@ -48,7 +51,8 @@ export async function linkSkillsToHarness (
 
 export async function unlinkSkillsFromHarness (
   harness: HarnessType,
-  skills: SkillRef[]
+  skills: SkillRef[],
+  logger?: Logger
 ): Promise<void> {
   const harnessDir = getHarnessSkillsPath(harness)
 
@@ -57,10 +61,11 @@ export async function unlinkSkillsFromHarness (
     const target = path.join(harnessDir, safeName)
     try {
       await access(target)
+      logger?.debug('skills.unlink', { harness, skill: skill.name, target })
       await rm(target, { recursive: true, force: true })
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw err
+        throw toPluginError(err, 'SKILL_LINK_FAILED', { harness, path: target })
       }
       // Best-effort: ignore missing
     }

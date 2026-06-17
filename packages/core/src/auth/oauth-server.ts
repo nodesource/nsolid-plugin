@@ -24,6 +24,8 @@ export type OAuthServer = {
   close(): Promise<void>;
 }
 
+import type { Logger } from '../types.js'
+
 const DEFAULT_PORT = 8765
 const MAX_PORT = 8770
 const TIMEOUT_MS = 5 * 60 * 1000
@@ -47,12 +49,14 @@ async function findAvailablePort (startPort: number): Promise<number> {
   throw new Error(`No available ports in range ${startPort}-${MAX_PORT}`)
 }
 
-export async function startOAuthServer (preferredPort?: number, expectedState?: string): Promise<OAuthServer> {
+export async function startOAuthServer (preferredPort?: number, expectedState?: string, logger?: Logger): Promise<OAuthServer> {
   const startPort = preferredPort ?? DEFAULT_PORT
   let port = await findAvailablePort(startPort)
   let resolveCallback: ((result: OAuthCallbackResult) => void) | null = null
   let settled = false
   let settledResult: OAuthCallbackResult | null = null
+
+  logger?.debug('auth.server.starting', { port, expectedState: expectedState ? 'set' : 'none' })
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -64,12 +68,14 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
     const state = url.searchParams.get('state')
 
     if (expectedState && state !== expectedState) {
+      logger?.warn('auth.server.csrf.mismatch', { receivedState: state })
       res.writeHead(400, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>Authentication failed</h1><p>Invalid state parameter.</p></body></html>')
       return
     }
 
     if (!success) {
+      logger?.warn('auth.server.callback.failed')
       res.writeHead(400, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>Authentication failed</h1><p>Authentication was not successful.</p></body></html>')
       if (!settled) {
@@ -81,6 +87,7 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
     }
 
     if (token && consoleId && saasToken && consoleUrl && !settled) {
+      logger?.debug('auth.server.callback.success', { consoleId })
       settled = true
       settledResult = { success: true, token, consoleId, saasToken, consoleUrl }
       res.writeHead(200, { 'Content-Type': 'text/html' })
@@ -118,6 +125,7 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
 
   const timeoutId = setTimeout(() => {
     if (!settled) {
+      logger?.warn('auth.server.timeout', { timeoutMs: TIMEOUT_MS })
       settled = true
       settledResult = { success: false, reason: 'timeout' }
       resolveCallback?.(settledResult)
