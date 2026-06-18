@@ -39,6 +39,27 @@ import { restoreConfigBackup, type BackupEntry } from './utils/backup.js'
 import { toPluginError } from './errors.js'
 
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
+const STAGING_ACCOUNTS_URL = 'https://staging.accounts.nodesource.com'
+
+export function resolveAccountsUrl (defaultUrl: string, logger?: Logger): string {
+  const explicit = process.env.NSOLID_ACCOUNTS_URL
+  const staging = process.env.NSOLID_STAGING
+  let url = defaultUrl
+  if (staging === '1' || staging === 'true') url = STAGING_ACCOUNTS_URL
+  if (explicit) url = explicit // explicit wins over the staging shortcut
+
+  if (url === defaultUrl) return url
+
+  // Mirror the origin-only refine() in validate.ts so a bad override fails loudly,
+  // not silently (an origin with a path would drop /api/v1 via new URL('/sign-in', base)).
+  let u: URL
+  try { u = new URL(url) } catch { throw new Error(`Invalid NSOLID_ACCOUNTS_URL override: ${url}`) }
+  if ((u.pathname !== '/' && u.pathname !== '') || u.search !== '' || u.hash !== '') {
+    throw new Error(`Accounts URL override must be origin-only (no path/query/hash): ${url}`)
+  }
+  logger?.warn('auth.accountsUrl.overridden', { from: defaultUrl, to: url })
+  return url
+}
 
 export async function install (options: InstallOptions): Promise<InstallResult> {
   const logger = options.logger ?? createLogger({ verbose: isVerboseEnabled(options.verbose) })
@@ -71,6 +92,8 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
 
   let credentials: Credentials | null = null
   if (bundle.auth) {
+    const authConfig = { ...bundle.auth, accountsUrl: resolveAccountsUrl(bundle.auth.accountsUrl, logger) }
+
     try {
       credentials = loadCredentials()
     } catch {
@@ -80,7 +103,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     if (!credentials || isExpired(credentials)) {
       result.hadToAuthenticate = true
       try {
-        credentials = await ensureAuthenticated(bundle.auth, logger)
+        credentials = await ensureAuthenticated(authConfig, logger)
       } catch (err) {
         const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
         result.errors.push(`Authentication failed: ${pluginErr.message}`)

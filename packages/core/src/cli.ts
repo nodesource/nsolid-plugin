@@ -34,6 +34,8 @@ Options:
   --verbose             Enable detailed logging to stderr
   --json                Output doctor report as JSON (machine-readable)
   --no-color            Disable colored output
+  --staging             Use staging accounts URL for install (dev/QA only)
+  --accounts-url <url>  Explicit origin-only accounts URL override (wins over --staging)
   --help                Show this help message`)
 }
 
@@ -49,6 +51,8 @@ async function main (): Promise<void> {
       verbose: { type: 'boolean' },
       json: { type: 'boolean' },
       'no-color': { type: 'boolean' },
+      staging: { type: 'boolean' },
+      'accounts-url': { type: 'string' },
       help: { type: 'boolean', short: 'H' },
     },
   })
@@ -78,6 +82,12 @@ async function main (): Promise<void> {
 
   switch (command) {
     case 'install': {
+      if (values.staging === true) {
+        process.env.NSOLID_STAGING = '1'
+      }
+      if (values['accounts-url']) {
+        process.env.NSOLID_ACCOUNTS_URL = values['accounts-url']
+      }
       const result = await install({ harness: requireHarness(), bundlePath, skillsSource, ...commonOptions })
       if (!result.success) {
         console.error('Install failed:')

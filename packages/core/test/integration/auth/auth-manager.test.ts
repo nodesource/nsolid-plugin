@@ -18,6 +18,8 @@ let tmpDir: string
 let originalHome: string | undefined
 let originalUserProfile: string | undefined
 let originalFetch: typeof globalThis.fetch
+let originalStaging: string | undefined
+let originalAccountsUrl: string | undefined
 
 const authConfig: AuthConfig = {
   type: 'oauth',
@@ -62,6 +64,11 @@ beforeEach(() => {
   process.env.USERPROFILE = tmpDir
   originalFetch = globalThis.fetch
   execFileCalls.length = 0
+
+  originalStaging = process.env.NSOLID_STAGING
+  originalAccountsUrl = process.env.NSOLID_ACCOUNTS_URL
+  delete process.env.NSOLID_STAGING
+  delete process.env.NSOLID_ACCOUNTS_URL
 })
 
 afterEach(() => {
@@ -71,6 +78,11 @@ afterEach(() => {
     process.env.USERPROFILE = originalUserProfile
   }
   globalThis.fetch = originalFetch
+
+  if (originalStaging !== undefined) process.env.NSOLID_STAGING = originalStaging
+  else delete process.env.NSOLID_STAGING
+  if (originalAccountsUrl !== undefined) process.env.NSOLID_ACCOUNTS_URL = originalAccountsUrl
+  else delete process.env.NSOLID_ACCOUNTS_URL
 })
 
 describe('ensureAuthenticated', () => {
@@ -339,5 +351,103 @@ describe('ensureAuthenticated - consoleId validation', () => {
       // Re-throw for assert.rejects to catch
       throw new Error('Invalid console ID format received from OAuth callback')
     }, /Invalid console ID format/)
+  })
+})
+
+describe('ensureAuthenticated - accountsUrl override', () => {
+  async function seedExpiredCredentials (): Promise<void> {
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
+    const expiredCreds: Credentials = {
+      serviceToken: 'expired-token',
+      organizationId: 'org-123',
+      saasToken: 'expired-saas',
+      consoleUrl: 'https://expired.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    }
+    saveCredentials(expiredCreds)
+  }
+
+  it('builds staging /sign-in URL when passed a staging accountsUrl', { timeout: 10000 }, async () => {
+    await seedExpiredCredentials()
+
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+
+    const stagingConfig: AuthConfig = {
+      ...authConfig,
+      accountsUrl: 'https://staging.accounts.nodesource.com',
+    }
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(stagingConfig)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const signInUrl = getUrlFromExecFileCall()
+    assert.strictEqual(signInUrl.host, 'staging.accounts.nodesource.com')
+    assert.strictEqual(signInUrl.pathname, '/sign-in')
+    assert.strictEqual(signInUrl.searchParams.get('extension'), 'nsolid-plugin')
+    assert.strictEqual(signInUrl.searchParams.get('port'), '8767')
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state)
+    await promise
+  })
+
+  it('builds explicit /sign-in URL when passed an explicit accountsUrl', { timeout: 10000 }, async () => {
+    await seedExpiredCredentials()
+
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+
+    const explicitConfig: AuthConfig = {
+      ...authConfig,
+      accountsUrl: 'https://custom.accounts.example.com',
+    }
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(explicitConfig)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const signInUrl = getUrlFromExecFileCall()
+    assert.strictEqual(signInUrl.host, 'custom.accounts.example.com')
+    assert.strictEqual(signInUrl.pathname, '/sign-in')
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state)
+    await promise
+  })
+
+  it('builds prod /sign-in URL when passed a prod accountsUrl', { timeout: 10000 }, async () => {
+    await seedExpiredCredentials()
+
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+
+    const prodConfig: AuthConfig = {
+      ...authConfig,
+      accountsUrl: 'https://accounts.nodesource.com',
+    }
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(prodConfig)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const signInUrl = getUrlFromExecFileCall()
+    assert.strictEqual(signInUrl.host, 'accounts.nodesource.com')
+    assert.strictEqual(signInUrl.pathname, '/sign-in')
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state)
+    await promise
   })
 })
