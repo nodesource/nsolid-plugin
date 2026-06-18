@@ -1,5 +1,6 @@
 export { getAdapter } from './harnesses/index.js'
 export type { HarnessAdapter, McpConfig, McpServerConfig } from './harnesses/index.js'
+export { loadCredentials, isExpired } from './auth/index.js'
 
 import path from 'node:path'
 import { readdir } from 'node:fs/promises'
@@ -9,6 +10,8 @@ import type {
   HarnessType,
   InstallOptions,
   InstallResult,
+  SetupOptions,
+  SetupResult,
   DoctorReport,
   BundleDescriptor,
   Credentials,
@@ -16,7 +19,8 @@ import type {
 } from './types.js'
 import { validateBundle } from './validate.js'
 import { ensureAuthenticated, loadCredentials, isExpired, removeCredentials } from './auth/index.js'
-import { installSkills, uninstallSkills, SkillCopyError } from './skills/skill-copier.js'
+import { deriveMcpUrlFromConsoleUrl } from './auth/mcp-url.js'
+import { installSkills, installSkillsToDirectory, uninstallSkills, SkillCopyError } from './skills/skill-copier.js'
 import { linkSkillsToHarness, unlinkSkillsFromHarness } from './skills/skill-linker.js'
 import {
   readTrackingFile,
@@ -35,11 +39,57 @@ import type { HarnessAdapter } from './harnesses/index.js'
 import { readJsonFile } from './utils/config.js'
 import { getSkillsDir, getAuthFilePath } from './utils/path.js'
 import { createLogger, isVerboseEnabled } from './utils/logger.js'
+import { createConsoleProgress, silentProgress, type ProgressReporter } from './utils/progress.js'
 import { restoreConfigBackup, type BackupEntry } from './utils/backup.js'
 import { toPluginError } from './errors.js'
 
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
 const STAGING_ACCOUNTS_URL = 'https://staging.accounts.nodesource.com'
+const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
+
+function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedSkills?: boolean }): string {
+  if (options.packageOwnedSkills === true) {
+    return `${bundle.mcpServers.length} MCP servers; skills owned by harness package`
+  }
+
+  return `${bundle.skills.length} skills, ${bundle.mcpServers.length} MCP servers`
+}
+
+async function shouldShowInitialInstallProgress (
+  bundle: BundleDescriptor,
+  harness: HarnessType,
+  logger?: Logger
+): Promise<boolean> {
+  const tracking = await readTrackingFile(logger)
+  if (!tracking) return true
+
+  const trackedSkills = new Set(
+    tracking.skills
+      .filter((skill) => skill.harnesses.includes(harness))
+      .map((skill) => skill.name)
+  )
+  const trackedMcps = new Set(
+    tracking.mcpServers
+      .filter((server) => server.harness === harness)
+      .map((server) => server.name)
+  )
+
+  const hasAllSkills = bundle.skills.every((skill) => trackedSkills.has(skill.name))
+  const hasAllMcps = bundle.mcpServers.every((server) => trackedMcps.has(server.name))
+  return !(hasAllSkills && hasAllMcps)
+}
+
+async function resolveInstallProgress (
+  options: InstallOptions,
+  bundle: BundleDescriptor,
+  logger?: Logger
+): Promise<ProgressReporter> {
+  if (options.progress) return options.progress
+  if (process.env.NSOLID_PLUGIN_PROGRESS === '1') return createConsoleProgress()
+  return (await shouldShowInitialInstallProgress(bundle, options.harness, logger))
+    ? createConsoleProgress()
+    : silentProgress
+}
 
 export function resolveAccountsUrl (defaultUrl: string, logger?: Logger): string {
   const explicit = process.env.NSOLID_ACCOUNTS_URL
@@ -61,8 +111,89 @@ export function resolveAccountsUrl (defaultUrl: string, logger?: Logger): string
   return url
 }
 
+export async function setup (options: SetupOptions): Promise<SetupResult> {
+  const logger = options.logger ?? createLogger({ verbose: isVerboseEnabled(options.verbose) })
+  const progress = options.progress ?? createConsoleProgress()
+  const result: SetupResult = {
+    success: false,
+    skillsInstalled: 0,
+    mcpServersConfigured: [],
+    hadToAuthenticate: false,
+    errors: [],
+  }
+
+  logger.info('setup.start', { harness: options.harness, bundlePath: options.bundlePath })
+
+  let bundle: BundleDescriptor
+  try {
+    const bundleData = readJsonFile<BundleDescriptor>(options.bundlePath)
+    if (!bundleData) {
+      result.errors.push(`Bundle not found: ${options.bundlePath}`)
+      return result
+    }
+    bundle = validateBundle(bundleData)
+    progress.header(`NodeSource setup — ${options.harness}`)
+    progress.step('Reading bundle config', formatBundleSummary(bundle, options))
+  } catch (err) {
+    const pluginErr = toPluginError(err, 'BUNDLE_INVALID', { path: options.bundlePath, harness: options.harness })
+    result.errors.push(`Bundle validation failed: ${pluginErr.message}`)
+    return result
+  }
+
+  if (bundle.auth) {
+    const authConfig = { ...bundle.auth, accountsUrl: resolveAccountsUrl(bundle.auth.accountsUrl, logger) }
+
+    try {
+      const existingCredentials = loadCredentials()
+      if (existingCredentials && !isExpired(existingCredentials)) {
+        progress.step('Checking NodeSource login', 'already signed in')
+      } else {
+        result.hadToAuthenticate = true
+        progress.step('Checking NodeSource login', 'sign-in required')
+        await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth })
+      }
+    } catch {
+      // Corrupt credentials file - fall through to re-authenticate
+      result.hadToAuthenticate = true
+      progress.step('Checking NodeSource login', 'sign-in required')
+      try {
+        const authConfig = { ...bundle.auth, accountsUrl: resolveAccountsUrl(bundle.auth.accountsUrl, logger) }
+        await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth })
+      } catch (err) {
+        const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
+        result.errors.push(`Authentication failed: ${pluginErr.message}`)
+        return result
+      }
+    }
+  }
+
+  // For CLI-only/package-owned harnesses, setup also performs the direct
+  // fallback install/MCP config so that `nsolid-plugin setup` is a one-step
+  // onboarding path. Package-owned harnesses can opt out of user-level skill
+  // copies via packageOwnedSkills while still receiving MCP config.
+  if (!PLUGIN_OWNED_HARNESSES.has(options.harness)) {
+    const installResult = await install({
+      ...options,
+      progress,
+    })
+    result.skillsInstalled = installResult.skillsInstalled
+    result.mcpServersConfigured = installResult.mcpServersConfigured
+    result.errors.push(...installResult.errors)
+    result.success = installResult.success
+    if (result.success) {
+      progress.done(`Setup complete — credentials ready for ${options.harness}`)
+    }
+    return result
+  }
+
+  result.success = true
+  progress.done(`Setup complete — credentials ready for ${options.harness} plugin MCPs`)
+  return result
+}
+
 export async function install (options: InstallOptions): Promise<InstallResult> {
   const logger = options.logger ?? createLogger({ verbose: isVerboseEnabled(options.verbose) })
+  let progress: ProgressReporter = silentProgress
   const result: InstallResult = {
     success: false,
     skillsInstalled: 0,
@@ -82,6 +213,9 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     }
     bundle = validateBundle(bundleData)
     logger.debug('install.bundle.loaded', { name: bundle.name, skills: bundle.skills.length, mcpServers: bundle.mcpServers.length })
+    progress = await resolveInstallProgress(options, bundle, logger)
+    progress.header(`NodeSource installer — ${options.harness}`)
+    progress.step('Reading bundle config', formatBundleSummary(bundle, options))
   } catch (err) {
     const pluginErr = toPluginError(err, 'BUNDLE_INVALID', { path: options.bundlePath, harness: options.harness })
     result.errors.push(`Bundle validation failed: ${pluginErr.message}`)
@@ -92,8 +226,6 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
 
   let credentials: Credentials | null = null
   if (bundle.auth) {
-    const authConfig = { ...bundle.auth, accountsUrl: resolveAccountsUrl(bundle.auth.accountsUrl, logger) }
-
     try {
       credentials = loadCredentials()
     } catch {
@@ -102,50 +234,73 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
 
     if (!credentials || isExpired(credentials)) {
       result.hadToAuthenticate = true
-      try {
-        credentials = await ensureAuthenticated(authConfig, logger)
-      } catch (err) {
-        const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
-        result.errors.push(`Authentication failed: ${pluginErr.message}`)
-        return result
-      }
-    }
-  }
-
-  try {
-    await installSkills(bundle.skills, options.skillsSource, logger)
-    result.skillsInstalled = bundle.skills.length
-    logger.info('install.skills.done', { count: result.skillsInstalled })
-  } catch (err) {
-    if (err instanceof SkillCopyError) {
-      result.errors.push(err.message)
+      progress.step('Checking NodeSource login', 'not signed in')
+      progress.warn('Authentication required for MCP servers', 'Run: nsolid-plugin setup')
+      // Install never opens a browser. Skills are still installed; MCP servers
+      // are configured only after the user runs `nsolid-plugin setup`.
     } else {
-      result.errors.push(`Skill installation failed: ${(err as Error).message}`)
+      progress.step('Checking NodeSource login', 'already signed in')
     }
-    return result
   }
 
   let linkedSkills: typeof bundle.skills = []
-  try {
-    const linkResults = await linkSkillsToHarness(options.harness, bundle.skills, logger)
-    const linkedNames = new Set(linkResults.map((r) => r.skill))
-    linkedSkills = bundle.skills.filter((s) => linkedNames.has(s.name))
-    logger.info('install.skills.linked', { harness: options.harness, linked: linkedSkills.length })
-  } catch (err) {
-    const pluginErr = toPluginError(err, 'SKILL_LINK_FAILED', { harness: options.harness })
-    result.errors.push(`Skill linking failed: ${pluginErr.message}`)
+  let trackedSkillsDir: string | undefined
+  if (options.packageOwnedSkills === true) {
+    logger.info('install.skills.packageOwned', { harness: options.harness, count: bundle.skills.length })
+  } else if (options.harnessSpecificSkills === true) {
+    const harnessSkillsPath = adapter.getSkillsPath()
+    try {
+      await installSkillsToDirectory(bundle.skills, options.skillsSource, harnessSkillsPath, logger)
+      result.skillsInstalled = bundle.skills.length
+      linkedSkills = bundle.skills
+      trackedSkillsDir = harnessSkillsPath
+      progress.step('Copying skills', `${result.skillsInstalled} → ${harnessSkillsPath}`)
+      logger.info('install.skills.harnessSpecific.done', { harness: options.harness, count: result.skillsInstalled, path: harnessSkillsPath })
+    } catch (err) {
+      if (err instanceof SkillCopyError) {
+        result.errors.push(err.message)
+      } else {
+        result.errors.push(`Skill installation failed: ${(err as Error).message}`)
+      }
+      return result
+    }
+  } else {
+    try {
+      await installSkills(bundle.skills, options.skillsSource, logger)
+      result.skillsInstalled = bundle.skills.length
+      progress.step('Copying skills', `${result.skillsInstalled} → ~/.agents/skills/`)
+      logger.info('install.skills.done', { count: result.skillsInstalled })
+    } catch (err) {
+      if (err instanceof SkillCopyError) {
+        result.errors.push(err.message)
+      } else {
+        result.errors.push(`Skill installation failed: ${(err as Error).message}`)
+      }
+      return result
+    }
+
+    try {
+      const linkResults = await linkSkillsToHarness(options.harness, bundle.skills, logger)
+      const linkedNames = new Set(linkResults.map((r) => r.skill))
+      linkedSkills = bundle.skills.filter((s) => s.name && linkedNames.has(s.name))
+      progress.step('Linking skills', `into ${adapter.getSkillsPath()}`)
+      logger.info('install.skills.linked', { harness: options.harness, linked: linkedSkills.length })
+    } catch (err) {
+      const pluginErr = toPluginError(err, 'SKILL_LINK_FAILED', { harness: options.harness })
+      result.errors.push(`Skill linking failed: ${pluginErr.message}`)
+    }
   }
 
   const variables: Record<string, string> = {}
   if (credentials) {
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
-    const derivedMcpUrl = credentials.consoleUrl.replaceAll('.saas.', '.mcp.saas.')
-    if (!credentials.mcpUrl && derivedMcpUrl === credentials.consoleUrl) {
+    const derivedMcpUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
+    if (!credentials.mcpUrl && !derivedMcpUrl) {
       result.errors.push('Could not derive MCP URL from console URL pattern')
       return result
     }
-    variables.MCP_URL = credentials.mcpUrl || derivedMcpUrl
+    variables.MCP_URL = derivedMcpUrl ?? credentials.mcpUrl
     logger.debug('install.variables.derived', { orgId: credentials.organizationId })
   }
 
@@ -158,6 +313,8 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
         logger,
       })
       result.mcpServersConfigured = bundle.mcpServers.map((s) => s.name)
+      const targetConfigPath = mcpConfigPath ?? adapter.getMcpConfigPath() ?? 'MCP config'
+      progress.step('Merging MCP servers', `${result.mcpServersConfigured.join(', ')} into ${targetConfigPath}\n(backup saved)`)
       logger.info('install.mcp.done', { harness: options.harness, servers: result.mcpServersConfigured })
     } catch (err) {
       const pluginErr = toPluginError(err, 'MCP_CONFIG_WRITE_FAILED', { harness: options.harness, path: mcpConfigPath ?? undefined })
@@ -171,7 +328,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
 
   try {
     if (linkedSkills.length > 0) {
-      await addTrackedSkills(linkedSkills, options.harness, logger)
+      await addTrackedSkills(linkedSkills, options.harness, logger, trackedSkillsDir)
     }
 
     if (mcpConfigPath && result.mcpServersConfigured.length > 0) {
@@ -184,6 +341,16 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   }
 
   result.success = result.errors.length === 0
+  if (result.success) {
+    if (options.packageOwnedSkills === true) {
+      const mcpCount = result.mcpServersConfigured.length
+      progress.done(`Done — package-owned skills skipped; ${mcpCount} MCP server${mcpCount === 1 ? '' : 's'} configured for ${options.harness}`)
+    } else {
+      progress.done(`Done — ${result.skillsInstalled} skills installed for ${options.harness}`)
+    }
+  } else {
+    progress.warn('Completed with errors', `${result.errors.length} issue(s)`)
+  }
   logger.info('install.finish', { success: result.success, errors: result.errors.length })
   return result
 }
@@ -309,7 +476,7 @@ async function bestEffortCleanup (
   logger?: Logger
 ): Promise<string[]> {
   const warnings: string[] = []
-  const skillsDir = getSkillsDir()
+  const skillsDir = harness === 'opencode' ? adapter.getSkillsPath() : getSkillsDir()
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true })
     const nsSkills = entries
@@ -323,7 +490,9 @@ async function bestEffortCleanup (
     if (nsSkills.length > 0) {
       logger?.info('uninstall.bestEffort.skills', { harness, count: nsSkills.length })
       await unlinkSkillsFromHarness(harness, nsSkills, logger)
-      await uninstallSkills(nsSkills, logger)
+      if (harness !== 'opencode') {
+        await uninstallSkills(nsSkills, logger)
+      }
     }
   } catch {
     // Skills directory doesn't exist or is unreadable — nothing to clean
@@ -424,14 +593,15 @@ export async function doctor (
     const expectedMcps = bundle.mcpServers.map((s) => s.name)
 
     const trackedSkills = await readTrackingFile(logger)
-    const trackedNames = new Set(
-      trackedSkills?.skills.filter((s) => s.harnesses.includes(harness)).map((s) => s.name) ?? []
-    )
-    const sharedSkillsDir = getSkillsDir()
+    const trackedSkillEntries = trackedSkills?.skills.filter((s) => s.harnesses.includes(harness)) ?? []
+    const trackedByName = new Map(trackedSkillEntries.map((s) => [s.name, s]))
+    const skillsDirForHarness = harness === 'opencode' ? adapter.getSkillsPath() : getSkillsDir()
 
     for (const skill of bundle.skills) {
-      const inTracking = trackedNames.has(skill.name)
-      const onDisk = existsSync(path.join(sharedSkillsDir, skill.name))
+      const tracked = trackedByName.get(skill.name)
+      const inTracking = tracked !== undefined
+      const diskPath = tracked?.path ?? path.join(skillsDirForHarness, skill.name)
+      const onDisk = existsSync(diskPath)
       if (inTracking || onDisk) {
         report.skills.installed.push(skill.name)
         if (inTracking && !onDisk) {

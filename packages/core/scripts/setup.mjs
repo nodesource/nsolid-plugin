@@ -29,7 +29,11 @@ if (!VALID_HARNESS.includes(harness)) {
   process.exit(1)
 }
 
-const { install, uninstall } = await import('@nodesource/plugin-core')
+const { install, setup, uninstall } = await import('@nodesource/plugin-core')
+
+const PLUGIN_OWNED_HARNESSES = new Set(['claude', 'codex', 'antigravity'])
+const PACKAGE_OWNED_SKILL_HARNESSES = new Set(['pi'])
+const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set(['opencode'])
 
 try {
   if (action === 'uninstall') {
@@ -38,14 +42,27 @@ try {
       console.error(res.errors.join('\n'))
       process.exit(1)
     }
-    console.log(`NodeSource skills uninstalled for ${harness}`)
+    console.log(`N|Solid Plugin skills uninstalled for ${harness}`)
   } else {
-    const res = await install({ harness, bundlePath, skillsSource })
+    const installer = PLUGIN_OWNED_HARNESSES.has(harness) ? setup : install
+    const res = await installer({
+      harness,
+      bundlePath,
+      skillsSource,
+      packageOwnedSkills: PACKAGE_OWNED_SKILL_HARNESSES.has(harness),
+      harnessSpecificSkills: HARNESS_SPECIFIC_SKILL_HARNESSES.has(harness),
+    })
     if (!res.success) {
       console.error(res.errors.join('\n'))
       process.exit(1)
     }
-    console.log(`NodeSource skills installed for ${harness}: ${res.skillsInstalled} skills`)
+    if (PLUGIN_OWNED_HARNESSES.has(harness)) {
+      console.log(`N|Solid Plugin credentials ready for ${harness}`)
+    } else if (PACKAGE_OWNED_SKILL_HARNESSES.has(harness)) {
+      console.log(`N|Solid Plugin MCP/auth configured for ${harness}; skills are package-owned`)
+    } else {
+      console.log(`N|Solid Plugin skills installed for ${harness}: ${res.skillsInstalled} skills`)
+    }
   }
 } catch (err) {
   console.error(err.message)

@@ -48,18 +48,17 @@ describe('isVerboseEnabled', () => {
 })
 
 describe('createLogger', () => {
-  it('suppresses debug and info by default', () => {
+  it('suppresses debug, info, and warn by default', () => {
     const logger = createLogger()
     logger.debug('debug msg')
     logger.info('info msg')
+    logger.warn('warn msg')
     assert.strictEqual(stderrOutput, '')
   })
 
-  it('emits warnings and errors by default', () => {
+  it('emits errors by default', () => {
     const logger = createLogger()
-    logger.warn('warn msg')
     logger.error('error msg')
-    assert.ok(stderrOutput.includes('warn msg'))
     assert.ok(stderrOutput.includes('error msg'))
   })
 
@@ -67,8 +66,12 @@ describe('createLogger', () => {
     const logger = createLogger({ verbose: true })
     logger.debug('debug msg')
     logger.info('info msg')
+    logger.warn('warn msg')
+    logger.error('error msg')
     assert.ok(stderrOutput.includes('debug msg'))
     assert.ok(stderrOutput.includes('info msg'))
+    assert.ok(stderrOutput.includes('warn msg'))
+    assert.ok(stderrOutput.includes('error msg'))
   })
 
   it('redacts token-like meta values', () => {

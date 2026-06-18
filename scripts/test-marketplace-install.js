@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -17,9 +18,13 @@ const HARNESS_LIST = [
   { name: 'claude', configRel: '.claude.json', urlKey: 'url' },
   { name: 'codex', configRel: '.codex/config.toml', urlKey: 'url' },
   { name: 'opencode', configRel: '.config/opencode/opencode.jsonc', urlKey: 'url' },
-  { name: 'antigravity', configRel: '.gemini/config/mcp_config.json', urlKey: 'serverUrl' },
+  { name: 'antigravity', configRel: '.gemini/antigravity-cli/mcp_config.json', urlKey: 'serverUrl' },
   { name: 'pi', configRel: '.pi/agent/mcp.json', urlKey: 'url' },
 ]
+const PLUGIN_OWNED_HARNESSES = new Set(['claude', 'codex', 'antigravity'])
+const PACKAGE_OWNED_SKILL_HARNESSES = new Set(['pi'])
+const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set(['opencode'])
+const LEGACY_HARNESSES = HARNESS_LIST.filter((h) => !PLUGIN_OWNED_HARNESSES.has(h.name))
 
 if (!existsSync(join(REPO_ROOT, 'packages/core/dist/src/index.js'))) {
   console.error('Core is not built. Run: pnpm build')
@@ -36,82 +41,184 @@ const FAKE_CREDS = {
   permissions: [],
 }
 
+const authStub = await startAuthStub()
 let failed = 0
 
-for (const h of HARNESS_LIST) {
-  const home = mkdtempSync(join(tmpdir(), `nsolid-manual-${h.name}-`))
-  const env = { ...process.env, HOME: home, USERPROFILE: home, NSOLID_HARNESS: h.name }
+try {
+  verifyPluginOwnedPackages()
 
-  mkdirSync(join(home, '.agents'), { recursive: true })
-  writeFileSync(join(home, '.agents', '.nodesource-auth.json'), JSON.stringify(FAKE_CREDS))
+  for (const h of LEGACY_HARNESSES) {
+    const home = mkdtempSync(join(tmpdir(), `nsolid-manual-${h.name}-`))
+    const env = testEnv(home, h.name)
 
-  const tag = `[${h.name}]`
-  try {
-    const install = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs'])
-    assertOk(install, `${tag} install exit code`)
+    mkdirSync(join(home, '.agents'), { recursive: true })
+    writeFileSync(join(home, '.agents', '.nodesource-auth.json'), JSON.stringify(FAKE_CREDS))
 
-    assert(existsSync(join(home, '.agents', 'skills')), `${tag} shared skills dir`)
-    assert(harnessHasServers(home, h), `${tag} harness MCP config has nsolid-console/ns-benchmark/ncm`)
+    const tag = `[${h.name}]`
+    try {
+      const install = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs'])
+      assertOk(install, `${tag} install exit code`)
 
-    const harnessSkillsPath = getHarnessSkillsPath(home, h.name)
-    // Use a real skill name from bundle.json. `ns-benchmark` is an MCP server,
-    // not a skill — asserting on it never proved anything.
-    const probeSkill = 'ns-advanced-memory-leak-hunter'
-    assert(existsSync(join(harnessSkillsPath, probeSkill)), `${tag} skill linked to harness`)
+      assert(harnessHasServers(home, h), `${tag} harness MCP config has nsolid-console/ns-benchmark/ncm`)
 
-    const uninstall = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs', 'uninstall'])
-    assertOk(uninstall, `${tag} uninstall exit code`)
+      const harnessSkillsPath = getHarnessSkillsPath(home, h.name)
+      // Use a real skill name from bundle.json. `ns-benchmark` is an MCP server,
+      // not a skill — asserting on it never proved anything.
+      const probeSkill = 'ns-advanced-memory-leak-hunter'
+      if (PACKAGE_OWNED_SKILL_HARNESSES.has(h.name)) {
+        assert(!existsSync(join(home, '.agents', 'skills', probeSkill)), `${tag} shared skill not copied for package-owned harness`)
+        assert(!existsSync(join(harnessSkillsPath, probeSkill)), `${tag} skill not linked for package-owned harness`)
+      } else if (HARNESS_SPECIFIC_SKILL_HARNESSES.has(h.name)) {
+        assert(!existsSync(join(home, '.agents', 'skills', probeSkill)), `${tag} shared skill not copied for harness-specific install`)
+        assert(existsSync(join(harnessSkillsPath, probeSkill)), `${tag} skill copied to harness`)
+      } else {
+        assert(existsSync(join(home, '.agents', 'skills')), `${tag} shared skills dir`)
+        assert(existsSync(join(harnessSkillsPath, probeSkill)), `${tag} skill linked to harness`)
+      }
 
-    assert(!existsSync(join(home, '.agents', '.nodesource-auth.json')), `${tag} credentials purged on last-harness uninstall`)
+      const uninstall = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs', 'uninstall'])
+      assertOk(uninstall, `${tag} uninstall exit code`)
 
-    assert(!existsSync(join(harnessSkillsPath, probeSkill)), `${tag} harness skill link removed`)
+      assert(!existsSync(join(home, '.agents', '.nodesource-auth.json')), `${tag} credentials purged on last-harness uninstall`)
+      assert(!existsSync(join(harnessSkillsPath, probeSkill)), `${tag} harness skill link removed`)
 
-    console.log(`\x1b[32m✓ ${h.name} install→verify→uninstall OK\x1b[0m`)
-  } catch (err) {
-    failed++
-    console.error(`\x1b[31m✗ ${h.name} FAILED: ${err.message}\x1b[0m`)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
+      console.log(`\x1b[32m✓ ${h.name} install→verify→uninstall OK\x1b[0m`)
+    } catch (err) {
+      failed++
+      console.error(`\x1b[31m✗ ${h.name} FAILED: ${err.message}\x1b[0m`)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   }
-}
 
-// Second pass: --keep-credentials must preserve the auth file on the last harness.
-for (const h of HARNESS_LIST) {
-  const home = mkdtempSync(join(tmpdir(), `nsolid-keep-${h.name}-`))
-  const env = { ...process.env, HOME: home, USERPROFILE: home, NSOLID_HARNESS: h.name }
+  // Second pass: --keep-credentials must preserve the auth file on the last legacy harness.
+  for (const h of LEGACY_HARNESSES) {
+    const home = mkdtempSync(join(tmpdir(), `nsolid-keep-${h.name}-`))
+    const env = testEnv(home, h.name)
 
-  mkdirSync(join(home, '.agents'), { recursive: true })
-  writeFileSync(join(home, '.agents', '.nodesource-auth.json'), JSON.stringify(FAKE_CREDS))
+    mkdirSync(join(home, '.agents'), { recursive: true })
+    writeFileSync(join(home, '.agents', '.nodesource-auth.json'), JSON.stringify(FAKE_CREDS))
 
-  const tag = `[${h.name} --keep-credentials]`
-  try {
-    const install = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs'])
-    assertOk(install, `${tag} install exit code`)
+    const tag = `[${h.name} --keep-credentials]`
+    try {
+      const install = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs'])
+      assertOk(install, `${tag} install exit code`)
 
-    const uninstall = run(REPO_ROOT, env, [CLI_PATH, 'uninstall', '--harness', h.name, '--keep-credentials'])
-    assertOk(uninstall, `${tag} uninstall exit code`)
+      const uninstall = run(REPO_ROOT, env, [CLI_PATH, 'uninstall', '--harness', h.name, '--keep-credentials'])
+      assertOk(uninstall, `${tag} uninstall exit code`)
 
-    assert(existsSync(join(home, '.agents', '.nodesource-auth.json')), `${tag} credentials preserved with --keep-credentials`)
+      assert(existsSync(join(home, '.agents', '.nodesource-auth.json')), `${tag} credentials preserved with --keep-credentials`)
 
-    console.log(`\x1b[32m✓ ${h.name} --keep-credentials preserves credentials\x1b[0m`)
-  } catch (err) {
-    failed++
-    console.error(`\x1b[31m✗ ${h.name} --keep-credentials FAILED: ${err.message}\x1b[0m`)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
+      console.log(`\x1b[32m✓ ${h.name} --keep-credentials preserves credentials\x1b[0m`)
+    } catch (err) {
+      failed++
+      console.error(`\x1b[31m✗ ${h.name} --keep-credentials FAILED: ${err.message}\x1b[0m`)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   }
+} finally {
+  await closeServer(authStub.server)
 }
 
 process.exit(failed ? 1 : 0)
 
+function testEnv (home, harness) {
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    NSOLID_HARNESS: harness,
+    NSOLID_ACCOUNTS_URL: authStub.url,
+  }
+}
+
+function verifyPluginOwnedPackages () {
+  const artifacts = spawnSync(process.execPath, ['scripts/build-plugin-artifacts.mjs'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: SETUP_TIMEOUT_MS,
+  })
+  if (artifacts.status !== 0) {
+    failed++
+    console.error(`\x1b[31m✗ generated plugin artifacts FAILED: ${(artifacts.stderr || artifacts.stdout || '').trim()}\x1b[0m`)
+    return
+  }
+
+  try {
+    const claudeRoot = join(REPO_ROOT, 'dist/plugins/claude/nsolid-plugin')
+    const claudeManifest = readJson(join(claudeRoot, '.claude-plugin/plugin.json'))
+    assert(claudeManifest.name === 'nsolid-plugin', '[claude artifact] manifest name')
+    const claudeMarketplace = readJson(join(claudeRoot, '.claude-plugin/marketplace.json'))
+    assert(claudeMarketplace.name === 'nodesource-local', '[claude artifact] local marketplace name')
+    assert(claudeMarketplace.plugins?.[0]?.source === './', '[claude artifact] local marketplace source')
+    assert(existsSync(join(claudeRoot, '.mcp.json')), '[claude artifact] plugin-owned MCP config')
+    assert(claudeManifest.hooks === undefined, '[claude artifact] no startup hooks')
+    assert(!existsSync(join(claudeRoot, 'hooks/hooks.json')), '[claude artifact] no setup hook config')
+    assert(!existsSync(join(claudeRoot, 'scripts/setup.js')), '[claude artifact] no setup hook script')
+    assert(existsSync(join(claudeRoot, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[claude artifact] materialized skill')
+    console.log('\x1b[32m✓ claude generated artifact assets OK\x1b[0m')
+  } catch (err) {
+    failed++
+    console.error(`\x1b[31m✗ claude generated artifact FAILED: ${err.message}\x1b[0m`)
+  }
+
+  try {
+    const codexRoot = join(REPO_ROOT, 'dist/plugins/codex/nsolid-plugin')
+    const codexManifest = readJson(join(codexRoot, '.codex-plugin/plugin.json'))
+    assert(codexManifest.name === 'nsolid-plugin', '[codex artifact] manifest name')
+    assert(existsSync(join(codexRoot, '.mcp.json')), '[codex artifact] plugin-owned MCP config')
+    assert(existsSync(join(codexRoot, '.agents/plugins/marketplace.json')), '[codex artifact] local marketplace manifest')
+    assert(codexManifest.skills === './skills/', '[codex artifact] manifest declares skills')
+    assert(codexManifest.mcpServers === './.mcp.json', '[codex artifact] manifest declares MCP config')
+    assert(codexManifest.hooks === undefined, '[codex artifact] no startup hooks')
+    assert(!existsSync(join(codexRoot, 'hooks/hooks.json')), '[codex artifact] no setup hook config')
+    assert(!existsSync(join(codexRoot, 'scripts/setup.js')), '[codex artifact] no setup hook script')
+    const codexMcp = readJson(join(codexRoot, '.mcp.json'))
+    assert(JSON.stringify(codexMcp).includes('.codex'), '[codex artifact] MCP wrapper resolves via Codex cache')
+    assert(!JSON.stringify(codexMcp).includes('PLUGIN_ROOT'), '[codex artifact] MCP wrapper avoids unsupported PLUGIN_ROOT interpolation')
+    assert(existsSync(join(codexRoot, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[codex artifact] materialized root skill')
+    assert(existsSync(join(codexRoot, 'plugins/nsolid-plugin/skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[codex artifact] materialized nested skill')
+    console.log('\x1b[32m✓ codex generated artifact assets OK\x1b[0m')
+  } catch (err) {
+    failed++
+    console.error(`\x1b[31m✗ codex generated artifact FAILED: ${err.message}\x1b[0m`)
+  }
+
+  try {
+    const piManifest = readJson(join(REPO_ROOT, 'packages/pi-plugin/package.json'))
+    assert(piManifest.name === '@nodesource/pi-plugin', '[pi-plugin] package name')
+    assert(piManifest.pi?.skills?.includes('./skills'), '[pi-plugin] package-owned skills manifest')
+    assert(!existsSync(join(REPO_ROOT, 'packages/pi-plugin/skills')), '[pi-plugin] generated skills should not be committed')
+    assert(existsSync(join(REPO_ROOT, 'packages/core/skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[pi-plugin] canonical skill source')
+    console.log('\x1b[32m✓ pi package-owned skill assets OK\x1b[0m')
+  } catch (err) {
+    failed++
+    console.error(`\x1b[31m✗ pi package-owned skill package FAILED: ${err.message}\x1b[0m`)
+  }
+
+  try {
+    const antigravityRoot = join(REPO_ROOT, 'dist/plugins/antigravity/nsolid-plugin')
+    const antigravityManifest = readJson(join(antigravityRoot, 'plugin.json'))
+    assert(antigravityManifest.name === 'nsolid-plugin', '[antigravity artifact] manifest name')
+    assert(existsSync(join(antigravityRoot, 'mcp_config.json')), '[antigravity artifact] plugin-owned MCP config')
+    assert(!existsSync(join(antigravityRoot, 'hooks.json')), '[antigravity artifact] no setup hook config')
+    assert(!existsSync(join(antigravityRoot, 'scripts/setup.js')), '[antigravity artifact] no setup hook script')
+    assert(existsSync(join(antigravityRoot, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[antigravity artifact] materialized skill')
+    console.log('\x1b[32m✓ antigravity generated artifact assets OK\x1b[0m')
+  } catch (err) {
+    failed++
+    console.error(`\x1b[31m✗ antigravity generated artifact FAILED: ${err.message}\x1b[0m`)
+  }
+}
+
 function run (cwd, env, args) {
-  const r = spawnSync(process.execPath, args, {
+  return spawnSync(process.execPath, args, {
     cwd,
     env,
     encoding: 'utf8',
-    timeout: SETUP_TIMEOUT_MS
+    timeout: SETUP_TIMEOUT_MS,
   })
-  return r
 }
 
 function assertOk (r, label) {
@@ -123,12 +230,14 @@ function assert (cond, msg) {
   if (!cond) throw new Error(msg)
 }
 
+function readJson (path) {
+  return JSON.parse(readFileSync(path, 'utf8'))
+}
+
 function getHarnessSkillsPath (home, harness) {
   const paths = {
-    claude: join(home, '.claude', 'skills'),
     codex: join(home, '.codex', 'skills'),
     opencode: join(home, '.config', 'opencode', 'skills'),
-    antigravity: join(home, '.gemini', 'config', 'skills'),
     pi: join(home, '.pi', 'agent', 'skills'),
   }
   return paths[harness]
@@ -139,4 +248,35 @@ function harnessHasServers (home, h) {
   if (!existsSync(configPath)) return false
   const raw = readFileSync(configPath, 'utf8')
   return ['nsolid-console', 'ns-benchmark', 'ncm'].every((n) => raw.includes(n))
+}
+
+async function startAuthStub () {
+  const server = createServer((req, res) => {
+    if (req.url?.startsWith('/accounts/org/access-token')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ permissions: [] }))
+      return
+    }
+
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not found' }))
+  })
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('Auth stub failed to bind to a TCP port')
+  }
+
+  return { server, url: `http://127.0.0.1:${address.port}` }
+}
+
+async function closeServer (server) {
+  await new Promise((resolve, reject) => {
+    server.close((err) => err ? reject(err) : resolve())
+  })
 }

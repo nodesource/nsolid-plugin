@@ -1,0 +1,11 @@
+{
+  "name": "@nodesource/claude-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "N|Solid Plugin for Claude Code",
+  "license": "MIT",
+  "dependencies": {
+    "mcp-remote": "0.1.38"
+  }
+}

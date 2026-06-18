@@ -14,6 +14,7 @@ export type ConfigFormat = 'json' | 'toml' | 'jsonc'
 interface ConfigInfo {
   configPath: string
   format: ConfigFormat
+  jsonMcpKey?: 'mcpServers' | 'mcp'
 }
 
 function formatFromPath (configPath: string): ConfigFormat {
@@ -29,20 +30,38 @@ function getMcpConfigInfo (harness: HarnessType): ConfigInfo | null {
     case 'codex':
       return { configPath: resolveHome('~/.codex/config.toml'), format: 'toml' }
     case 'opencode':
-      return { configPath: resolveHome('~/.config/opencode/opencode.jsonc'), format: 'jsonc' }
+      return { configPath: resolveHome('~/.config/opencode/opencode.jsonc'), format: 'jsonc', jsonMcpKey: 'mcp' }
     case 'antigravity':
-      return { configPath: resolveHome('~/.gemini/config/mcp_config.json'), format: 'json' }
+      return { configPath: resolveHome('~/.gemini/antigravity-cli/mcp_config.json'), format: 'json' }
     case 'pi':
       return { configPath: resolveHome('~/.pi/agent/mcp.json'), format: 'json' }
   }
 }
 
-export function readExistingConfig (configPath: string, format: ConfigFormat): NormalizedMcpConfig {
+function readJsonObjectAllowEmpty (configPath: string): Record<string, unknown> | null {
+  if (!existsSync(configPath)) return null
+  const raw = readFileSync(configPath, 'utf-8')
+  if (raw.trim().length === 0) return {}
+  return readJsonFile<Record<string, unknown>>(configPath)
+}
+
+function readJsoncObjectAllowEmpty (configPath: string): Record<string, unknown> | null {
+  if (!existsSync(configPath)) return null
+  const raw = readFileSync(configPath, 'utf-8')
+  if (raw.trim().length === 0) return {}
+  return readJsoncFile<Record<string, unknown>>(configPath)
+}
+
+export function readExistingConfig (
+  configPath: string,
+  format: ConfigFormat,
+  jsonMcpKey: 'mcpServers' | 'mcp' = 'mcpServers'
+): NormalizedMcpConfig {
   switch (format) {
     case 'json': {
-      const data = readJsonFile<Record<string, unknown>>(configPath)
+      const data = readJsonObjectAllowEmpty(configPath)
       if (!data) return { mcpServers: {} }
-      return normalizeFromJson(data)
+      return normalizeFromJson(data, jsonMcpKey)
     }
     case 'toml': {
       const data = readTomlFile<Record<string, unknown>>(configPath)
@@ -50,21 +69,31 @@ export function readExistingConfig (configPath: string, format: ConfigFormat): N
       return normalizeFromToml(data)
     }
     case 'jsonc': {
-      const data = readJsoncFile<Record<string, unknown>>(configPath)
+      const data = readJsoncObjectAllowEmpty(configPath)
       if (!data) return { mcpServers: {} }
-      return normalizeFromJson(data)
+      return normalizeFromJson(data, jsonMcpKey)
     }
   }
 }
 
-function normalizeFromJson (data: Record<string, unknown>): NormalizedMcpConfig {
-  if (data.mcpServers && typeof data.mcpServers === 'object' && !Array.isArray(data.mcpServers)) {
-    const raw = data.mcpServers as Record<string, Record<string, unknown>>
-    const servers: Record<string, { url: string; headers: Record<string, string> }> = {}
+function normalizeFromJson (data: Record<string, unknown>, jsonMcpKey: 'mcpServers' | 'mcp'): NormalizedMcpConfig {
+  const mcpRaw = data[jsonMcpKey]
+  if (mcpRaw && typeof mcpRaw === 'object' && !Array.isArray(mcpRaw)) {
+    const raw = mcpRaw as Record<string, Record<string, unknown>>
+    const servers: NormalizedMcpConfig['mcpServers'] = {}
     for (const [name, srv] of Object.entries(raw)) {
-      servers[name] = {
-        url: (srv.url || srv.serverUrl || '') as string,
-        headers: (srv.headers || {}) as Record<string, string>,
+      const url = srv.url ?? srv.serverUrl
+      if (typeof url === 'string') {
+        servers[name] = {
+          ...srv,
+          url,
+          headers: (srv.headers || {}) as Record<string, string>,
+        }
+      } else {
+        // Preserve non-URL MCP entries (for example Claude stdio servers with
+        // command/args) instead of normalizing them into broken `{ url: '' }`
+        // configs when we merge NodeSource's remote servers.
+        servers[name] = { ...srv } as unknown as NormalizedMcpConfig['mcpServers'][string]
       }
     }
     return { mcpServers: servers }
@@ -83,14 +112,16 @@ function normalizeFromToml (data: Record<string, unknown>): NormalizedMcpConfig 
 function writeConfigFile (
   configPath: string,
   format: ConfigFormat,
-  config: NormalizedMcpConfig
+  config: NormalizedMcpConfig,
+  jsonMcpKey: 'mcpServers' | 'mcp' = 'mcpServers'
 ): void {
   ensureDir(path.dirname(configPath))
 
   switch (format) {
     case 'json': {
-      const existingFull = readJsonFile<Record<string, unknown>>(configPath) ?? {}
-      existingFull.mcpServers = config.mcpServers
+      const existingFull = readJsonObjectAllowEmpty(configPath) ?? {}
+      existingFull[jsonMcpKey] = config.mcpServers
+      if (jsonMcpKey === 'mcp') delete existingFull.mcpServers
       writeJsonFileSync(configPath, existingFull)
       break
     }
@@ -98,7 +129,7 @@ function writeConfigFile (
       writeTomlConfig(configPath, config)
       break
     case 'jsonc':
-      writeJsoncConfig(configPath, config)
+      writeJsoncConfig(configPath, config, jsonMcpKey)
       break
   }
 }
@@ -123,18 +154,25 @@ function writeTomlConfig (configPath: string, config: NormalizedMcpConfig): void
 
 // --- JSONC comment-preserving write ---
 
-function writeJsoncConfig (configPath: string, config: NormalizedMcpConfig): void {
+function writeJsoncConfig (
+  configPath: string,
+  config: NormalizedMcpConfig,
+  jsonMcpKey: 'mcpServers' | 'mcp'
+): void {
   if (!existsSync(configPath)) {
-    atomicWriteSync(configPath, JSON.stringify(config, null, 2) + '\n')
+    atomicWriteSync(configPath, JSON.stringify({ [jsonMcpKey]: config.mcpServers }, null, 2) + '\n')
     return
   }
 
-  const raw = readFileSync(configPath, 'utf-8')
+  let raw = readFileSync(configPath, 'utf-8')
+  if (jsonMcpKey === 'mcp') {
+    raw = removeMcpServersBlockFromRaw(raw, 'mcpServers')
+  }
   const serverNames = Object.keys(config.mcpServers)
-  const mcpBlock = findMcpServersBlock(raw)
+  const mcpBlock = findMcpServersBlock(raw, jsonMcpKey)
 
   if (serverNames.length === 0) {
-    atomicWriteSync(configPath, removeMcpServersBlockFromRaw(raw))
+    atomicWriteSync(configPath, removeMcpServersBlockFromRaw(raw, jsonMcpKey))
     return
   }
 
@@ -153,12 +191,16 @@ function writeJsoncConfig (configPath: string, config: NormalizedMcpConfig): voi
     return
   }
 
-  // No mcpServers key in existing file — insert before outer closing brace
-  atomicWriteSync(configPath, insertMcpBlockBeforeClosing(raw, config.mcpServers))
+  // No MCP key in existing file — insert before outer closing brace
+  atomicWriteSync(configPath, insertMcpBlockBeforeClosing(raw, config.mcpServers, jsonMcpKey))
 }
 
-function findMcpServersBlock (raw: string): { start: number; openBrace: number; closeBrace: number } | null {
-  const keyMatch = raw.match(/"mcpServers"\s*:\s*\{/)
+function findMcpServersBlock (
+  raw: string,
+  jsonMcpKey: 'mcpServers' | 'mcp'
+): { start: number; openBrace: number; closeBrace: number } | null {
+  const escapedKey = jsonMcpKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const keyMatch = raw.match(new RegExp(`"${escapedKey}"\\s*:\\s*\\{`))
   if (!keyMatch || keyMatch.index === undefined) return null
 
   const start = keyMatch.index
@@ -205,7 +247,8 @@ function detectIndent (raw: string, bracePos: number): string {
 
 function insertMcpBlockBeforeClosing (
   raw: string,
-  mcpServers: NormalizedMcpConfig['mcpServers']
+  mcpServers: NormalizedMcpConfig['mcpServers'],
+  jsonMcpKey: 'mcpServers' | 'mcp'
 ): string {
   const outerCloseBrace = findOuterClosingBrace(raw)
   if (outerCloseBrace === -1) {
@@ -220,7 +263,7 @@ function insertMcpBlockBeforeClosing (
     .map((name) => innerIndent + JSON.stringify(name) + ': ' + JSON.stringify(mcpServers[name]))
     .join(',\n')
 
-  const mcpServersBlock = JSON.stringify('mcpServers') + ': {\n' + innerContent + '\n' + indent + '}'
+  const mcpServersBlock = JSON.stringify(jsonMcpKey) + ': {\n' + innerContent + '\n' + indent + '}'
 
   const before = raw.slice(0, outerCloseBrace)
   const after = raw.slice(outerCloseBrace)
@@ -257,8 +300,8 @@ function findOuterClosingBrace (raw: string): number {
   return lastCloseBrace
 }
 
-function removeMcpServersBlockFromRaw (raw: string): string {
-  const block = findMcpServersBlock(raw)
+function removeMcpServersBlockFromRaw (raw: string, jsonMcpKey: 'mcpServers' | 'mcp'): string {
+  const block = findMcpServersBlock(raw, jsonMcpKey)
   if (!block) return raw
 
   const before = raw.slice(0, block.start).trimEnd()
@@ -306,14 +349,68 @@ function applyHarnessWriteFormat (
   harness: HarnessType,
   config: NormalizedMcpConfig
 ): NormalizedMcpConfig {
+  if (harness === 'claude') {
+    const servers = {} as NormalizedMcpConfig['mcpServers']
+    for (const [name, srv] of Object.entries(config.mcpServers)) {
+      if (typeof srv.url === 'string' && srv.url.length > 0 && srv.command === undefined) {
+        servers[name] = {
+          ...srv,
+          type: srv.type ?? 'http',
+        }
+      } else {
+        servers[name] = srv
+      }
+    }
+    return { mcpServers: servers }
+  }
+
+  if (harness === 'opencode') {
+    const servers = {} as NormalizedMcpConfig['mcpServers']
+    for (const [name, srv] of Object.entries(config.mcpServers)) {
+      if (typeof srv.url === 'string' && srv.url.length > 0 && srv.command === undefined) {
+        servers[name] = {
+          ...srv,
+          type: srv.type ?? 'remote',
+          enabled: srv.enabled ?? true,
+          headers: srv.headers ?? {},
+        }
+      } else {
+        servers[name] = srv
+      }
+    }
+    return { mcpServers: servers }
+  }
+
+  if (harness === 'pi') {
+    const servers = {} as NormalizedMcpConfig['mcpServers']
+    for (const [name, srv] of Object.entries(config.mcpServers)) {
+      if (typeof srv.url === 'string' && srv.url.length > 0 && srv.command === undefined) {
+        servers[name] = {
+          ...srv,
+          auth: srv.auth ?? false,
+          headers: srv.headers ?? {},
+        }
+      } else {
+        servers[name] = srv
+      }
+    }
+    return { mcpServers: servers }
+  }
+
   if (harness !== 'antigravity') return config
 
   const servers = {} as NormalizedMcpConfig['mcpServers']
   for (const [name, srv] of Object.entries(config.mcpServers)) {
-    servers[name] = {
-      serverUrl: srv.url,
-      headers: srv.headers,
-    } as unknown as NormalizedMcpConfig['mcpServers'][string]
+    if (typeof srv.url === 'string') {
+      const { url: _url, ...rest } = srv
+      servers[name] = {
+        ...rest,
+        serverUrl: srv.url,
+        headers: srv.headers ?? {},
+      } as unknown as NormalizedMcpConfig['mcpServers'][string]
+    } else {
+      servers[name] = srv
+    }
   }
   return { mcpServers: servers }
 }
@@ -326,20 +423,22 @@ export async function writeMcpConfig (
   variables?: Record<string, string>,
   options?: { configPath?: string; logger?: Logger }
 ): Promise<void> {
-  const resolvedPath = options?.configPath ?? getMcpConfigInfo(harness)?.configPath
+  const info = getMcpConfigInfo(harness)
+  const resolvedPath = options?.configPath ?? info?.configPath
   if (!resolvedPath) return
-  const format = options?.configPath ? formatFromPath(options.configPath) : getMcpConfigInfo(harness)!.format
+  const format = info?.format ?? formatFromPath(resolvedPath)
+  const jsonMcpKey = info?.jsonMcpKey ?? 'mcpServers'
 
   let resolvedServers = servers
   if (variables) {
     resolvedServers = expandVariables(servers, variables)
   }
 
-  const existing = readExistingConfig(resolvedPath, format)
+  const existing = readExistingConfig(resolvedPath, format, jsonMcpKey)
   const merged = mergeMcpConfig(existing, resolvedServers)
 
   backupMcpConfig(harness, resolvedPath, options?.logger)
-  writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, merged))
+  writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, merged), jsonMcpKey)
   options?.logger?.info('mcp.config.write', { harness, configPath: resolvedPath })
 }
 
@@ -351,7 +450,7 @@ export function writeAdapterMcpConfig (
   const info = getMcpConfigInfo(harness)
   if (!info) return
   backupMcpConfig(harness, info.configPath, logger)
-  writeConfigFile(info.configPath, info.format, applyHarnessWriteFormat(harness, config))
+  writeConfigFile(info.configPath, info.format, applyHarnessWriteFormat(harness, config), info.jsonMcpKey ?? 'mcpServers')
   logger?.info('mcp.config.write', { harness, configPath: info.configPath })
 }
 
@@ -360,15 +459,17 @@ export async function removeMcpConfig (
   serverNames: string[],
   options?: { configPath?: string; logger?: Logger }
 ): Promise<void> {
-  const resolvedPath = options?.configPath ?? getMcpConfigInfo(harness)?.configPath
+  const info = getMcpConfigInfo(harness)
+  const resolvedPath = options?.configPath ?? info?.configPath
   if (!resolvedPath) return
   if (!existsSync(resolvedPath)) return
-  const format = options?.configPath ? formatFromPath(options.configPath) : getMcpConfigInfo(harness)!.format
+  const format = info?.format ?? formatFromPath(resolvedPath)
+  const jsonMcpKey = info?.jsonMcpKey ?? 'mcpServers'
 
-  const existing = readExistingConfig(resolvedPath, format)
+  const existing = readExistingConfig(resolvedPath, format, jsonMcpKey)
   const result = removeMcpServers(existing, serverNames)
 
   backupMcpConfig(harness, resolvedPath, options?.logger)
-  writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, result))
+  writeConfigFile(resolvedPath, format, applyHarnessWriteFormat(harness, result), jsonMcpKey)
   options?.logger?.info('mcp.config.remove', { harness, configPath: resolvedPath, serverNames })
 }

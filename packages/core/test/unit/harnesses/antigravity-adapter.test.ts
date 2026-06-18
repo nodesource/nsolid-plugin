@@ -36,7 +36,7 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter()
 
     const configPath = adapter.getMcpConfigPath()
-    assert.ok(configPath.endsWith(['.gemini', 'config', 'mcp_config.json'].join(sep)))
+    assert.ok(configPath.endsWith(['.gemini', 'antigravity-cli', 'mcp_config.json'].join(sep)))
     assert.ok(configPath.startsWith(tmpDir))
   })
 
@@ -45,7 +45,7 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter()
 
     const skillsPath = adapter.getSkillsPath()
-    assert.ok(skillsPath.includes(['.gemini', 'config', 'skills'].join(sep)), `unexpected skills path: ${skillsPath}`)
+    assert.ok(skillsPath.includes(['.gemini', 'antigravity-cli', 'skills'].join(sep)), `unexpected skills path: ${skillsPath}`)
   })
 
   it('supports MCP', async () => {
@@ -67,7 +67,7 @@ describe('AntigravityAdapter', () => {
     const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
 
-    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify({
       mcpServers: {
@@ -96,7 +96,7 @@ describe('AntigravityAdapter', () => {
       },
     })
 
-    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
     assert.ok(existsSync(configPath))
 
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))

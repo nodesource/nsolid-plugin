@@ -38,7 +38,15 @@ export async function installSkills (
   sourceDir: string,
   logger?: Logger
 ): Promise<void> {
-  const destDir = getSkillsDir()
+  await installSkillsToDirectory(skills, sourceDir, getSkillsDir(), logger)
+}
+
+export async function installSkillsToDirectory (
+  skills: SkillRef[],
+  sourceDir: string,
+  destDir: string,
+  logger?: Logger
+): Promise<void> {
   ensureDir(destDir)
 
   const completed: { skill: string; destPath: string; existed: boolean }[] = []

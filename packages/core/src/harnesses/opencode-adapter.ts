@@ -19,7 +19,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
   }
 
   async readMcpConfig (): Promise<McpConfig> {
-    return readExistingConfig(this.getMcpConfigPath(), 'jsonc')
+    return readExistingConfig(this.getMcpConfigPath(), 'jsonc', 'mcp')
   }
 
   async writeMcpConfig (config: McpConfig): Promise<void> {

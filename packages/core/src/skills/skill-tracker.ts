@@ -52,19 +52,21 @@ export async function writeTrackingFile (data: TrackingData, logger?: Logger): P
 export async function addTrackedSkills (
   skills: SkillRef[],
   harness: HarnessType,
-  logger?: Logger
+  logger?: Logger,
+  skillsDir = getSkillsDir()
 ): Promise<void> {
   const tracking = (await readTrackingFile(logger)) ?? createEmptyTracking(harness)
   const now = new Date().toISOString()
 
   for (const skill of skills) {
-    const normalizedPath = path.resolve(path.join(getSkillsDir(), skill.name))
+    const normalizedPath = path.resolve(path.join(skillsDir, skill.name))
     const existing = tracking.skills.find((s) => s.name === skill.name)
 
     if (existing) {
       const harnessSet = new Set(existing.harnesses)
       harnessSet.add(harness)
       existing.harnesses = [...harnessSet]
+      existing.path = normalizedPath
     } else {
       tracking.skills.push({
         name: skill.name,

@@ -1,13 +1,22 @@
 #!/usr/bin/env node
 
 import { parseArgs } from 'node:util'
+import { createInterface } from 'node:readline/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { install, uninstall, logout, doctor, restore } from './index.js'
-import type { HarnessType } from './types.js'
+import { install, setup, uninstall, logout, doctor, restore } from './index.js'
+import type { AuthConfirmation, HarnessType } from './types.js'
 import { HARNESS_VALUES } from './types.js'
 import { formatPluginError } from './errors.js'
 import { listConfigBackups } from './utils/backup.js'
+import { C, supportsColor } from './utils/format.js'
+import { createConsoleProgress, silentProgress } from './utils/progress.js'
+const CLAUDE_RELEASE_ARTIFACT_TARGET = '<nsolid-claude-plugin-root>'
+const CODEX_RELEASE_ARTIFACT_TARGET = '<nsolid-codex-plugin-root>'
+const ANTIGRAVITY_RELEASE_ARTIFACT_TARGET = '<nsolid-antigravity-plugin-root>'
+const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
+const PACKAGE_OWNED_SKILL_HARNESSES = new Set<HarnessType>(['pi'])
+const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set<HarnessType>(['opencode'])
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // At runtime the bin is dist/src/cli.js, so __dirname is <pkgroot>/dist/src.
@@ -16,18 +25,45 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const CORE_PKG_ROOT = path.resolve(__dirname, '..', '..')
 const BUNDLE_PATH = path.join(CORE_PKG_ROOT, 'bundle.json')
 
+const HARNESS_LABELS: Record<HarnessType, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex CLI',
+  opencode: 'OpenCode',
+  antigravity: 'Antigravity',
+  pi: 'Pi Agent',
+}
+
+function promptActionLabel (command: string): string {
+  return command === 'install' ? 'fallback-install/configure' : command
+}
+
+function harnessPromptLabel (harness: HarnessType, command: string): string {
+  const base = `${HARNESS_LABELS[harness]} (${harness})`
+  if (command === 'install' && harness === 'pi') {
+    return `${base} — MCP config only; install Pi package for skills`
+  }
+  return base
+}
+
+function promptHarnessChoices (command: string): HarnessType[] {
+  return command === 'install'
+    ? HARNESS_VALUES.filter((value) => value !== 'pi')
+    : [...HARNESS_VALUES]
+}
+
 function printUsage (): void {
   console.log(`Usage: nsolid-plugin <command> [options]
 
 Commands:
-  install    Install NodeSource skills for a harness
-  uninstall  Remove NodeSource skills for a harness
+  setup      Authenticate with NodeSource (may open a browser)
+  install    Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; does not open a browser)
+  uninstall  Remove N|Solid Plugin skills for a harness
   logout     Forget your stored NodeSource login (removes credentials only)
   doctor     Check installation health for a harness
   restore    Restore a harness MCP config from the latest backup
 
 Options:
-  --harness <harness>    Target harness (required for install/uninstall/doctor/restore): ${HARNESS_VALUES.join(', ')}
+  --harness <harness>    Target harness (required in non-interactive mode): ${HARNESS_VALUES.join(', ')}
   --keep-credentials     Do not remove credentials even if this was the last harness (uninstall only)
   --bundle <path>        Path to bundle.json (default: core package bundle.json)
   --skills-source <path> Path to skills source directory (default: core package root)
@@ -36,9 +72,145 @@ Options:
   --verbose             Enable detailed logging to stderr
   --json                Output doctor report as JSON (machine-readable)
   --no-color            Disable colored output
-  --staging             Use staging accounts URL for install (dev/QA only)
-  --accounts-url <url>  Explicit origin-only accounts URL override (wins over --staging)
-  --help                Show this help message`)
+  --quiet               Suppress step-by-step progress output (install only)
+  --yes                 Skip interactive confirmation prompts
+  --staging             Use staging accounts URL for setup (dev/QA only)
+  --accounts-url <url>  Explicit origin-only accounts URL override for setup (wins over --staging)
+  --help                Show this help message
+
+Distribution notes:
+  Claude/Codex/Antigravity: native plugin artifacts are generated with pnpm plugin:artifacts; install is fallback-only.
+  Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
+  OpenCode: fallback direct install copies skills/MCP config locally.
+  Auth: only setup/login may open a browser.`)
+}
+
+function isInteractive (): boolean {
+  return process.stdin.isTTY === true && process.stderr.isTTY === true
+}
+
+function createPrompt () {
+  return createInterface({ input: process.stdin, output: process.stderr })
+}
+
+async function promptForHarnesses (command: string, multiple: boolean): Promise<HarnessType[]> {
+  const stdin = process.stdin
+  const wasRaw = stdin.isRaw
+  const choices = promptHarnessChoices(command)
+  const selected = new Set<HarnessType>([choices[0]])
+  const action = promptActionLabel(command)
+  let cursor = 0
+  let renderedLines = 0
+
+  const render = () => {
+    if (renderedLines > 0) {
+      process.stderr.write(`\x1b[${renderedLines}A\x1b[0J`)
+    } else {
+      process.stderr.write('\x1b[?25l')
+    }
+
+    const lines = [
+      multiple
+        ? `Which harnesses do you want to ${action}?`
+        : `Which harness do you want to ${action}?`,
+      '',
+      ...choices.map((value, index) => {
+        const pointer = index === cursor ? '❯' : ' '
+        const marker = multiple
+          ? selected.has(value) ? '●' : '○'
+          : index === cursor ? '●' : '○'
+        return `  ${pointer} ${marker} ${harnessPromptLabel(value, command)}`
+      }),
+      ...(command === 'install'
+        ? ['', 'Pi is package-owned: use `pi install ...` for skills and `nsolid-plugin setup --harness pi` for MCP config.']
+        : []),
+      '',
+      multiple
+        ? '↑/↓ move   Space toggle   a select all   Enter continue   q cancel'
+        : '↑/↓ move   Enter select   q cancel',
+    ]
+    renderedLines = lines.length
+    process.stderr.write(`${lines.join('\n')}\n`)
+  }
+
+  const finish = () => {
+    if (stdin.isTTY) stdin.setRawMode(wasRaw)
+    stdin.pause()
+    stdin.removeAllListeners('data')
+    process.stderr.write('\x1b[?25h')
+  }
+
+  return await new Promise((resolve, reject) => {
+    if (stdin.isTTY) stdin.setRawMode(true)
+    stdin.resume()
+    stdin.setEncoding('utf8')
+    render()
+
+    stdin.on('data', (key: string) => {
+      try {
+        if (key === '\u0003' || key === 'q' || key === 'Q' || key === '\x1B') {
+          finish()
+          reject(new Error('Cancelled by user.'))
+          return
+        }
+        if (key === '\x1B[A' || key === 'k') {
+          cursor = (cursor - 1 + choices.length) % choices.length
+          render()
+          return
+        }
+        if (key === '\x1B[B' || key === 'j') {
+          cursor = (cursor + 1) % choices.length
+          render()
+          return
+        }
+        if (multiple && key === ' ') {
+          const value = choices[cursor]
+          if (selected.has(value)) selected.delete(value)
+          else selected.add(value)
+          render()
+          return
+        }
+        if (multiple && (key === 'a' || key === 'A')) {
+          if (selected.size === choices.length) selected.clear()
+          else choices.forEach((value) => selected.add(value))
+          render()
+          return
+        }
+        if (key === '\r' || key === '\n') {
+          finish()
+          const result = multiple
+            ? selected.size > 0 ? choices.filter((value) => selected.has(value)) : [choices[cursor]]
+            : [choices[cursor]]
+          process.stderr.write(`\nSelected: ${result.map((value) => HARNESS_LABELS[value]).join(', ')}\n\n`)
+          resolve(result)
+        }
+      } catch (err) {
+        finish()
+        reject(err)
+      }
+    })
+  })
+}
+
+async function confirmBrowserAuth ({ harness, accountsUrl }: Parameters<AuthConfirmation>[0], color = supportsColor(process.stderr)): Promise<void> {
+  const rl = createPrompt()
+  const title = color ? C.green('NodeSource authentication') : 'NodeSource authentication'
+  const dim = (s: string) => color ? C.dim(s) : s
+  try {
+    console.error('')
+    console.error(title)
+    console.error(dim('─'.repeat(27)))
+    console.error(`• A browser will open at ${new URL(accountsUrl).origin}.`)
+    console.error(`• Local credentials will be stored for ${HARNESS_LABELS[harness]} MCP access.`)
+    console.error('• The CLI never handles your password.')
+    console.error('')
+    const answer = (await rl.question('Continue and open browser? [Y/n]: ')).trim().toLowerCase()
+    if (answer === 'n' || answer === 'no') {
+      throw new Error('Authentication cancelled by user.')
+    }
+  } finally {
+    rl.close()
+  }
 }
 
 async function main (): Promise<void> {
@@ -56,6 +228,8 @@ async function main (): Promise<void> {
       staging: { type: 'boolean' },
       'accounts-url': { type: 'string' },
       'keep-credentials': { type: 'boolean' },
+      quiet: { type: 'boolean' },
+      yes: { type: 'boolean' },
       help: { type: 'boolean', short: 'H' },
     },
   })
@@ -68,13 +242,18 @@ async function main (): Promise<void> {
   const command = positionals[0]
   const harness = values.harness as HarnessType | undefined
 
-  const requireHarness = () => {
-    if (!harness || !HARNESS_VALUES.includes(harness)) {
-      console.error(`Error: --harness is required and must be one of: ${HARNESS_VALUES.join(', ')}`)
-      process.exit(1)
-    }
-    return harness
+  const resolveHarnesses = async (multiple: boolean): Promise<HarnessType[]> => {
+    if (harness && HARNESS_VALUES.includes(harness)) return [harness]
+    if (!harness && isInteractive() && values.yes !== true) return promptForHarnesses(command, multiple)
+    console.error(`Error: --harness is required and must be one of: ${HARNESS_VALUES.join(', ')}`)
+    process.exit(1)
   }
+
+  const requireHarness = async (): Promise<HarnessType> => (await resolveHarnesses(false))[0]
+
+  const authConfirmation: AuthConfirmation | undefined = isInteractive() && values.yes !== true
+    ? (context) => confirmBrowserAuth(context, values['no-color'] !== true && supportsColor(process.stderr))
+    : undefined
 
   const bundlePath = values.bundle ? path.resolve(values.bundle) : BUNDLE_PATH
   const skillsSource = values['skills-source']
@@ -82,60 +261,168 @@ async function main (): Promise<void> {
     : CORE_PKG_ROOT
 
   const commonOptions = { verbose: values.verbose === true }
+  const color = values['no-color'] !== true && supportsColor()
+  const paint = {
+    dim: (s: string) => color ? C.dim(s) : s,
+    green: (s: string) => color ? C.green(s) : s,
+    yellow: (s: string) => color ? C.yellow(s) : s,
+  }
 
   switch (command) {
-    case 'install': {
+    case 'setup': {
       if (values.staging === true) {
         process.env.NSOLID_STAGING = '1'
       }
       if (values['accounts-url']) {
         process.env.NSOLID_ACCOUNTS_URL = values['accounts-url']
       }
-      const result = await install({ harness: requireHarness(), bundlePath, skillsSource, ...commonOptions })
-      if (!result.success) {
-        console.error('Install failed:')
-        for (const err of result.errors) {
-          console.error(`  - ${err}`)
+      const setupHarnesses = await resolveHarnesses(true)
+      let failures = 0
+
+      for (let i = 0; i < setupHarnesses.length; i++) {
+        const setupHarness = setupHarnesses[i]
+        if (i > 0) console.log('')
+
+        const result = await setup({
+          harness: setupHarness,
+          bundlePath,
+          skillsSource,
+          ...commonOptions,
+          progress: values.quiet === true ? silentProgress : createConsoleProgress({ color }),
+          confirmAuth: authConfirmation,
+          packageOwnedSkills: PACKAGE_OWNED_SKILL_HARNESSES.has(setupHarness),
+          harnessSpecificSkills: HARNESS_SPECIFIC_SKILL_HARNESSES.has(setupHarness),
+        })
+
+        if (!result.success) {
+          failures++
+          console.error(`Setup failed for ${setupHarness}:`)
+          for (const err of result.errors) {
+            console.error(`  - ${err}`)
+          }
+          continue
         }
-        process.exit(1)
+
+        const verb = result.hadToAuthenticate ? 'Authenticated' : 'Credentials ready'
+        console.log(`${paint.green('✓')} ${HARNESS_LABELS[setupHarness]} — ${verb}.`)
       }
-      console.log(`Installed ${result.skillsInstalled} skill(s) for ${harness}`)
-      if (result.mcpServersConfigured.length > 0) {
-        console.log(`Configured MCP servers: ${result.mcpServersConfigured.join(', ')}`)
-      }
-      if (harness === 'pi' && result.mcpServersConfigured.length > 0) {
-        const { supportsColor } = await import('./utils/format.js')
+
+      if (failures > 0) process.exit(1)
+      break
+    }
+    case 'install': {
+      const installHarnesses = await resolveHarnesses(true)
+      let failures = 0
+      const pluginOwnedReady = new Set<HarnessType>()
+
+      for (let i = 0; i < installHarnesses.length; i++) {
+        const installHarness = installHarnesses[i]
+        if (i > 0) console.log('') // visual separation between harnesses
+
+        const result = await install({
+          harness: installHarness,
+          bundlePath,
+          skillsSource,
+          ...commonOptions,
+          progress: values.quiet === true ? silentProgress : createConsoleProgress({ color }),
+          packageOwnedSkills: PACKAGE_OWNED_SKILL_HARNESSES.has(installHarness),
+          harnessSpecificSkills: HARNESS_SPECIFIC_SKILL_HARNESSES.has(installHarness),
+        })
+        if (!result.success) {
+          failures++
+          console.error(`Install failed for ${installHarness}:`)
+          for (const err of result.errors) {
+            console.error(`  - ${err}`)
+          }
+          continue
+        }
+
+        if (PLUGIN_OWNED_HARNESSES.has(installHarness)) {
+          pluginOwnedReady.add(installHarness)
+          const authNote = result.hadToAuthenticate
+            ? 'Authentication required — run: nsolid-plugin setup'
+            : 'Credentials present'
+          console.log(`${paint.green('✓')} ${HARNESS_LABELS[installHarness]} — fallback direct install. ${authNote}`)
+          if (installHarness === 'claude') {
+            console.log(`  ${paint.dim('Native plugin artifact:')} extract ${paint.yellow('nsolid-claude-plugin.tgz')} to a plugin root, then run:`)
+            console.log(`        ${paint.yellow(`claude plugin marketplace add ${CLAUDE_RELEASE_ARTIFACT_TARGET}`)}`)
+            console.log(`        ${paint.yellow('claude plugin install nsolid-plugin@nodesource-local')}`)
+          } else if (installHarness === 'codex') {
+            console.log(`  ${paint.dim('Native plugin artifact:')} extract ${paint.yellow('nsolid-codex-plugin.tgz')} to a plugin root, then run:`)
+            console.log(`        ${paint.yellow(`codex plugin marketplace add ${CODEX_RELEASE_ARTIFACT_TARGET}`)}`)
+            console.log(`        ${paint.yellow('codex plugin add nsolid-plugin@codex-plugin')}`)
+          } else if (installHarness === 'antigravity') {
+            console.log(`  ${paint.dim('Native plugin artifact:')} extract ${paint.yellow('nsolid-antigravity-plugin.tgz')} to a plugin root, then run:`)
+            console.log(`        ${paint.yellow(`agy plugin install ${ANTIGRAVITY_RELEASE_ARTIFACT_TARGET}`)}`)
+          }
+          continue
+        }
+
+        if (installHarness === 'pi') {
+          const piStatus = result.hadToAuthenticate
+            ? 'MCP config staged; run setup to authenticate'
+            : 'MCP configured'
+          console.log(`${paint.green('✓')} ${HARNESS_LABELS[installHarness]} — ${piStatus}; skills are installed by the Pi package, not this command.`)
+          if (result.mcpServersConfigured.length > 0) {
+            const { getAdapter } = await import('./harnesses/index.js')
+            const fmt = (s: string) => color ? `\x1b[33m${s}\x1b[0m` : s
+            console.log(`  ${paint.dim('MCP servers:')} ${result.mcpServersConfigured.join(', ')}`)
+            console.log(fmt('  ⚠ Pi needs an MCP adapter to use these servers:'))
+            console.log(fmt('      pi install npm:pi-mcp-adapter'))
+            console.log(fmt(`    MCP config written to ${getAdapter('pi').getMcpConfigPath()}`))
+            console.log(fmt('    Install/reload the Pi package to load package-owned skills:'))
+            console.log(fmt('      pi install npm:@nodesource/pi-plugin'))
+            console.log(fmt('      (local QA: pi install ./packages/pi-plugin --no-approve, then /reload)'))
+          }
+          continue
+        }
+
+        // CLI-only harnesses: OpenCode
         const { getAdapter } = await import('./harnesses/index.js')
-        const color = values['no-color'] !== true && supportsColor()
-        const fmt = (s: string) => color ? `\x1b[33m${s}\x1b[0m` : s
-        console.log(fmt('⚠ Pi does not support MCP natively. To use these servers, install an MCP adapter:'))
-        console.log(fmt('    pi install npm:pi-mcp-adapter'))
-        console.log(fmt('    (alt: @0xkobold/pi-mcp — needs separate ~/.0xkobold/mcp.json setup)'))
-        console.log(fmt(`  MCP config written to ${getAdapter('pi').getMcpConfigPath()}`))
+        const adapter = getAdapter(installHarness)
+        console.log(`${paint.green('✓')} ${HARNESS_LABELS[installHarness]} — installed ${result.skillsInstalled} skill(s) + ${result.mcpServersConfigured.length} MCP server(s).`)
+        console.log(`  ${paint.dim('Skills:')} ${adapter.getSkillsPath()}`)
+        console.log(`  ${paint.dim('MCP config:')} ${adapter.getMcpConfigPath()}`)
+        console.log(`  ${paint.dim('MCP servers:')} ${result.mcpServersConfigured.join(', ')}`)
+        if (result.hadToAuthenticate) {
+          console.log(`  ${paint.yellow('⚠ Authentication required for MCP servers — run: nsolid-plugin setup')}`)
+        }
       }
+
+      if (pluginOwnedReady.size > 0) {
+        console.log('')
+        console.log(paint.dim('Native plugin packages provide skills/MCPs; the fallback installer only configures the local harness.'))
+      }
+      if (failures > 0) process.exit(1)
       break
     }
     case 'uninstall': {
-      const result = await uninstall(requireHarness(), {
-        bundlePath: values.bundle,
-        ...commonOptions,
-        keepCredentials: values['keep-credentials'] === true,
-      })
-      if (result.errors.length > 0) {
-        console.error('Uninstall completed with errors:')
-        for (const err of result.errors) {
-          console.error(`  - ${err}`)
+      const uninstallHarnesses = await resolveHarnesses(true)
+      let failures = 0
+      let credentialsPurged = false
+      for (const uninstallHarness of uninstallHarnesses) {
+        const result = await uninstall(uninstallHarness, {
+          bundlePath: values.bundle,
+          ...commonOptions,
+          keepCredentials: values['keep-credentials'] === true,
+        })
+        if (result.errors.length > 0) {
+          failures++
+          console.error(`Uninstall completed with errors for ${uninstallHarness}:`)
+          for (const err of result.errors) {
+            console.error(`  - ${err}`)
+          }
+          continue
         }
-        process.exit(1)
+        console.log(`Uninstalled N|Solid Plugin skills for ${uninstallHarness}`)
+        credentialsPurged = credentialsPurged || result.credentialsPurged === true
       }
-      console.log(`Uninstalled NodeSource skills for ${harness}`)
-      if (result.credentialsPurged) {
-        const { supportsColor } = await import('./utils/format.js')
-        const color = values['no-color'] !== true && supportsColor()
+      if (credentialsPurged) {
         const fmt = (s: string) => color ? `\x1b[33m${s}\x1b[0m` : s
         console.log(fmt('No NodeSource installs remain — removed stored credentials.'))
         console.log(fmt('  Re-run any install to authenticate again.'))
       }
+      if (failures > 0) process.exit(1)
       break
     }
     case 'logout': {
@@ -148,7 +435,7 @@ async function main (): Promise<void> {
       break
     }
     case 'restore': {
-      const h = requireHarness()
+      const h = await requireHarness()
       if (values.list) {
         const backups = listConfigBackups(h)
         if (backups.length === 0) {
@@ -167,13 +454,12 @@ async function main (): Promise<void> {
       break
     }
     case 'doctor': {
-      const doctorHarness = requireHarness()
+      const doctorHarness = await requireHarness()
       const report = await doctor(doctorHarness, bundlePath, commonOptions)
       if (values.json === true) {
         console.log(JSON.stringify(report, null, 2))
       } else {
-        const { formatDoctorReport, supportsColor } = await import('./utils/format.js')
-        const color = values['no-color'] !== true && supportsColor()
+        const { formatDoctorReport } = await import('./utils/format.js')
         console.log(formatDoctorReport(report, doctorHarness, color))
       }
       if (!report.healthy) {

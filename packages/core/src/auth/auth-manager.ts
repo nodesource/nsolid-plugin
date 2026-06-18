@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import type { AuthConfig, Credentials, Logger } from '../types.js'
+import type { AuthConfig, Credentials, Logger, AuthConfirmation, HarnessType } from '../types.js'
 import { loadCredentials, saveCredentials, isExpired } from './token-storage.js'
 import { validateToken } from './token-validator.js'
 import { startOAuthServer } from './oauth-server.js'
 import { PermissionError, InvalidCredentialsError } from './errors.js'
 import { formatPluginError, toPluginError } from '../errors.js'
+import { deriveMcpUrlFromConsoleUrl } from './mcp-url.js'
 
 function openBrowser (url: string, logger?: Logger): void {
   try {
@@ -36,7 +37,12 @@ function checkRequiredPermissions (
   }
 }
 
-export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logger): Promise<Credentials> {
+export interface EnsureAuthenticatedOptions {
+  harness?: HarnessType;
+  confirmAuth?: AuthConfirmation;
+}
+
+export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logger, options: EnsureAuthenticatedOptions = {}): Promise<Credentials> {
   const required = authConfig.requiredPermissions ?? []
 
   let existing: Credentials | null = null
@@ -50,7 +56,8 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
 
   if (existing && !isExpired(existing)) {
     try {
-      const result = await validateToken(existing.serviceToken, existing.organizationId, authConfig.accountsUrl, logger)
+      const validationAccountsUrl = existing.accountsUrl ?? authConfig.accountsUrl
+      const result = await validateToken(existing.serviceToken, existing.organizationId, validationAccountsUrl, logger)
       if (result.valid) {
         if (required.length > 0) {
           checkRequiredPermissions(required, result.permissions)
@@ -66,6 +73,13 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
       // API unavailable - fall through to re-authenticate
       logger?.warn('auth.credentials.validationUnavailable', { error: (err as Error).message })
     }
+  }
+
+  if (options.confirmAuth && options.harness) {
+    await options.confirmAuth({
+      harness: options.harness,
+      accountsUrl: authConfig.accountsUrl,
+    })
   }
 
   const state = randomUUID()
@@ -103,7 +117,7 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
   }
 
-  const mcpUrl = `https://${callback.consoleId}.mcp.saas.nodesource.io`
+  const mcpUrl = deriveMcpUrlFromConsoleUrl(callback.consoleUrl) ?? `https://${callback.consoleId}.mcp.saas.nodesource.io`
 
   try {
     const result = await validateToken(callback.token, callback.consoleId, authConfig.accountsUrl, logger)
@@ -123,6 +137,7 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
       mcpUrl,
       expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       permissions: result.permissions,
+      accountsUrl: authConfig.accountsUrl,
     }
 
     saveCredentials(creds)
@@ -141,6 +156,7 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
       consoleUrl: callback.consoleUrl,
       mcpUrl,
       expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      accountsUrl: authConfig.accountsUrl,
     }
     saveCredentials(creds)
     return creds

@@ -13,7 +13,14 @@
     "test:integration": "node --experimental-test-module-mocks --import tsx/esm --test 'packages/*/test/integration/**/*.test.ts'",
     "lint": "pnpm -r lint",
     "test:marketplace": "node scripts/test-marketplace-install.js",
-    "prepare": "husky"
+    "plugin:sync": "node scripts/sync-plugin-assets.mjs",
+    "plugin:check": "node scripts/sync-plugin-assets.mjs --check",
+    "prepack": "pnpm plugin:sync",
+    "prepare": "husky",
+    "plugin:materialize": "node scripts/sync-plugin-assets.mjs --materialize-skills",
+    "plugin:clean": "node scripts/sync-plugin-assets.mjs",
+    "plugin:artifacts": "node scripts/build-plugin-artifacts.mjs",
+    "plugin:artifacts:check": "node scripts/build-plugin-artifacts.mjs --check"
   },
   "engines": {
     "node": ">=22.3.0"

@@ -3,16 +3,27 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "NodeSource AI Skills package for Pi Agent",
-  "keywords": ["pi-package"],
+  "description": "N|Solid Plugin for Pi Agent",
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./index.js"]
+    "extensions": [
+      "./index.js"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "license": "MIT",
   "dependencies": {
     "@nodesource/plugin-core": "workspace:*"
   },
   "scripts": {
-    "lint": "eslint index.js test/"
+    "lint": "eslint index.js test/",
+    "plugin:materialize": "node ../../scripts/sync-plugin-assets.mjs --materialize-skills",
+    "plugin:clean": "node ../../scripts/sync-plugin-assets.mjs",
+    "prepack": "pnpm plugin:materialize",
+    "postpack": "pnpm plugin:clean"
   }
 }

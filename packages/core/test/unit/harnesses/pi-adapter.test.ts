@@ -89,7 +89,7 @@ describe('PiAdapter', () => {
     const written = JSON.parse(readFileSync(configPath, 'utf-8'))
     assert.deepStrictEqual(written, {
       mcpServers: {
-        'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {} },
+        'ns-benchmark': { url: 'https://benchmark.mcp.saas.nodesource.io/mcp', headers: {}, auth: false },
       },
     })
   })

@@ -69,7 +69,7 @@ describe('OpenCodeAdapter', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // Comment\n  "mcpServers": {\n    "my-server": { "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // Comment\n  "mcp": {\n    "my-server": { "type": "remote", "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
 
     const adapter = new OpenCodeAdapter()
     const config = await adapter.readMcpConfig()
@@ -84,7 +84,7 @@ describe('OpenCodeAdapter', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // Comment\n  "mcpServers": {\n    "my-server": { "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // Comment\n  "mcp": {\n    "my-server": { "type": "remote", "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
 
     const adapter = new OpenCodeAdapter()
     await adapter.writeMcpConfig({

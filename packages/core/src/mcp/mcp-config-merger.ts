@@ -3,6 +3,11 @@ import type { McpServerRef } from '../types.js'
 export interface McpServerConfig {
   url: string
   headers: Record<string, string>
+  type?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  [key: string]: unknown
 }
 
 export interface NormalizedMcpConfig {

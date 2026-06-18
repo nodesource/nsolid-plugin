@@ -23,6 +23,8 @@ export interface Credentials {
   mcpUrl: string;
   expiresAt: string;
   permissions?: string[];
+  /** Auth origin used to mint/validate the token (persisted for staging QA). */
+  accountsUrl?: string;
 }
 
 export interface AuthConfig {
@@ -58,12 +60,34 @@ export interface Logger {
   error(message: string, meta?: Record<string, unknown>): void
 }
 
+import type { ProgressReporter } from './utils/progress.js'
+
+export interface AuthConfirmationContext {
+  harness: HarnessType;
+  accountsUrl: string;
+}
+
+export type AuthConfirmation = (context: AuthConfirmationContext) => void | Promise<void>
+
 export interface InstallOptions {
   harness: HarnessType;
   bundlePath: string;
   skillsSource: string;
   verbose?: boolean;
   logger?: Logger;
+  progress?: ProgressReporter;
+  confirmAuth?: AuthConfirmation;
+  /**
+   * Harness package owns/discovers skills natively. Install only shared auth + MCP config,
+   * and do not copy/link skills into user-level harness skill directories.
+   */
+  packageOwnedSkills?: boolean;
+  /**
+   * Copy skills directly into the harness-specific skills directory instead of
+   * the shared ~/.agents/skills source dir. Used for CLI-only harnesses that
+   * must not leak skills into global/shared discovery paths.
+   */
+  harnessSpecificSkills?: boolean;
 }
 
 /**
@@ -89,6 +113,9 @@ export interface InstallResult {
   /** Non-empty when any step failed; fatal failures short-circuit, non-fatal ones leave partial state. */
   errors: string[];
 }
+
+export type SetupOptions = InstallOptions
+export type SetupResult = InstallResult
 
 export interface DoctorReport {
   healthy: boolean;

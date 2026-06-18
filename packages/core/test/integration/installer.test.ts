@@ -4,18 +4,24 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:
 import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { BundleDescriptor } from '../../src/types.js'
+import type { ProgressReporter } from '../../src/utils/progress.js'
 import type { TrackingData } from '../../src/skills/skill-tracker.js'
 
 let tmpDir: string
 let originalHome: string | undefined
 let originalUserProfile: string | undefined
+let originalProgressEnv: string | undefined
+let originalFetch: typeof globalThis.fetch
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-installer-'))
   originalHome = process.env.HOME
   originalUserProfile = process.env.USERPROFILE
+  originalProgressEnv = process.env.NSOLID_PLUGIN_PROGRESS
+  originalFetch = globalThis.fetch
   process.env.HOME = tmpDir
   process.env.USERPROFILE = tmpDir
+  delete process.env.NSOLID_PLUGIN_PROGRESS
 })
 
 afterEach(() => {
@@ -30,6 +36,12 @@ afterEach(() => {
   } else {
     delete process.env.USERPROFILE
   }
+  if (originalProgressEnv !== undefined) {
+    process.env.NSOLID_PLUGIN_PROGRESS = originalProgressEnv
+  } else {
+    delete process.env.NSOLID_PLUGIN_PROGRESS
+  }
+  globalThis.fetch = originalFetch
 })
 
 function createBundle (overrides?: Partial<BundleDescriptor>): BundleDescriptor {
@@ -62,6 +74,27 @@ function createSkillSource (skillName: string, dir?: string): string {
   return sourceDir
 }
 
+function seedCredentials (overrides: Partial<{
+  serviceToken: string
+  organizationId: string
+  saasToken: string
+  consoleUrl: string
+  mcpUrl: string
+}> = {}): void {
+  const agentsDir = join(tmpDir, '.agents')
+  mkdirSync(agentsDir, { recursive: true })
+  writeFileSync(join(agentsDir, '.nodesource-auth.json'), JSON.stringify({
+    serviceToken: 'test-token',
+    organizationId: 'test-org',
+    saasToken: 'test-saas',
+    consoleUrl: 'https://console.nodesource.com',
+    mcpUrl: 'https://mcp.nodesource.com',
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    permissions: [],
+    ...overrides,
+  }))
+}
+
 describe('install()', () => {
   it('copies skills, links, and tracks on happy path', async () => {
     const { install } = await import('../../src/index.js')
@@ -88,6 +121,179 @@ describe('install()', () => {
     assert.ok(existsSync(harnessSkillsLink), 'skill was linked to harness')
   })
 
+  it('setup for Claude authenticates only and leaves skills/MCPs to the plugin', async () => {
+    const { setup } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = {
+      header: () => {},
+      step: () => {},
+      done: () => {},
+      warn: () => {},
+    }
+
+    const result = await setup({ harness: 'claude', bundlePath, skillsSource, progress })
+
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(result.skillsInstalled, 0)
+    assert.deepStrictEqual(result.mcpServersConfigured, [])
+    assert.strictEqual(existsSync(join(tmpDir, '.claude', 'skills', 'ns-test-skill')), false)
+    assert.strictEqual(existsSync(join(tmpDir, '.claude.json')), false)
+  })
+
+  it('setup for Antigravity authenticates only and does not write global skills/MCP config', async () => {
+    const { setup } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = {
+      header: () => {},
+      step: () => {},
+      done: () => {},
+      warn: () => {},
+    }
+
+    const result = await setup({ harness: 'antigravity', bundlePath, skillsSource, progress })
+
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(result.skillsInstalled, 0)
+    assert.deepStrictEqual(result.mcpServersConfigured, [])
+    assert.strictEqual(existsSync(join(tmpDir, '.gemini', 'config', 'skills', 'ns-test-skill')), false)
+    assert.strictEqual(existsSync(join(tmpDir, '.gemini', 'config', 'mcp_config.json')), false)
+  })
+
+  it('setup for Codex authenticates only and does not write user-level skills/MCP config', async () => {
+    const { setup } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = {
+      header: () => {},
+      step: () => {},
+      done: () => {},
+      warn: () => {},
+    }
+
+    const result = await setup({ harness: 'codex', bundlePath, skillsSource, progress })
+
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(result.skillsInstalled, 0)
+    assert.deepStrictEqual(result.mcpServersConfigured, [])
+    assert.strictEqual(existsSync(join(tmpDir, '.codex', 'skills', 'ns-test-skill')), false)
+    assert.strictEqual(existsSync(join(tmpDir, '.codex', 'config.toml')), false)
+  })
+
+  it('setup for Pi writes MCP config but skips user-level skills when package owns skills', async () => {
+    const { setup } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = {
+      header: () => {},
+      step: () => {},
+      done: () => {},
+      warn: () => {},
+    }
+
+    const result = await setup({ harness: 'pi', bundlePath, skillsSource, progress, packageOwnedSkills: true })
+
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(result.skillsInstalled, 0)
+    assert.deepStrictEqual(result.mcpServersConfigured, ['ns-test-mcp'])
+    assert.strictEqual(existsSync(join(tmpDir, '.agents', 'skills', 'ns-test-skill')), false)
+    assert.strictEqual(existsSync(join(tmpDir, '.pi', 'agent', 'skills', 'ns-test-skill')), false)
+    const piConfig = readJsonFile<Record<string, unknown>>(join(tmpDir, '.pi', 'agent', 'mcp.json'))
+    const piServer = (piConfig?.mcpServers as Record<string, { auth?: boolean }> | undefined)?.['ns-test-mcp']
+    assert.ok(piServer)
+    assert.strictEqual(piServer.auth, false)
+  })
+
+  it('derives staging console MCP URL without appending /mcp', async () => {
+    const { install } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({
+      consoleUrl: 'https://test-org.staging.saas.nodesource.io',
+      // Existing credentials may have been saved before staging MCP derivation
+      // was fixed; install should prefer the console-derived host.
+      mcpUrl: 'https://test-org.mcp.saas.nodesource.io',
+    })
+
+    const result = await install({ harness: 'claude', bundlePath, skillsSource })
+
+    assert.strictEqual(result.success, true)
+    const claudeConfig = readJsonFile<Record<string, unknown>>(join(tmpDir, '.claude.json'))
+    assert.ok(claudeConfig?.mcpServers && typeof claudeConfig.mcpServers === 'object')
+    const servers = claudeConfig.mcpServers as Record<string, { type?: string; url?: string }>
+    assert.strictEqual(servers['nsolid-console'].type, 'http')
+    assert.strictEqual(servers['nsolid-console'].url, 'https://test-org.mcp.staging.saas.nodesource.io/')
+  })
+
   it('writes MCP config for Pi', async () => {
     const { install } = await import('../../src/index.js')
     const bundle = createBundle()
@@ -107,7 +313,9 @@ describe('install()', () => {
     const piConfig = readJsonFile<Record<string, unknown>>(join(tmpDir, '.pi', 'agent', 'mcp.json'))
     assert.ok(piConfig, 'Pi MCP config file exists')
     assert.ok(piConfig.mcpServers && typeof piConfig.mcpServers === 'object')
-    assert.ok((piConfig.mcpServers as Record<string, unknown>)['ns-test-mcp'])
+    const piServer = (piConfig.mcpServers as Record<string, { auth?: boolean }>)['ns-test-mcp']
+    assert.ok(piServer)
+    assert.strictEqual(piServer.auth, false)
   })
 
   it('returns error when bundle not found', async () => {
@@ -188,6 +396,90 @@ describe('install()', () => {
     assert.strictEqual(tracking.mcpServers[0].name, 'ns-test-mcp')
     assert.ok(tracking.mcpServers[0].configPath.includes(['.pi', 'agent', 'mcp.json'].join(sep)))
   })
+
+  it('emits ordered progress events with valid credentials', async () => {
+    const { install } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+
+    seedCredentials()
+
+    const calls: Array<{ method: keyof ProgressReporter; label: string; detail?: string }> = []
+    const fakeProgress: ProgressReporter = {
+      header (title: string): void { calls.push({ method: 'header', label: title }) },
+      step (label: string, detail?: string): void { calls.push({ method: 'step', label, detail }) },
+      done (label: string): void { calls.push({ method: 'done', label }) },
+      warn (label: string, detail?: string): void { calls.push({ method: 'warn', label, detail }) },
+    }
+
+    const result = await install({ harness: 'claude', bundlePath, skillsSource, progress: fakeProgress })
+
+    assert.strictEqual(result.success, true)
+
+    const methods = calls.map((c) => c.method)
+    assert.deepStrictEqual(methods, [
+      'header',
+      'step',
+      'step',
+      'step',
+      'step',
+      'step',
+      'done',
+    ])
+
+    assert.strictEqual(calls[0].label, 'NodeSource installer — claude')
+    assert.strictEqual(calls[1].label, 'Reading bundle config')
+    assert.strictEqual(calls[2].label, 'Checking NodeSource login')
+    assert.ok(calls[2].detail?.includes('already signed in'))
+    assert.strictEqual(calls[3].label, 'Copying skills')
+    assert.strictEqual(calls[4].label, 'Linking skills')
+    assert.strictEqual(calls[5].label, 'Merging MCP servers')
+    assert.ok(calls[5].detail?.includes('ns-test-mcp'))
+    assert.strictEqual(calls[6].label, 'Done — 1 skills installed for claude')
+  })
+
+  it('shows default progress on initial harness install and stays quiet on tracked re-run', async () => {
+    const { install } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+
+    const originalWrite = process.stderr.write
+    let stderrOutput = ''
+    process.stderr.write = ((chunk: unknown) => {
+      stderrOutput += String(chunk)
+      return true
+    }) as typeof process.stderr.write
+
+    try {
+      const first = await install({ harness: 'claude', bundlePath, skillsSource })
+      assert.strictEqual(first.success, true)
+      assert.ok(stderrOutput.includes('NodeSource installer — claude'))
+      assert.ok(stderrOutput.includes('Reading bundle config'))
+      assert.ok(stderrOutput.includes('Done — 1 skills installed for claude'))
+
+      stderrOutput = ''
+      const second = await install({ harness: 'claude', bundlePath, skillsSource })
+      assert.strictEqual(second.success, true)
+      assert.strictEqual(stderrOutput, '')
+    } finally {
+      process.stderr.write = originalWrite
+    }
+  })
 })
 
 describe('uninstall()', () => {
@@ -221,6 +513,24 @@ describe('uninstall()', () => {
         'MCP entries removed from tracking'
       )
     }
+  })
+
+  it('copies OpenCode harness-specific skills without writing shared skills', async () => {
+    const { install } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+
+    const result = await install({
+      harness: 'opencode',
+      bundlePath,
+      skillsSource,
+      harnessSpecificSkills: true,
+    })
+
+    assert.strictEqual(result.success, true)
+    assert.ok(existsSync(join(tmpDir, '.config', 'opencode', 'skills', 'ns-test-skill')), 'skill copied to OpenCode')
+    assert.ok(!existsSync(join(tmpDir, '.agents', 'skills', 'ns-test-skill')), 'shared skill source not created')
   })
 
   it('preserves artifacts from other harnesses', async () => {

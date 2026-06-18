@@ -186,12 +186,12 @@
 - **Spec reference**: Pi Agent configuration scenario in specs/installation-and-auth.md
 
 ### Task 19b: Implement Antigravity adapter ✓
-- [x] **Description**: Create antigravity-adapter.ts for Antigravity CLI harness. Config path: `~/.gemini/config/mcp_config.json`. Skills path: `~/.gemini/config/skills/`. JSON format. Supports MCP: true. Export from `packages/core/src/harnesses/index.ts`.
+- [x] **Description**: Create antigravity-adapter.ts for Antigravity CLI fallback/direct install. Config path: `~/.gemini/antigravity-cli/mcp_config.json`. Skills path: `~/.gemini/antigravity-cli/skills/`. JSON format with Antigravity `serverUrl` write format. Supports MCP: true. Export from `packages/core/src/harnesses/index.ts`.
 - **Depends on**: Task 15
 - **Files**:
   - `packages/core/src/harnesses/antigravity-adapter.ts`
   - `packages/core/src/harnesses/index.ts` (add export)
-- **Testing**: Unit tests for path resolution, config read/write with JSON format. Verify MCP config written to `~/.gemini/config/mcp_config.json`.
+- **Testing**: Unit tests for path resolution, config read/write with JSON format. Verify MCP config written to `~/.gemini/antigravity-cli/mcp_config.json`.
 
 ## Phase 6: Core Installer Orchestration
 
@@ -219,9 +219,9 @@
 - **Testing**: Integration test with various failure scenarios. Test all green, missing creds, missing skills, unreachable MCP.
 - **Spec reference**: Doctor/Health Check in specs/installation-and-auth.md
 
-## Phase 7: Marketplace Packages
+## Phase 7: Native Distribution Surfaces
 
-> **Correction (delta vs original Phase 7 design):** The original tasks assumed each plugin is an npm package whose `postinstall.js`/`preuninstall.js` scripts invoke the core installer. That assumption is incorrect for Claude, Codex, OpenCode, and Antigravity. The corrected design is in `openspec/changes/cross-harness-plugin-installer/specs/phase-7-distribution-model-fix.md`. In short: each package uses the harness's native trigger to invoke the shared core installer; npm `postinstall` is not the universal trigger.
+> **Correction (delta vs original Phase 7 design):** The original tasks assumed each plugin is an npm package whose `postinstall.js`/`preuninstall.js` scripts invoke the core installer. That assumption is incorrect. The final refactor keeps Pi as the only real plugin package, generates Claude/Codex/Antigravity native artifacts under `dist/`, and keeps OpenCode as fallback CLI-only for now. npm `postinstall` is not used as a universal trigger, and no install path may launch auth/browser.
 
 ### Task 22b: Publish bundle.json from core and add MCP_ROOT resolution ✓
 - [x] **Description**: `bundle.json` is now copied into `packages/core/` and listed in `packages/core/package.json` `"files"`. `getMcpRootDir()` was added to `packages/core/src/utils/path.ts` and `install()` passes `MCP_ROOT` so `${MCP_ROOT}` in `bundle.json` is expanded. A sync check script keeps the copy in sync.
@@ -236,79 +236,68 @@
 - **Spec reference**: Variable Expansion in design.md
 
 ### Task 22c: Create shared setup script ✓
-- [x] **Description**: `packages/core/scripts/setup.mjs` exists. It resolves `bundle.json` and `skillsSource` from the core package directory, reads `NSOLID_HARNESS` from the environment, and calls `install()` or `uninstall()`.
+- [x] **Description**: `packages/core/scripts/setup.mjs` exists. It resolves `bundle.json` and `skillsSource` from the core package directory, reads `NSOLID_HARNESS` from the environment, and calls explicit setup or uninstall behavior. It is no longer treated as an implicit native-install auth hook.
 - **Depends on**: Task 22b
 - **Files**:
   - `packages/core/scripts/setup.mjs`
-- **Testing**: Run `NSOLID_HARNESS=claude node packages/core/scripts/setup.mjs` against a throwaway HOME. Verify skills land in `~/.agents/skills/`, MCP config merges into the harness config, and the tracking file is written. Run twice to confirm idempotency.
+- **Testing**: Run setup against a throwaway HOME with mocked auth. Verify credentials/config are prepared only when setup is explicitly invoked. Run twice to confirm idempotency.
 
-### Task 23: Create Claude Code plugin package ✓
-- [x] **Description**: Create `packages/claude-plugin` as a Claude Code plugin directory. Provide `.claude-plugin/plugin.json`, `hooks/hooks.json` with a `SessionStart` hook running `scripts/setup.js`, and `scripts/setup.js` that sets `NSOLID_HARNESS=claude` and invokes core's `setup.mjs`.
-- **Depends on**: Task 22c
+### Task 23: Create Claude Code generated artifact path ✓
+- [x] **Description**: Claude is generated from `plugins/templates/claude/` into `dist/plugins/claude/nsolid-plugin/`. The generated plugin root contains `.claude-plugin/plugin.json`, plugin-local MCP wrapper/config, and materialized `skills/`. The old `packages/claude-plugin/` prototype was deleted in the Phase 9b refactor.
+- **Depends on**: Task 22c; Task 36b
 - **Files**:
-  - `packages/claude-plugin/.claude-plugin/plugin.json`
-  - `packages/claude-plugin/hooks/hooks.json`
-  - `packages/claude-plugin/scripts/setup.js`
-  - `packages/claude-plugin/package.json`
-  - `packages/claude-plugin/README.md`
-  - `packages/claude-plugin/test/manifest.test.ts`
-- **Testing**: Manifest test validates `plugin.json` and hook command. Manual test: `claude --plugin-dir ./packages/claude-plugin --debug`; confirm SessionStart hook fires and skills/MCP are written.
+  - `plugins/templates/claude/`
+  - `scripts/plugin-generators.mjs`
+  - `scripts/build-plugin-artifacts.mjs`
+  - `dist/plugins/claude/nsolid-plugin/` (generated, ignored)
+- **Testing**: Generated artifact tests validate manifest/config shape, all skills, and no install-time auth/browser behavior.
 - **Spec reference**: Per-harness configuration mapping (Claude Code) in specs/installation-and-auth.md
 
-### Task 24: Create Codex CLI plugin package ✓
-- [x] **Description**: Create `packages/codex-plugin` as a Codex CLI plugin directory. Provide `.codex-plugin/plugin.json`, `hooks/hooks.json` (`SessionStart` → `scripts/setup.js`), and `scripts/setup.js` that sets `NSOLID_HARNESS=codex`. Document the hook trust step.
-- **Depends on**: Task 22c
+### Task 24: Create Codex CLI generated artifact path ✓
+- [x] **Description**: Codex is generated from `plugins/templates/codex/` into `dist/plugins/codex/nsolid-plugin/`. The generated plugin root contains `.codex-plugin/plugin.json` with `skills: "./skills/"`, local marketplace metadata, plugin-local MCP wrapper/config, non-interactive hook/setup guidance, and materialized `skills/`. The old `packages/codex-plugin/` prototype was deleted in the Phase 9b refactor.
+- **Depends on**: Task 22c; Task 36b
 - **Files**:
-  - `packages/codex-plugin/.codex-plugin/plugin.json`
-  - `packages/codex-plugin/hooks/hooks.json`
-  - `packages/codex-plugin/scripts/setup.js`
-  - `packages/codex-plugin/package.json`
-  - `packages/codex-plugin/README.md`
-  - `packages/codex-plugin/test/manifest.test.ts`
-- **Testing**: Manifest test. Manual test: add a personal marketplace pointing at `./packages/codex-plugin`, install, trust the hook, verify skills + MCP in `~/.codex/config.toml`.
+  - `plugins/templates/codex/`
+  - `scripts/plugin-generators.mjs`
+  - `scripts/build-plugin-artifacts.mjs`
+  - `dist/plugins/codex/nsolid-plugin/` (generated, ignored)
+- **Testing**: Generated artifact tests validate manifest/config shape, all skills, local marketplace metadata, and no install-time auth/browser behavior.
 - **Spec reference**: Per-harness configuration mapping (Codex CLI) in specs/installation-and-auth.md
 
-### Task 25: Create OpenCode plugin package ✓
-- [x] **Description**: Create `packages/opencode-plugin` as an OpenCode JS module plugin. `index.js` runs the shared setup script with `NSOLID_HARNESS=opencode` on module load. OpenCode installs npm plugins with Bun, which skips lifecycle scripts by default, so do not rely on `postinstall`.
+### Task 25: Keep OpenCode as fallback/direct install only ✓
+- [x] **Description**: Do not create a real OpenCode workspace package yet. OpenCode remains supported through `nsolid-plugin install --harness opencode`, which directly installs user-level skills and MCP config. This avoids inventing a generated artifact before OpenCode's plugin distribution model is confirmed.
 - **Depends on**: Task 22c
 - **Files**:
-  - `packages/opencode-plugin/index.js`
-  - `packages/opencode-plugin/package.json`
-  - `packages/opencode-plugin/README.md`
-  - `packages/opencode-plugin/test/manifest.test.ts`
-- **Testing**: Manual test: add plugin to `~/.config/opencode/plugins/` or `opencode.json` `"plugin"`, start OpenCode, verify skills and MCP config.
+  - `packages/core/src/harnesses/opencode-adapter.ts`
+  - `packages/core/src/index.ts`
+  - `scripts/test-marketplace-install.js`
+- **Testing**: Fallback install/uninstall tests verify OpenCode skills and MCP config are written and cleaned without auth/browser launch.
 - **Spec reference**: Per-harness configuration mapping (OpenCode) in specs/installation-and-auth.md
 
-### Task 26: Create Antigravity plugin package ✓
-- [x] **Description**: Create `packages/antigravity-plugin` as a native Antigravity plugin directory. Antigravity has no install-time/session-start hook, so ship `scripts/install.js` that the user runs once. The script copies the plugin dir to `~/.gemini/config/plugins/nodesource-nsolid/` and calls `@nodesource/plugin-core`'s `install({ harness: 'antigravity', bundlePath, skillsSource })`. Skills and MCP config are not bundled; they are produced by the core installer. Update `packages/core/src/harnesses/antigravity-adapter.ts` to use the cross-product shared paths `~/.gemini/config/mcp_config.json` and `~/.gemini/config/skills/`.
-- **Depends on**: Task 38 (done — see `docs/antigravity-research.md`); Task 22c
+### Task 26: Create Antigravity generated artifact path ✓
+- [x] **Description**: Antigravity is generated from `plugins/templates/antigravity/` into `dist/plugins/antigravity/nsolid-plugin/`. The generated plugin root contains `plugin.json`, `mcp_config.json`, `scripts/install.js`, `scripts/mcp-wrapper.js`, and materialized `skills/`. Native install stages artifact-local assets and prints explicit setup guidance; it does not call auth or copy skills from `@nodesource/plugin-core` at install time. The old `packages/antigravity-plugin/` prototype was deleted in the Phase 9b refactor.
+- **Depends on**: Task 38 (done — see `docs/antigravity-research.md`); Task 22c; Task 36b
 - **Files**:
-  - `packages/antigravity-plugin/plugin.json`
-  - `packages/antigravity-plugin/scripts/install.js`
-  - `packages/antigravity-plugin/package.json`
-  - `packages/antigravity-plugin/README.md`
-  - `packages/antigravity-plugin/test/manifest.test.ts`
-  - `packages/core/src/harnesses/antigravity-adapter.ts`
-- **Files to delete**:
-  - `packages/antigravity-plugin/skills/`
-  - `packages/antigravity-plugin/mcp_config.json.template`
-  - `packages/antigravity-plugin/scripts/sync-skills.mjs`
-- **Testing**: Manual test: run `scripts/install.js` in a throwaway HOME, complete OAuth, restart Antigravity, verify `/skills` and `/mcp` output.
-- **Spec reference**: `specs/phase-7-distribution-model-fix.md`
+  - `plugins/templates/antigravity/`
+  - `plugins/templates/antigravity/scripts/install.js`
+  - `scripts/plugin-generators.mjs`
+  - `scripts/build-plugin-artifacts.mjs`
+  - `dist/plugins/antigravity/nsolid-plugin/` (generated, ignored)
+- **Testing**: Generated artifact tests validate Antigravity manifest/config/install script shape, all skills, and no install-time auth/browser behavior.
+- **Spec reference**: Per-harness configuration mapping (Antigravity) in specs/installation-and-auth.md
 
 ### Task 27: Create Pi Agent plugin package ✓
-- [x] **Description**: Create `packages/pi-plugin` as a native Pi package. Pi has no install-time hook, so use a `pi.extensions` entrypoint (`index.js`) that runs when the package loads. The extension sets `NSOLID_HARNESS=pi` and calls `@nodesource/plugin-core`'s `install()`. No MCP config is written because Pi does not support MCP yet. Skills are not bundled; they are produced by the core installer.
-- **Depends on**: Task 22c
+- [x] **Description**: Keep `packages/pi-plugin` as the only real per-harness package. Pi package activation must not launch auth. Pi package artifacts receive materialized `skills/` during `prepack`, and source-mode cleanup removes `packages/pi-plugin/skills/` afterward. Users run `nsolid-plugin setup --harness pi` explicitly for auth/MCP config.
+- **Depends on**: Task 22c; Task 36d
 - **Files**:
   - `packages/pi-plugin/package.json`
   - `packages/pi-plugin/index.js`
   - `packages/pi-plugin/README.md`
   - `packages/pi-plugin/test/manifest.test.ts`
-- **Files to delete**:
-  - `packages/pi-plugin/skills/`
-  - `packages/pi-plugin/scripts/sync-skills.mjs`
-- **Testing**: Manual test: `pi install ./packages/pi-plugin`, verify OAuth runs and skills appear in `~/.pi/agent/skills/`.
-- **Spec reference**: `specs/phase-7-distribution-model-fix.md`
+- **Generated/cleaned files**:
+  - `packages/pi-plugin/skills/` (generated during materialization/pack, ignored in source mode)
+- **Testing**: Pi package manifest tests pass; `pnpm plugin:materialize` creates Pi skills; `pnpm plugin:clean` removes them; setup tests verify auth is explicit.
+- **Spec reference**: Per-harness configuration mapping (Pi Agent) in specs/installation-and-auth.md
 
 ## Phase 8: Testing and Verification ✓
 
@@ -388,6 +377,89 @@
   - Update all modules to use logger
 - **Testing**: Run install with --verbose, verify detailed output. Run without flag, verify clean output.
 
+## Phase 9b: Generated Plugin Artifact Refactor ✓
+
+This phase supersedes the earlier source-package interpretation of Phase 7 for Claude, Codex, and Antigravity. Those harnesses now use generated native plugin artifacts; Pi remains a real package; OpenCode remains fallback/direct-install only.
+
+### Task 36a: Split setup/auth from install paths ✓
+- [x] **Description**: Make `nsolid-plugin setup` / `nsolid-plugin login` the only OAuth/browser entry points. Native plugin install, generated setup hooks, generated install scripts, Pi package activation, and fallback `install --harness` must not open a browser. Runtime unauthenticated failures should tell users to run `nsolid-plugin setup --harness <harness>`.
+- **Depends on**: Task 36
+- **Files**:
+  - `packages/core/src/index.ts`
+  - `packages/core/src/cli.ts`
+  - `scripts/plugin-generators.mjs`
+  - `plugins/templates/antigravity/scripts/install.js`
+  - `packages/pi-plugin/index.js`
+- **Testing**: Integration tests assert generated install/setup paths do not invoke auth/browser. CLI help documents setup vs fallback install.
+- **Spec reference**: Installation Flow Specification; Authentication Flow Specification.
+
+### Task 36b: Introduce generated artifact builder ✓
+- [x] **Description**: Add an artifact build pipeline that renders Claude, Codex, and Antigravity plugin directories under `dist/plugins/` and archives under `dist/artifacts/`. Generated artifacts are self-contained and include manifests, MCP wrapper/config, any non-interactive hooks/install scripts, and materialized `skills/` copied from `packages/core/skills/`.
+- **Depends on**: Task 36a
+- **Files**:
+  - `scripts/build-plugin-artifacts.mjs`
+  - `scripts/plugin-generators.mjs`
+  - `plugins/templates/claude/`
+  - `plugins/templates/codex/`
+  - `plugins/templates/antigravity/`
+  - `package.json` (`plugin:artifacts`, `plugin:artifacts:check`)
+- **Testing**: `pnpm plugin:artifacts` generates artifacts; `pnpm plugin:artifacts:check` validates generated output is current.
+- **Spec reference**: Generated native artifacts are built; Per-Harness Configuration Mapping Specification.
+
+### Task 36c: Remove generated-only harness packages from source ✓
+- [x] **Description**: Delete Claude, Codex, and Antigravity source package directories from `packages/` and move reusable hand-authored pieces into `plugins/templates/`. Keep `packages/core` and `packages/pi-plugin` as the only real workspace packages.
+- **Depends on**: Task 36b
+- **Files removed**:
+  - `packages/claude-plugin/`
+  - `packages/codex-plugin/`
+  - `packages/antigravity-plugin/`
+- **Files kept**:
+  - `packages/core/`
+  - `packages/pi-plugin/`
+  - `plugins/templates/`
+- **Testing**: `pnpm install --lockfile-only`; `pnpm -r lint` scopes only real packages; no generated-only package remains under `packages/`.
+
+### Task 36d: Enforce single canonical N|Solid skill source ✓
+- [x] **Description**: Keep `packages/core/skills/` as the only committed N|Solid skill source. `scripts/sync-plugin-assets.mjs` now checks source hygiene and Pi materialization/cleanup only; generated artifact skill copies live under ignored `dist/`.
+- **Depends on**: Task 36c
+- **Files**:
+  - `scripts/sync-plugin-assets.mjs`
+  - `.gitignore`
+  - `packages/core/skills/`
+  - `packages/pi-plugin/package.json` (`prepack`/`postpack` behavior)
+- **Testing**: `pnpm plugin:check` fails if package-local N|Solid skill directories appear in source mode.
+
+### Task 36e: Convert source-package tests to generated-artifact tests ✓
+- [x] **Description**: Replace tests that inspected deleted package directories with tests that build/inspect generated artifacts and validate non-interactive install/setup behavior.
+- **Depends on**: Task 36d
+- **Files**:
+  - `packages/core/test/integration/plugin-assets.test.ts`
+  - `packages/core/test/integration/cli-help.test.ts`
+  - `scripts/test-marketplace-install.js`
+- **Testing**: Generated artifact tests verify Claude/Codex/Antigravity artifacts are self-contained, include all skills, and do not contain install-time auth/browser behavior.
+
+### Task 36f: Update docs and release workflow for generated artifacts ✓
+- [x] **Description**: Document the corrected distribution model: generated artifacts for Claude/Codex/Antigravity, real package for Pi, fallback direct install for OpenCode and as an escape hatch for other harnesses, explicit setup/login for auth.
+- **Depends on**: Task 36e
+- **Files**:
+  - `README.md`
+  - `packages/core/README.md`
+  - `docs/generated-plugin-artifact-refactor-plan.md`
+  - `docs/skill-distribution-simplification-plan.md`
+  - `docs/plugin-marketplace-research.md`
+  - `openspec/changes/cross-harness-plugin-installer/design.md`
+  - `openspec/changes/cross-harness-plugin-installer/proposal.md`
+  - `openspec/changes/cross-harness-plugin-installer/specs/installation-and-auth.md`
+  - `openspec/changes/cross-harness-plugin-installer/tasks.md`
+- **Testing**: Release validation sequence:
+  - `pnpm plugin:check`
+  - `pnpm plugin:artifacts`
+  - `pnpm plugin:artifacts:check`
+  - `pnpm lint`
+  - `pnpm test`
+  - `pnpm build`
+  - `pnpm test:marketplace`
+
 ## Phase 10: Documentation and Handoff
 
 ### Task 37: Create developer onboarding guide
@@ -398,9 +470,11 @@
 - **Testing**: Have team member follow guide to set up dev environment and make small change.
 
 ### Task 38: Document Antigravity CLI requirements ✓
-- [x] **Description**: Research doc written at `docs/antigravity-research.md`. Confirmed Antigravity has no install-time/session-start hook. Decision: use a manual one-time `scripts/install.js` that calls the shared core installer. Core adapter paths must be updated to `~/.gemini/config/mcp_config.json` and `~/.gemini/config/skills/`.
+- [x] **Description**: Research doc written at `docs/antigravity-research.md`, with broader marketplace/artifact research in `docs/plugin-marketplace-research.md`. Current decision: generate an Antigravity-native plugin artifact containing `plugin.json`, `mcp_config.json`, `scripts/install.js`, `scripts/mcp-wrapper.js`, and `skills/`; native install stages artifact-local assets and does not launch auth. Fallback adapter paths use `~/.gemini/antigravity-cli/mcp_config.json` and `~/.gemini/antigravity-cli/skills/`.
 - **Depends on**: None
-- **Files**: `docs/antigravity-research.md`
+- **Files**:
+  - `docs/antigravity-research.md`
+  - `docs/plugin-marketplace-research.md`
 - **Testing**: Reviewed against official docs and real-world corroboration.
 
 ### Task 39: Create demo video script
@@ -411,8 +485,8 @@
 - **Testing**: Dry run script, verify timing and clarity.
 
 ### Task 40: Final integration testing and bug fixes
-- **Description**: Perform end-to-end testing of all marketplace packages on clean systems (macOS, Linux, and Windows). Document and fix any issues found. Verify all acceptance criteria from proposal.md are met. Pay special attention to platform-specific behavior: path separators, symlink/junction behavior, file permissions, and atomic writes on Windows.
-- **Depends on**: Tasks 23-32
+- **Description**: Perform end-to-end testing of generated native artifacts, the Pi package, and fallback direct install paths on clean systems (macOS, Linux, and Windows). Document and fix any issues found. Verify all acceptance criteria from proposal.md are met. Pay special attention to platform-specific behavior: path separators, symlink/junction behavior, file permissions, and atomic writes on Windows.
+- **Depends on**: Tasks 23-32 and Phase 9b
 - **Files**:
   - Update any files with bug fixes
   - `docs/testing-report.md` (test results including per-platform notes)

@@ -1,44 +1,72 @@
 # Installation Flow Specification
 
-## Scenario: First-time installation with no existing credentials
+## Scenario: Generated native artifacts are built
 
-**Given** the user has not previously installed NodeSource AI Skills
+**Given** the repository is in source mode
+**When** the release process runs `pnpm plugin:artifacts`
+**Then** plugin directories are generated under `dist/plugins/{claude,codex,antigravity}/nsolid-plugin/`
+**And** archives are generated under `dist/artifacts/nsolid-{claude,codex,antigravity}-plugin.tgz`
+**And** each generated plugin contains all skills from `packages/core/skills/`
+**And** each generated plugin contains the harness manifest/config/wrapper files required by its native format
+**And** no generated artifact is committed to source control
+
+## Scenario: Native plugin installation with no existing credentials
+
+**Given** the user has not previously authenticated with NodeSource
 **And** no credentials exist at `~/.agents/.nodesource-auth.json`
-**When** the user installs the plugin from a marketplace (e.g., Claude Code `/plugins`)
-**Then** the plugin post-install hook triggers the shared core installer
-**And** the auth flow initiates (browser opens to `accounts.nodesource.com/sign-in`)
+**When** the user installs a generated Claude, Codex, or Antigravity plugin artifact through the harness
+**Then** the harness stages plugin assets from the generated artifact
+**And** no browser opens
+**And** no OAuth callback server starts
+**And** no credentials file is written
+**And** docs, CLI output, or runtime MCP wrapper errors provide the actionable next step: `nsolid-plugin setup --harness <harness>`
+
+## Scenario: Explicit setup with no existing credentials
+
+**Given** the user has installed a native plugin artifact or wants to configure fallback/direct install
+**And** no credentials exist at `~/.agents/.nodesource-auth.json`
+**When** the user runs `nsolid-plugin setup --harness <harness>`
+**Then** the auth flow initiates (browser opens to `accounts.nodesource.com/sign-in`)
 **And** after successful OAuth, credentials are stored at `~/.agents/.nodesource-auth.json` with permissions 0600 (best-effort; on Windows, `chmod 0600` has minimal effect — see design.md Platform Filesystem Abstractions)
-**And** all 14 skills are copied to `~/.agents/skills/`
-**And** MCP configurations are written to the harness-specific config location
-**And** a tracking file is created at `~/.agents/.nodesource-installed.json`
+**And** setup writes any harness configuration that belongs to explicit setup for that harness
 
-## Scenario: Reinstallation with valid existing credentials
+## Scenario: Fallback direct install with no existing credentials
 
-**Given** the user has previously installed NodeSource AI Skills
-**And** valid credentials exist at `~/.agents/.nodesource-auth.json`
+**Given** native plugin installation is unavailable or unsuitable
+**And** no credentials exist at `~/.agents/.nodesource-auth.json`
+**When** the user runs `nsolid-plugin install --harness <harness>`
+**Then** the fallback installer does not open a browser
+**And** the fallback installer copies or links skills as appropriate for the harness, except Pi where skills are package-owned and user-level skill copy/link is skipped
+**And** MCP configuration is skipped or written without secrets when credentials are unavailable
+**And** the output tells the user to run `nsolid-plugin setup --harness <harness>` before using authenticated MCP tools
+
+## Scenario: Setup or fallback install with valid existing credentials
+
+**Given** valid credentials exist at `~/.agents/.nodesource-auth.json`
 **And** the token has not expired
-**When** the user reinstalls the plugin
+**When** the user reruns `nsolid-plugin setup --harness <harness>` or fallback `install --harness <harness>`
 **Then** the auth flow is skipped
-**And** skills are updated (overwritten) in `~/.agents/skills/`
+**And** setup/fallback configuration is refreshed idempotently
 **And** MCP configurations are merged (not replaced) with existing config
-**And** the tracking file is updated with any new artifacts
+**And** Pi setup refreshes MCP config only while leaving package-owned skills untouched
+**And** the tracking file is updated with any fallback-installed artifacts
 
 ## Scenario: Installation with existing user configurations
 
 **Given** the user has existing MCP server configurations in their harness config
-**And** the user has existing skills in `~/.agents/skills/` (non-NodeSource)
-**When** the user installs the NodeSource plugin
+**And** the user has existing skills in native plugin directories or fallback skill directories
+**When** the user installs the NodeSource plugin artifact or runs fallback install
 **Then** existing MCP configurations are preserved (merged, not overwritten)
 **And** existing skills are preserved (only NodeSource skills added/updated)
-**And** the tracking file records only NodeSource artifacts for clean uninstall
+**And** tracking records only NodeSource fallback artifacts for clean uninstall
 
 ## Scenario: Installation failure during skill copy
 
-**Given** the installation process has started
+**Given** fallback installation or artifact generation has started
 **When** skill copying fails (e.g., disk full, permission denied)
-**Then** the installation rolls back partially copied skills
+**Then** the operation rolls back partially copied skills where possible
 **And** an error message is displayed with actionable guidance
-**And** no tracking file is created (installation incomplete)
+**And** no tracking file entry is created for incomplete fallback artifacts
 
 ## Scenario: Installation failure during MCP config write
 
@@ -46,12 +74,12 @@
 **When** MCP configuration writing fails
 **Then** skills remain installed (partial success)
 **And** an error message indicates which step failed
-**And** the user can re-run installation to complete MCP setup
+**And** the user can re-run setup or fallback install to complete MCP setup
 
 ## Scenario: Idempotent installation
 
-**Given** the plugin is already fully installed
-**When** the user runs the installer again
+**Given** the plugin is already fully installed or fallback-installed
+**When** the user reruns native install, setup, or fallback install
 **Then** no errors occur
 **And** no duplicate entries are created in configs
 **And** the installation state remains consistent
@@ -63,8 +91,8 @@
 ## Scenario: Successful OAuth authentication
 
 **Given** no valid credentials exist
-**When** the auth flow initiates
-**Then** a browser opens to `https://accounts.nodesource.com/sign-in?extension=nsolid-plugin&state=<uuid>`
+**When** the user explicitly runs `nsolid-plugin setup` or `nsolid-plugin login`
+**Then** a browser opens to `https://accounts.nodesource.com/sign-in?extension=nsolid-plugin&port=<callback-port>&state=<uuid>`
 **And** a local HTTP callback server starts on port 8765
 **And** after user completes OAuth in browser, the callback receives the service token
 **And** the token is validated via `/accounts/org/access-token?tokenId=<token>&orgId=<orgId>`
@@ -73,7 +101,11 @@
 {
   "serviceToken": "<token>",
   "organizationId": "<orgId>",
-  "expiresAt": "<ISO8601 timestamp>"
+  "saasToken": "<token>",
+  "consoleUrl": "https://<console-id>.saas.nodesource.io",
+  "mcpUrl": "https://<console-id>.mcp.saas.nodesource.io/",
+  "expiresAt": "<ISO8601 timestamp>",
+  "accountsUrl": "https://accounts.nodesource.com"
 }
 ```
 
@@ -116,27 +148,33 @@
 **Then** the server tries alternative ports (8766, 8767, up to 8770)
 **And** if all ports fail, an error message suggests closing conflicting applications
 
-## Scenario: Expired token on subsequent install
+## Scenario: Expired token on subsequent setup
 
 **Given** credentials exist at `~/.agents/.nodesource-auth.json`
 **And** the token has expired (`expiresAt` < current time)
-**When** the installer runs
+**When** the user runs `nsolid-plugin setup` or `nsolid-plugin login`
 **Then** the auth flow re-initiates
 **And** new credentials replace the expired ones
+
+## Scenario: Expired token during native install or fallback install
+
+**Given** credentials are missing or expired
+**When** a generated native install script, native artifact activation, Pi package activation, or fallback `install --harness` path runs
+**Then** the path does not open a browser
+**And** the output or runtime error tells the user to run `nsolid-plugin setup --harness <harness>`
 
 ---
 
 # Uninstall Flow Specification
 
-## Scenario: Clean uninstall via marketplace UI
+## Scenario: Clean uninstall via native harness or fallback CLI
 
-**Given** the plugin is fully installed
-**And** a tracking file exists at `~/.agents/.nodesource-installed.json`
-**When** the user uninstalls via marketplace UI (e.g., Claude Code `/plugins` → uninstall)
-**Then** the plugin uninstall hook reads the tracking file
-**And** all NodeSource MCP entries are removed from harness configs
-**And** all NodeSource skill directories, symlinks, and copies are deleted from harness-specific paths (`~/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, `~/.gemini/antigravity-cli/skills/`, `~/.pi/agent/skills/`)
-**And** the tracking file is deleted
+**Given** the plugin is installed natively or through fallback direct install
+**When** the user uninstalls through the harness UI/CLI or runs `nsolid-plugin uninstall --harness <harness>`
+**Then** native uninstall removes the generated plugin directory where the harness owns it
+**And** fallback uninstall reads `~/.agents/.nodesource-installed.json` when tracking exists
+**And** tracked NodeSource MCP entries are removed from harness configs
+**And** tracked NodeSource skill directories, symlinks, and copies are deleted from fallback harness-specific paths (`~/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, `~/.gemini/antigravity-cli/skills/`, `~/.pi/agent/skills/`)
 **And** credentials at `~/.agents/.nodesource-auth.json` are preserved (shared across installs)
 
 ## Scenario: Uninstall with missing tracking file
@@ -160,11 +198,14 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 - `~/.config/opencode/skills/ns-*` (OpenCode harness skill directories)
 - `~/.gemini/antigravity-cli/skills/ns-*` (Antigravity harness skill directories)
 - `~/.pi/agent/skills/ns-*` (Pi harness skill directories)
+- `~/.gemini/antigravity-cli/plugins/nsolid-plugin/` (Antigravity native plugin directory)
 - `~/.agents/.nodesource-installed.json` (tracking file, if partially present)
-- MCP entries named `ns-benchmark`, `nsolid-mcp`, or `ncm-mcp` in harness config files:
+- MCP entries named `nsolid-console`, `ns-benchmark`, or `ncm` in harness config files:
   - `~/.claude.json`
   - `~/.codex/config.toml`
   - `~/.config/opencode/opencode.jsonc`
+  - `~/.gemini/antigravity-cli/mcp_config.json`
+  - `~/.pi/agent/mcp.json`
 
 **Algorithm**:
 1. Scan only the predefined patterns above (no recursive or broad searches)
@@ -197,9 +238,9 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 **Given** the plugin is installed
 **When** the user runs the doctor command
 **Then** the check verifies:
-- Credentials exist and are valid
-- All 14 skills exist in `~/.agents/skills/`
-- MCP configurations are present in harness config
+- Credentials exist and are valid when authenticated MCP servers are expected
+- All bundle skills exist in the relevant native artifact, Pi package, or fallback skill path
+- MCP configurations are present in the relevant native artifact or harness config
 - MCP servers are reachable (health endpoint responds)
 **And** a green status is reported with summary
 
@@ -208,14 +249,14 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 **Given** no credentials exist
 **When** doctor runs
 **Then** a red status indicates missing credentials
-**And** actionable fix: "Run installation to authenticate"
+**And** actionable fix: "Run `nsolid-plugin setup --harness <harness>`"
 
 ## Scenario: Missing skills
 
-**Given** some skills are missing from `~/.agents/skills/`
+**Given** some skills are missing from the native artifact, Pi package, or fallback skill path
 **When** doctor runs
 **Then** a yellow status lists missing skills
-**And** actionable fix: "Re-run installation to restore skills"
+**And** actionable fix: "Rebuild artifacts or re-run fallback installation to restore skills"
 
 ## Scenario: MCP server unreachable
 
@@ -226,96 +267,91 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 
 ## Scenario: Harness cannot discover skills
 
-**Given** skills exist in `~/.agents/skills/`
+**Given** skills exist in the native artifact, Pi package, or fallback skill path
 **When** harness skill discovery check fails
 **Then** a yellow status indicates discovery issue
-**And** actionable fix: "Restart harness or check skill path configuration"
+**And** actionable fix: "Restart harness, rebuild/reinstall the artifact, or check skill path configuration"
 
 ---
 
 # Per-Harness Configuration Mapping Specification
 
-## Scenario: Claude Code configuration
+## Scenario: Claude Code native artifact
 
-**Given** the user installs the Claude Code plugin
+**Given** the generated Claude artifact exists
+**Then** it contains:
+- `.claude-plugin/plugin.json`
+- `.mcp.json` or equivalent plugin-local MCP config
+- `scripts/mcp-wrapper.js`
+- `skills/<skill>/SKILL.md` for every bundle skill
+**And** the generated artifact does not contain startup/setup hooks or `scripts/setup.js`.
+**And** the artifact install does not write user-level `~/.claude/skills/` unless the user chooses fallback direct install.
+
+## Scenario: Claude Code fallback configuration
+
+**Given** the user runs fallback direct install for Claude
 **When** MCP configurations are written
-**Then** entries are added to `~/.claude.json`:
-```json
-{
-  "mcpServers": {
-    "ns-benchmark": {
-      "command": "node",
-      "args": ["/path/to/ns-benchmark/src/mcp-entrypoint.js"],
-      "env": {
-        "NSOLID_SERVICE_TOKEN": "<from auth>",
-        "NSOLID_ORG_ID": "<from auth>"
-      }
-    },
-    "nsolid-mcp": { ... },
-    "ncm-mcp": { ... }
-  }
-}
-```
-**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.claude/skills/`
+**Then** entries are merged into `~/.claude.json`
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.claude/skills/`.
 
-## Scenario: Codex CLI configuration
+## Scenario: Codex CLI native artifact
 
-**Given** the user installs the Codex plugin
+**Given** the generated Codex artifact exists
+**Then** it contains:
+- `.codex-plugin/plugin.json` with `skills: "./skills/"`
+- local marketplace metadata for `codex plugin marketplace add` flows
+- `.mcp.json` or equivalent plugin-local MCP config
+- `scripts/mcp-wrapper.js`
+- `skills/<skill>/SKILL.md` for every bundle skill
+**And** the generated artifact does not contain `hooks/hooks.json` or `scripts/setup.js`.
+**And** native install never launches auth/browser.
+
+## Scenario: Codex CLI fallback configuration
+
+**Given** the user runs fallback direct install for Codex
 **When** MCP configurations are written
-**Then** entries are added to `~/.codex/config.toml`:
-```toml
-[mcp_servers.ns-benchmark]
-command = "node"
-args = ["/path/to/ns-benchmark/src/mcp-entrypoint.js"]
-env = { NSOLID_SERVICE_TOKEN = "<from auth>", NSOLID_ORG_ID = "<from auth>" }
+**Then** entries are merged into `~/.codex/config.toml`
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.codex/skills/`.
 
-[mcp_servers.nsolid-mcp]
-...
+## Scenario: OpenCode fallback configuration
 
-[mcp_servers.ncm-mcp]
-...
-```
-**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.codex/skills/`
-
-## Scenario: OpenCode configuration
-
-**Given** the user installs the OpenCode plugin
+**Given** the user runs fallback direct install for OpenCode
 **When** MCP configurations are written
-**Then** entries are added to `~/.config/opencode/opencode.jsonc`:
-```jsonc
-{
-  "mcpServers": {
-    "ns-benchmark": { ... },
-    "nsolid-mcp": { ... },
-    "ncm-mcp": { ... }
-  }
-}
-```
-**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.config/opencode/skills/`
+**Then** entries are merged under the `mcp` key in `~/.config/opencode/opencode.jsonc`
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.config/opencode/skills/`.
 
-## Scenario: Antigravity CLI configuration
+## Scenario: Antigravity native artifact
 
-**Given** the user installs the Antigravity plugin
+**Given** the generated Antigravity artifact exists
+**Then** it contains:
+- `plugin.json`
+- `mcp_config.json`
+- `scripts/install.js`
+- `scripts/mcp-wrapper.js`
+- `skills/<skill>/SKILL.md` for every bundle skill
+**And** the generated artifact does not contain `hooks.json` or `scripts/setup.js`.
+**And** `agy plugin install <artifact-or-dir>` stages the plugin under `~/.gemini/antigravity-cli/plugins/nsolid-plugin/`
+**And** native install does not launch auth/browser.
+
+## Scenario: Antigravity fallback configuration
+
+**Given** the user runs fallback direct install for Antigravity
 **When** MCP configurations are written
-**Then** entries are added to `~/.gemini/antigravity-cli/mcp_config.json`:
-```json
-{
-  "mcpServers": {
-    "ns-benchmark": { ... },
-    "nsolid-mcp": { ... },
-    "ncm-mcp": { ... }
-  }
-}
-```
-**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.gemini/antigravity-cli/skills/`
+**Then** entries are merged into `~/.gemini/antigravity-cli/mcp_config.json`
+**And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.gemini/antigravity-cli/skills/`.
 
-## Scenario: Pi Agent configuration (skills only)
+## Scenario: Pi Agent configuration
 
-**Given** the user installs the Pi Agent plugin
-**When** installation runs
-**Then** NO MCP configurations are written (Pi rejects MCP)
-**And** skills are copied to `~/.pi/agent/skills/` (Pi always uses copy, no symlinks)
-**And** a message indicates MCP servers are not supported in Pi
+**Given** the user installs the Pi package
+**When** the package is packed or released
+**Then** `packages/pi-plugin/skills/` is materialized from `packages/core/skills/` for the package artifact
+**And** source-mode cleanup removes materialized Pi skills after pack
+**And** Pi package activation is side-effect free: no browser auth, no user-level skill copy/link, and no MCP config write
+**When** the user runs `nsolid-plugin setup --harness pi`
+**Then** Pi MCP entries are written to `~/.pi/agent/mcp.json`
+**And** each NodeSource Pi MCP entry includes `"auth": false`
+**And** setup does not copy or link skills into `~/.agents/skills/` or `~/.pi/agent/skills/`
+**And** Pi loads skills from the installed Pi package.
 
 ---
 

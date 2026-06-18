@@ -1,17 +1,20 @@
-# NodeSource AI Skills for Pi Agent
+# N|Solid Plugin for Pi Agent
 
-N|Solid performance & security skills for Node.js.
+nsolid-plugin — N|Solid performance & security skills for Node.js.
 
 ## Install
 
 ```bash
 pi install npm:@nodesource/pi-plugin
+nsolid-plugin setup --harness pi
 ```
 
 Or for local development:
 
 ```bash
-pi install ./packages/pi-plugin
+pi install ./packages/pi-plugin --no-approve
+nsolid-plugin setup --harness pi --staging
+/reload
 ```
 
 Then verify:
@@ -22,9 +25,9 @@ pi list
 
 ## What's Included
 
-- 15 AI skills for Node.js performance and security analysis
-- Automatic authentication on first load
-- MCP configuration written to `~/.pi/agent/mcp.json`
+- 15 package-owned AI skills for Node.js performance and security analysis
+- Side-effect-free package activation: no browser auth, no user-level skill copy, no MCP config mutation
+- MCP configuration written to `~/.pi/agent/mcp.json` only by explicit `nsolid-plugin setup --harness pi`
 
 ## MCP Adapter Requirement
 
@@ -34,6 +37,6 @@ Pi does not natively support MCP. After installing this plugin, install the `pi-
 pi install npm:pi-mcp-adapter
 ```
 
-Without an adapter, the MCP-backed skills will be installed but their tools will be unavailable.
+Without an adapter, the MCP-backed package skills will be available but their tools will be unavailable.
 
 > **Using `@0xkobold/pi-mcp` instead?** It is an alternative adapter, but it reads `~/.0xkobold/mcp.json` in a different (`servers[]`) format and does **not** pick up the config this plugin writes (`~/.pi/agent/mcp.json`). You would need to create and maintain a separate `~/.0xkobold/mcp.json` manually. Prefer `pi-mcp-adapter` for automatic setup.

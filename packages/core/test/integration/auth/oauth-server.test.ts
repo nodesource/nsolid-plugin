@@ -2,6 +2,9 @@ import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 
+const timeout = (ms: number) => new Promise<never>((_resolve, reject) =>
+  setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms))
+
 const cleanup: (() => Promise<void>)[] = []
 
 afterEach(async () => {
@@ -151,6 +154,48 @@ describe('oauth-server', () => {
     assert.strictEqual(response.status, 400)
 
     const result = await callbackPromise
+    assert.ok(!result.success)
+    if (!result.success) {
+      assert.strictEqual(result.reason, 'auth-failed')
+    }
+  })
+
+  it('settles auth-failed immediately on a state-mismatch callback', async () => {
+    const { startOAuthServer } = await import('../../../src/auth/oauth-server.js')
+    const server = await startOAuthServer(undefined, 'expected-state')
+    cleanup.push(() => server.close())
+
+    const callbackPromise = server.waitForCallback()
+
+    const params = new URLSearchParams({
+      success: 'true',
+      token: 'test-token',
+      consoleId: 'org-123',
+      NSOLID_SAAS: 'test-saas-token',
+      url: 'https://test.saas.nodesource.io',
+      state: 'wrong-state',
+    })
+    const response = await fetch(`http://127.0.0.1:${server.port}/?${params}`)
+    assert.strictEqual(response.status, 400)
+
+    const result = await Promise.race([callbackPromise, timeout(1000)])
+    assert.ok(!result.success)
+    if (!result.success) {
+      assert.strictEqual(result.reason, 'auth-failed')
+    }
+  })
+
+  it('settles auth-failed immediately on a missing-params callback', async () => {
+    const { startOAuthServer } = await import('../../../src/auth/oauth-server.js')
+    const server = await startOAuthServer()
+    cleanup.push(() => server.close())
+
+    const callbackPromise = server.waitForCallback()
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/?success=true`)
+    assert.strictEqual(response.status, 400)
+
+    const result = await Promise.race([callbackPromise, timeout(1000)])
     assert.ok(!result.success)
     if (!result.success) {
       assert.strictEqual(result.reason, 'auth-failed')

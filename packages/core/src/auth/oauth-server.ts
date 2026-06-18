@@ -71,6 +71,11 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
       logger?.warn('auth.server.csrf.mismatch', { receivedState: state })
       res.writeHead(400, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>Authentication failed</h1><p>Invalid state parameter.</p></body></html>')
+      if (!settled) {
+        settled = true
+        settledResult = { success: false, reason: 'auth-failed' }
+        resolveCallback?.(settledResult)
+      }
       return
     }
 
@@ -94,8 +99,14 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
       res.end('<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>')
       resolveCallback?.(settledResult)
     } else {
+      logger?.warn('auth.server.callback.missingParams')
       res.writeHead(400, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>Authentication failed</h1><p>Missing required parameters.</p></body></html>')
+      if (!settled) {
+        settled = true
+        settledResult = { success: false, reason: 'auth-failed' }
+        resolveCallback?.(settledResult)
+      }
     }
   })
 

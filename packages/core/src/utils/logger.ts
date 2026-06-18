@@ -59,9 +59,10 @@ export function createLogger (options: CreateLoggerOptions = {}): Logger {
   const verbose = isVerboseEnabled(options.verbose)
 
   const write = (level: LogLevel, message: string, meta?: Record<string, unknown>): void => {
-    // Debug and info logs are suppressed unless verbose is enabled.
-    // Warnings and errors are always emitted so users see actionable problems.
-    if ((level === 'debug' || level === 'info') && !verbose) return
+    // Operational logs (debug/info/warn) are opt-in via --verbose or
+    // NSOLID_PLUGIN_VERBOSE. User-actionable failures are surfaced through
+    // command results/progress; only errors bypass verbose mode.
+    if (level !== 'error' && !verbose) return
     process.stderr.write(formatLogLine(level, message, meta, options.prefix) + '\n')
   }
 

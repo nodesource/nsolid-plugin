@@ -21,24 +21,6 @@ importers:
         specifier: 4.22.4
         version: 4.22.4
 
-  packages/antigravity-plugin:
-    dependencies:
-      '@nodesource/plugin-core':
-        specifier: workspace:*
-        version: link:../core
-
-  packages/claude-plugin:
-    dependencies:
-      '@nodesource/plugin-core':
-        specifier: workspace:*
-        version: link:../core
-
-  packages/codex-plugin:
-    dependencies:
-      '@nodesource/plugin-core':
-        specifier: workspace:*
-        version: link:../core
-
   packages/core:
     dependencies:
       smol-toml:
@@ -60,12 +42,6 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
-
-  packages/opencode-plugin:
-    dependencies:
-      '@nodesource/plugin-core':
-        specifier: workspace:*
-        version: link:../core
 
   packages/pi-plugin:
     dependencies:

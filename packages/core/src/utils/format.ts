@@ -1,6 +1,6 @@
 import type { DoctorReport } from '../types.js'
 
-const C = {
+export const C = {
   green: (s: string) => `\x1b[32m${s}\x1b[0m`,
   yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
   red: (s: string) => `\x1b[31m${s}\x1b[0m`,

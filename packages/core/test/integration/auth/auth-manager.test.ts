@@ -143,6 +143,28 @@ describe('ensureAuthenticated', () => {
     assert.strictEqual(result.saasToken, 'oauth-saas-token')
   })
 
+  it('derives staging MCP host from OAuth console URL', { timeout: 10000 }, async () => {
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const state = getStateFromExecFileCall()
+    await sendCallback(8767, state, {
+      consoleId: 'org-456',
+      url: 'https://org-456.staging.saas.nodesource.io',
+    })
+    const result = await promise
+
+    assert.strictEqual(result.mcpUrl, 'https://org-456.mcp.staging.saas.nodesource.io/')
+  })
+
   it('re-authenticates when credentials are expired', { timeout: 10000 }, async () => {
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const expiredCreds: Credentials = {

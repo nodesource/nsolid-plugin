@@ -1,17 +1,18 @@
 # @nodesource/plugin-core
 
-Shared installation logic for the N|Solid cross-harness plugin installer.
+Shared CLI/setup/fallback installation logic for the N|Solid cross-harness plugin distribution.
 
 ## What it does
 
-`@nodesource/plugin-core` provides the core `install()`, `uninstall()`, and `doctor()` functions used by every per-harness plugin package (Claude, Codex, OpenCode, Antigravity, Pi). When called, it:
+`@nodesource/plugin-core` provides `setup()`, fallback `install()`, `uninstall()`, and `doctor()` functions. Claude, Codex, and Antigravity native plugin artifacts are generated from `plugins/templates/` by `pnpm plugin:artifacts`; Pi remains a real package; OpenCode is CLI-only.
 
-1. Loads and validates `bundle.json` (the canonical skill + MCP server descriptor).
-2. Runs OAuth authentication if credentials are missing or expired.
-3. Copies 15 skills to `~/.agents/skills/` (canonical path).
-4. Creates harness-specific symlinks (Unix) or junctions/copies (Windows).
-5. Writes MCP server configurations into the harness config file (merge, never overwrite).
-6. Records all installed artifacts in `~/.agents/.nodesource-installed.json`.
+Install/setup semantics are intentionally split:
+
+1. `setup()` authenticates with NodeSource and may open a browser.
+2. `install()` is a fallback direct asset installer and never starts auth/browser login.
+3. Runtime MCP wrappers fail with `Run: nsolid-plugin setup` if credentials are missing or expired.
+4. OpenCode fallback install copies skills directly to `~/.config/opencode/skills/` and writes MCP config.
+5. Pi package owns skills, while setup writes Pi MCP config for adapter/runtime compatibility.
 
 ## Public API
 
@@ -45,19 +46,24 @@ Each harness has an adapter that provides its config and skills paths:
 
 | Harness | MCP config path | Skills path | MCP support |
 |---|---|---|---|
-| Claude | `~/.claude.json` | `~/.claude/skills/` | Yes |
-| Codex | `~/.codex/config.toml` | `~/.codex/skills/` | Yes |
+| Claude | Plugin-owned `.mcp.json` | Plugin-owned `skills/` | Yes |
+| Codex | Plugin-owned `.mcp.json` | Plugin-owned `skills/` | Yes |
 | OpenCode | `~/.config/opencode/opencode.jsonc` | `~/.config/opencode/skills/` | Yes |
-| Antigravity | `~/.gemini/config/mcp_config.json` | `~/.gemini/config/skills/` | Yes |
-| Pi | `~/.pi/agent/mcp.json` | `~/.pi/agent/skills/` | Yes |
+| Antigravity | Plugin-owned `~/.gemini/antigravity-cli/plugins/nsolid-plugin/mcp_config.json` | Plugin-owned `~/.gemini/antigravity-cli/plugins/nsolid-plugin/skills/` | Yes |
+| Pi | `~/.pi/agent/mcp.json` | Package-owned `@nodesource/pi-plugin/skills/` | Yes |
 
 ## CLI
 
 A thin CLI is provided as `nsolid-plugin`:
 
 ```bash
-nsolid-plugin install --harness claude
-nsolid-plugin install --harness claude --verbose
+nsolid-plugin setup --harness claude        # explicit auth/setup; may open browser
+nsolid-plugin setup --harness pi            # explicit auth/setup + Pi MCP config
+nsolid-plugin install --harness claude      # fallback direct install; no browser
+nsolid-plugin install --harness antigravity # fallback direct install; no browser
+nsolid-plugin install --harness codex       # fallback direct install; no browser
+nsolid-plugin install --harness pi          # MCP config only; skills come from pi package
+nsolid-plugin install --harness opencode    # OpenCode: direct user-level skills + MCP config
 nsolid-plugin uninstall --harness claude
 nsolid-plugin doctor --harness claude
 nsolid-plugin doctor --harness claude --json
@@ -66,7 +72,7 @@ nsolid-plugin restore --harness claude --list
 nsolid-plugin restore --harness claude --backup ~/.agents/.config-backup/claude/1234567890.json
 ```
 
-Use `--verbose` (or `NSOLID_PLUGIN_VERBOSE=1`) for detailed, timestamped logs written to stderr. Verbose mode redacts tokens and auth headers.
+Use `--verbose` (or `NSOLID_PLUGIN_VERBOSE=1`) for detailed, timestamped logs written to stderr. Verbose mode redacts tokens and auth headers. For Claude Code, Codex, and Antigravity, prefer generated native artifacts from `pnpm plugin:artifacts`; `install --harness` is a fallback direct installer only. For Pi, install `@nodesource/pi-plugin` for package-owned skills; CLI install/setup only writes MCP config. OpenCode is CLI-only and installs user-level skills plus MCP config directly into OpenCode paths.
 
 ## Config backups
 
@@ -105,6 +111,10 @@ pnpm test
 # Lint
 pnpm lint
 
-# Sync check (bundle.json in sync with workspace root)
-pnpm bundle:check
+# Sync checks
+pnpm plugin:check           # source hygiene; no committed package skill copies
+pnpm plugin:sync            # clean materialized Pi package skills
+pnpm plugin:materialize     # copy core skills into Pi package for pack
+pnpm plugin:artifacts       # generate Claude/Codex/Antigravity artifacts under dist/
+pnpm plugin:artifacts:check # validate generated artifacts are current
 ```

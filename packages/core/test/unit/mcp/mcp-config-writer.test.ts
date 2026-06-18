@@ -52,6 +52,7 @@ describe('writeMcpConfig', () => {
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))
     assert.ok('mcpServers' in content)
     assert.ok('ns-benchmark' in content.mcpServers)
+    assert.strictEqual(content.mcpServers['ns-benchmark'].type, 'http')
     assert.strictEqual(content.mcpServers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
   })
 
@@ -65,7 +66,7 @@ describe('writeMcpConfig', () => {
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify({
       mcpServers: {
-        'my-server': { url: 'http://localhost:8080', headers: { Authorization: 'Bearer abc' } },
+        'my-server': { command: 'npx', args: ['-y', 'my-mcp-server'], env: { API_KEY: 'abc' } },
       },
     }, null, 2) + '\n')
 
@@ -74,6 +75,10 @@ describe('writeMcpConfig', () => {
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))
     assert.ok('my-server' in content.mcpServers)
     assert.ok('ns-benchmark' in content.mcpServers)
+    assert.strictEqual(content.mcpServers['my-server'].command, 'npx')
+    assert.deepStrictEqual(content.mcpServers['my-server'].args, ['-y', 'my-mcp-server'])
+    assert.strictEqual(content.mcpServers['my-server'].url, undefined)
+    assert.strictEqual(content.mcpServers['ns-benchmark'].type, 'http')
     assert.strictEqual(Object.keys(content.mcpServers).length, 2)
   })
 
@@ -118,7 +123,7 @@ describe('writeMcpConfig', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // This is a comment\n  "version": "1.0",\n  "mcpServers": {\n    // Existing MCP server comment\n    "my-server": { "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // This is a comment\n  "version": "1.0",\n  "mcp": {\n    // Existing MCP server comment\n    "my-server": { "type": "remote", "url": "http://localhost:8080", "headers": {} }\n  }\n}\n')
 
     await writeMcpConfig('opencode', [serverA])
 
@@ -128,7 +133,7 @@ describe('writeMcpConfig', () => {
     assert.ok(content.includes('my-server'))
   })
 
-  it('writes JSONC with no existing mcpServers key', async () => {
+  it('writes JSONC with no existing mcp key', async () => {
     const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
     const { mkdirSync } = await import('node:fs')
@@ -142,7 +147,7 @@ describe('writeMcpConfig', () => {
 
     const content = readFileSync(configPath, 'utf-8')
     assert.ok(content.includes('// Config comment'))
-    assert.ok(content.includes('"mcpServers"'))
+    assert.ok(content.includes('"mcp"'))
     assert.ok(content.includes('ns-benchmark'))
   })
 
@@ -156,7 +161,7 @@ describe('writeMcpConfig', () => {
     assert.ok(existsSync(configPath))
 
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))
-    assert.ok('ns-benchmark' in content.mcpServers)
+    assert.ok('ns-benchmark' in content.mcp)
   })
 
   it('preserves other top-level keys in JSON config', async () => {
@@ -207,11 +212,16 @@ describe('writeMcpConfig', () => {
     assert.ok('ns-benchmark' in servers)
   })
 
-  it('skips Pi harness', async () => {
+  it('writes Pi MCP servers with adapter OAuth auto-detection disabled', async () => {
     const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
 
-    const result = await writeMcpConfig('pi', [serverA])
-    assert.strictEqual(result, undefined)
+    await writeMcpConfig('pi', [serverA])
+
+    const configPath = resolveHome('~/.pi/agent/mcp.json')
+    const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.strictEqual(content.mcpServers['ns-benchmark'].auth, false)
+    assert.deepStrictEqual(content.mcpServers['ns-benchmark'].headers, serverA.headers)
   })
 
   it('expands variables when provided', async () => {
@@ -247,8 +257,8 @@ describe('writeMcpConfig', () => {
 
     const parsed = parseJsonc(content) as Record<string, unknown>
     assert.strictEqual(parsed.version, '1.0')
-    const mcpServers = parsed.mcpServers as Record<string, unknown>
-    assert.ok('ns-benchmark' in mcpServers)
+    const mcp = parsed.mcp as Record<string, unknown>
+    assert.ok('ns-benchmark' in mcp)
   })
 
   it('writes JSONC with multi-property trailing comma', async () => {
@@ -269,7 +279,7 @@ describe('writeMcpConfig', () => {
     const parsed = JSON.parse(content)
     assert.strictEqual(parsed.version, '1.0')
     assert.strictEqual(parsed.theme, 'dark')
-    assert.ok('ns-benchmark' in parsed.mcpServers)
+    assert.ok('ns-benchmark' in parsed.mcp)
   })
 })
 
@@ -379,7 +389,7 @@ describe('writeAdapterMcpConfig', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // Top comment\n  "version": "1.0",\n  "mcpServers": {\n    // Old server comment\n    "old-server": { "url": "http://old:8080", "headers": {} }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // Top comment\n  "version": "1.0",\n  "mcp": {\n    // Old server comment\n    "old-server": { "type": "remote", "url": "http://old:8080", "headers": {} }\n  }\n}\n')
 
     writeAdapterMcpConfig('opencode', {
       mcpServers: {
@@ -398,12 +408,12 @@ describe('writeAdapterMcpConfig', () => {
 
     const parsed = parseJsonc(content) as Record<string, unknown>
     assert.strictEqual(parsed.version, '1.0')
-    const mcpServers = parsed.mcpServers as Record<string, unknown>
-    assert.ok('ns-benchmark' in mcpServers)
-    assert.ok(!('old-server' in mcpServers))
+    const mcp = parsed.mcp as Record<string, unknown>
+    assert.ok('ns-benchmark' in mcp)
+    assert.ok(!('old-server' in mcp))
   })
 
-  it('writes empty config clearing JSONC mcpServers block', async () => {
+  it('writes empty config clearing JSONC mcp block', async () => {
     const { writeAdapterMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
     const { mkdirSync } = await import('node:fs')
@@ -412,18 +422,18 @@ describe('writeAdapterMcpConfig', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // Top comment\n  "version": "1.0",\n  "mcpServers": {\n    "old-server": { "url": "http://old:8080", "headers": {} }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // Top comment\n  "version": "1.0",\n  "mcp": {\n    "old-server": { "type": "remote", "url": "http://old:8080", "headers": {} }\n  }\n}\n')
 
     writeAdapterMcpConfig('opencode', { mcpServers: {} })
 
     const content = readFileSync(configPath, 'utf-8')
     assert.ok(content.includes('// Top comment'))
-    assert.ok(!content.includes('mcpServers'))
+    assert.ok(!content.includes('mcp'))
     assert.ok(!content.includes('old-server'))
 
     const parsed = parseJsonc(content) as Record<string, unknown>
     assert.strictEqual(parsed.version, '1.0')
-    assert.ok(!('mcpServers' in parsed))
+    assert.ok(!('mcp' in parsed))
   })
 
   it('writes TOML config replacing existing servers', async () => {
@@ -471,13 +481,34 @@ describe('writeAdapterMcpConfig', () => {
     assert.strictEqual(model.name, 'gpt-4')
   })
 
+  it('writes Antigravity JSON config when existing file is empty', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+
+    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '')
+
+    await writeMcpConfig('antigravity', [{
+      name: 'new-server',
+      url: 'http://new:9000',
+      headers: {},
+    }])
+
+    const content = JSON.parse(readFileSync(configPath, 'utf-8'))
+    assert.ok('new-server' in content.mcpServers)
+    assert.strictEqual(content.mcpServers['new-server'].serverUrl, 'http://new:9000')
+  })
+
   it('writes Antigravity JSON config with serverUrl field merging existing', async () => {
     const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
     const { mkdirSync } = await import('node:fs')
     const { dirname } = await import('node:path')
 
-    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify({
       mcpServers: { 'old-server': { url: 'http://old:8080', headers: {} } },
@@ -502,7 +533,7 @@ describe('writeAdapterMcpConfig', () => {
     const { mkdirSync } = await import('node:fs')
     const { dirname } = await import('node:path')
 
-    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
 
     await writeMcpConfig('antigravity', [{
@@ -558,7 +589,7 @@ describe('removeMcpConfig', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  // Top comment\n  "mcpServers": {\n    // Server comment\n    "ns-benchmark": { "url": "https://a.example.com", "headers": {} }\n  }\n}\n')
+    writeFileSync(configPath, '{\n  // Top comment\n  "mcp": {\n    // Server comment\n    "ns-benchmark": { "type": "remote", "url": "https://a.example.com", "headers": {} }\n  }\n}\n')
 
     await removeMcpConfig('opencode', ['ns-benchmark'])
 
@@ -573,7 +604,7 @@ describe('removeMcpConfig', () => {
 
     const result = await removeMcpConfig('antigravity', ['ns-benchmark'])
     assert.strictEqual(result, undefined)
-    assert.strictEqual(existsSync(resolveHome('~/.gemini/config/mcp_config.json')), false)
+    assert.strictEqual(existsSync(resolveHome('~/.gemini/antigravity-cli/mcp_config.json')), false)
   })
 
   it('antigravity round-trip: removing one server keeps survivors as serverUrl', async () => {
@@ -586,7 +617,7 @@ describe('removeMcpConfig', () => {
     ])
     await removeMcpConfig('antigravity', ['ns-benchmark'])
 
-    const content = JSON.parse(readFileSync(resolveHome('~/.gemini/config/mcp_config.json'), 'utf-8'))
+    const content = JSON.parse(readFileSync(resolveHome('~/.gemini/antigravity-cli/mcp_config.json'), 'utf-8'))
     assert.ok(!('ns-benchmark' in content.mcpServers))
     assert.ok('ns-solid' in content.mcpServers)
     // Survivor must be written back in Antigravity's serverUrl schema, not url.
@@ -594,7 +625,7 @@ describe('removeMcpConfig', () => {
     assert.strictEqual(content.mcpServers['ns-solid'].url, undefined)
   })
 
-  it('removes mcpServers when it is not the last property in JSONC', async () => {
+  it('removes mcp when it is not the last property in JSONC', async () => {
     const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
     const { mkdirSync } = await import('node:fs')
@@ -602,7 +633,7 @@ describe('removeMcpConfig', () => {
 
     const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
     mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, '{\n  "mcpServers": {\n    "ns-benchmark": { "url": "https://a.example.com", "headers": {} }\n  },\n  "version": "1.0"\n}\n')
+    writeFileSync(configPath, '{\n  "mcp": {\n    "ns-benchmark": { "type": "remote", "url": "https://a.example.com", "headers": {} }\n  },\n  "version": "1.0"\n}\n')
 
     await removeMcpConfig('opencode', ['ns-benchmark'])
 
@@ -612,7 +643,7 @@ describe('removeMcpConfig', () => {
 
     const parsed = JSON.parse(content)
     assert.strictEqual(parsed.version, '1.0')
-    assert.ok(!('mcpServers' in parsed))
+    assert.ok(!('mcp' in parsed))
   })
 
   it('does not create JSON config when file is missing', async () => {
@@ -651,7 +682,7 @@ describe('removeMcpConfig', () => {
 
     await removeMcpConfig('antigravity', ['ns-benchmark'])
 
-    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
     assert.strictEqual(existsSync(configPath), false)
   })
 })

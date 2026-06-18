@@ -6,17 +6,20 @@ import path from 'node:path'
 describe('Pi plugin', () => {
   const pkg = JSON.parse(readFileSync(path.resolve('packages/pi-plugin/package.json'), 'utf8'))
 
-  it('has correct name', () => {
+  it('keeps the npm package name and uses N|Solid Plugin in description', () => {
     assert.strictEqual(pkg.name, '@nodesource/pi-plugin')
+    assert.match(pkg.description, /N\|Solid Plugin/)
   })
 
   it('has pi-package keyword', () => {
     assert.ok(pkg.keywords?.includes('pi-package'))
   })
 
-  it('declares a pi extension', () => {
+  it('declares a pi extension and package-owned skills', () => {
     assert.ok(Array.isArray(pkg.pi?.extensions))
     assert.ok(pkg.pi.extensions.includes('./index.js'))
+    assert.ok(Array.isArray(pkg.pi?.skills))
+    assert.ok(pkg.pi.skills.includes('./skills'))
   })
 
   it('depends on plugin-core', () => {
@@ -27,7 +30,17 @@ describe('Pi plugin', () => {
     assert.strictEqual(pkg.private, true)
   })
 
-  it('index.js exists', () => {
-    assert.ok(existsSync(path.resolve('packages/pi-plugin/index.js')))
+  it('uses canonical core skills instead of committed package skill copies', () => {
+    assert.strictEqual(existsSync(path.resolve('packages/pi-plugin/skills')), false, 'source tree should not keep generated package skill copies')
+    assert.ok(existsSync(path.resolve('packages/core/skills/ns-analyze-cpu/SKILL.md')), 'canonical core skill must exist')
+  })
+
+  it('index.js exists and has no install/setup side effects', () => {
+    const indexPath = path.resolve('packages/pi-plugin/index.js')
+    assert.ok(existsSync(indexPath))
+    const source = readFileSync(indexPath, 'utf8')
+    assert.match(source, /side-effect free/)
+    assert.doesNotMatch(source, /from '@nodesource\/plugin-core'/)
+    assert.doesNotMatch(source, /install\(|setup\(/)
   })
 })

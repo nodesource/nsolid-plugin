@@ -2,70 +2,60 @@
 
 ## Architecture
 
-The cross-harness plugin installer follows a **shared core + marketplace wrappers** architecture. A single monorepo contains the shared installation logic, while each marketplace gets its own package with native manifest format. Each package uses the harness's native trigger to invoke the shared core installer; npm `postinstall` is NOT used as the universal trigger.
+The cross-harness plugin installer now follows a **shared core + generated native artifacts + Pi package** architecture. The source tree keeps one canonical skill bundle and one shared installer/runtime package. Claude, Codex, and Antigravity plugin directories are generated into `dist/` from committed templates; they are no longer workspace packages under `packages/`. Pi remains a real package because Pi installs packages directly.
 
 ```
 nsolid-plugin/
 ├── packages/
-│   ├── core/                    # Shared installation logic
+│   ├── core/                    # Shared CLI, setup, fallback install, auth, MCP, skills
 │   │   ├── src/
-│   │   │   ├── index.ts         # Main installer orchestrator
-│   │   │   ├── auth/            # OAuth flow module
-│   │   │   ├── skills/          # Skill copier module
+│   │   │   ├── index.ts         # setup(), fallback install(), uninstall(), doctor()
+│   │   │   ├── auth/            # OAuth flow module used only by setup/login
+│   │   │   ├── skills/          # Fallback/direct installer skill copy/link modules
 │   │   │   ├── mcp/             # MCP config writer module
 │   │   │   ├── harnesses/       # Per-harness config adapters
 │   │   │   └── utils/           # Shared utilities
-│   │   ├── scripts/
-│   │   │   └── setup.mjs        # Shared setup script invoked by per-package wrappers
+│   │   ├── skills/              # Canonical committed N|Solid skills
+│   │   ├── scripts/setup.mjs    # Shared package entrypoint for explicit setup
 │   │   └── package.json
-│   ├── claude-plugin/           # Claude Code marketplace package
-│   │   ├── .claude-plugin/
-│   │   │   └── plugin.json
-│   │   ├── hooks/
-│   │   │   └── hooks.json       # SessionStart → scripts/setup.js
-│   │   ├── scripts/setup.js     # Invokes packages/core/scripts/setup.mjs
-│   │   └── package.json
-│   ├── codex-plugin/            # Codex CLI marketplace package
-│   │   ├── .codex-plugin/
-│   │   │   └── plugin.json
-│   │   ├── hooks/
-│   │   │   └── hooks.json       # SessionStart → scripts/setup.js
-│   │   ├── scripts/setup.js     # Invokes packages/core/scripts/setup.mjs
-│   │   └── package.json
-│   ├── opencode-plugin/         # OpenCode marketplace package
-│   │   ├── index.js             # Plugin module loaded by OpenCode → invokes setup script
-│   │   └── package.json
-│   ├── antigravity-plugin/      # Antigravity CLI marketplace package
-│   │   ├── plugin.json          # Native discovery manifest
-│   │   ├── scripts/
-│   │   │   └── install.js       # Manual one-time install → copies dir + invokes core.install()
-│   │   └── package.json
-│   └── pi-plugin/               # Pi Agent marketplace package
-│       ├── package.json         # pi.extensions → index.js
-│       ├── index.js             # Extension entrypoint → invokes core.install()
+│   └── pi-plugin/               # Real Pi package; skills materialized only for pack
+│       ├── package.json         # pi.skills plus side-effect-free extension metadata
+│       ├── index.js             # Extension entrypoint; does not launch auth or write MCP config
 │       └── README.md
+├── plugins/templates/
+│   ├── claude/                  # Source-only template for generated Claude artifact
+│   ├── codex/                   # Source-only template for generated Codex artifact
+│   └── antigravity/             # Source-only template for generated Antigravity artifact
+├── scripts/
+│   ├── plugin-generators.mjs    # Manifest/wrapper/config generation helpers
+│   ├── build-plugin-artifacts.mjs # Generates dist/plugins + dist/artifacts
+│   └── sync-plugin-assets.mjs   # Source hygiene + Pi materialization checks
+├── dist/plugins/                # Generated plugin dirs; ignored, not committed
+├── dist/artifacts/              # Generated .tgz release/local-install artifacts; ignored
 ├── bundle.json                  # Canonical bundle descriptor
 └── package.json                 # Workspace root
 ```
 
 ### Key Architectural Decisions
 
-1. **Shared core as npm package**: All marketplace packages depend on `@nodesource/plugin-core`, ensuring consistent behavior across harnesses.
+1. **Shared core stays the behavioral source of truth**: `@nodesource/plugin-core` owns auth, fallback/direct install, MCP config writing, uninstall, doctor, and canonical skill metadata validation.
 
-2. **Harness-native triggers**: Each marketplace package uses the harness's native trigger to invoke the shared core installer:
-   - Claude Code and Codex CLI: `SessionStart` hook in `hooks/hooks.json`.
-   - OpenCode: plugin module loaded by OpenCode on startup.
-   - Antigravity CLI: manual one-time `scripts/install.js` (no install-time hook exists).
-   - Pi Agent: `pi.extensions` entrypoint loaded when the Pi package loads.
-   npm `postinstall` is NOT used as a universal trigger because Claude, Codex, OpenCode, and Antigravity do not run npm lifecycle scripts reliably (OpenCode uses Bun which is default-secure; Antigravity has no such hook at all).
+2. **Claude/Codex/Antigravity are generated artifacts, not source packages**: Marketplace/local plugin bundles are rendered from `plugins/templates/<harness>/` into `dist/plugins/<harness>/nsolid-plugin/` and archived under `dist/artifacts/`. This keeps source clean and makes release artifacts reproducible.
 
-3. **Bundle descriptor pattern**: A single `bundle.json` file defines all skills and MCP servers. The core installer reads this and adapts it per-harness.
+3. **Pi remains a package**: `packages/pi-plugin` stays in the workspace and materializes `packages/pi-plugin/skills/` during `prepack`, then cleans it in `postpack`/source mode.
 
-4. **Auth flow adapted from nsentinel**: The OAuth flow is extracted and simplified for CLI context (no VSCode dependency). Uses browser redirect + local HTTP callback server.
+4. **One canonical skill source**: `packages/core/skills/` is the only committed N|Solid skill source. Generated artifacts and Pi pack output receive materialized copies; source-mode package-local `skills/` directories are forbidden by `pnpm plugin:check`.
 
-5. **Skills as universal path**: All harnesses support `~/.agents/skills/` or similar. The core installer copies skills to a canonical location, then each harness adapter creates symlinks (Unix) or copies/junctions (Windows) to harness-specific paths.
+5. **Auth/setup is separate from install**: Only explicit `nsolid-plugin setup` / `nsolid-plugin login` may open a browser. Native plugin installation, generated install scripts, Pi package activation, and fallback `install --harness` must not launch auth.
 
-6. **Cross-platform support**: The installer supports macOS, Linux, and Windows as first-class platforms. All path resolution uses `os.homedir()` + `path.join()` (never string concatenation with `/`). Platform-specific behavior (symlinks, permissions, atomic writes) is abstracted in shared utilities.
+6. **Native install vs fallback install**:
+   - Native install places a generated harness plugin artifact where the harness can load it.
+   - Fallback install (`nsolid-plugin install --harness <harness>`) directly copies/links skills and writes MCP config for users without a viable native plugin path; Pi is the exception because its package owns skills, so CLI fallback/setup writes MCP config only.
+   - Setup/auth (`nsolid-plugin setup --harness <harness>`) prepares credentials and any harness config that truly needs explicit setup.
+
+7. **Bundle descriptor pattern**: A single `bundle.json` file defines all skills and MCP servers. Builders and fallback installers validate generated artifacts against this descriptor.
+
+8. **Cross-platform support**: The installer supports macOS, Linux, and Windows as first-class platforms. All path resolution uses `os.homedir()` + `path.join()` (never string concatenation with `/`). Platform-specific behavior (symlinks, permissions, atomic writes) is abstracted in shared utilities.
 
 ### Platform Path Resolution
 
@@ -82,9 +72,10 @@ All paths in this design use `~` as shorthand. At runtime, the path utility (`pa
 | `~/.codex/skills/` | `/home/user/.codex/skills/` | `C:\Users\user\.codex\skills\` |
 | `~/.config/opencode/opencode.jsonc` | `/home/user/.config/opencode/opencode.jsonc` | `C:\Users\user\.config\opencode\opencode.jsonc` |
 | `~/.config/opencode/skills/` | `/home/user/.config/opencode/skills/` | `C:\Users\user\.config\opencode\skills\` |
-| `~/.gemini/config/mcp_config.json` | `/home/user/.gemini/config/mcp_config.json` | `C:\Users\user\.gemini\config\mcp_config.json` |
-| `~/.gemini/config/plugins/nodesource-nsolid/` | `/home/user/.gemini/config/plugins/nodesource-nsolid/` | `C:\Users\user\.gemini\config\plugins\nodesource-nsolid\` |
-| `~/.gemini/config/skills/` | `/home/user/.gemini/config/skills/` | `C:\Users\user\.gemini\config\skills\` |
+| `~/.gemini/antigravity-cli/mcp_config.json` | `/home/user/.gemini/antigravity-cli/mcp_config.json` | `C:\Users\user\.gemini\antigravity-cli\mcp_config.json` |
+| `~/.gemini/antigravity-cli/plugins/nsolid-plugin/` | `/home/user/.gemini/antigravity-cli/plugins/nsolid-plugin/` | `C:\Users\user\.gemini\antigravity-cli\plugins\nsolid-plugin\` |
+| `~/.gemini/antigravity-cli/skills/` | `/home/user/.gemini/antigravity-cli/skills/` | `C:\Users\user\.gemini\antigravity-cli\skills\` |
+| `~/.pi/agent/mcp.json` | `/home/user/.pi/agent/mcp.json` | `C:\Users\user\.pi\agent\mcp.json` |
 | `~/.pi/agent/skills/` | `/home/user/.pi/agent/skills/` | `C:\Users\user\.pi\agent\skills\` |
 
 **Rules:**
@@ -116,7 +107,8 @@ All paths in this design use `~` as shorthand. At runtime, the path utility (`pa
 ### Core Installer (`packages/core/src/index.ts`)
 
 **Responsibilities:**
-- Orchestrate the installation flow (auth → skills → MCP → tracking)
+- Orchestrate explicit setup/login (auth → credential storage → any harness setup that is intentionally coupled to setup)
+- Orchestrate fallback/direct install (bundle validation → skills → MCP → tracking) without opening a browser
 - Load and validate `bundle.json`
 - Delegate to specialized modules (auth, skills, mcp)
 - Handle errors and rollback
@@ -127,29 +119,32 @@ export interface InstallOptions {
   harness: 'claude' | 'codex' | 'opencode' | 'antigravity' | 'pi';
   bundlePath: string;
   skillsSource: string;
-  dryRun?: boolean;
+  packageOwnedSkills?: boolean;     // Pi: skip user-level skill copy/link
+  harnessSpecificSkills?: boolean;  // OpenCode: copy skills directly to harness path
 }
 
 export interface InstallResult {
   success: boolean;
   skillsInstalled: number;
   mcpServersConfigured: string[];
-  authRequired: boolean;
+  hadToAuthenticate: boolean;
   errors: string[];
 }
 
+export async function setup(options: SetupOptions): Promise<SetupResult>;
 export async function install(options: InstallOptions): Promise<InstallResult>;
-export async function uninstall(harness: HarnessType): Promise<void>;
-export async function doctor(harness: HarnessType): Promise<DoctorReport>;
+export async function uninstall(harness: HarnessType, options?: UninstallOptions): Promise<UninstallResult>;
+export async function doctor(harness: HarnessType, bundlePath: string): Promise<DoctorReport>;
 ```
 
 ### Auth Module (`packages/core/src/auth/`)
 
 **Responsibilities:**
 - Check for existing valid credentials
-- Initiate OAuth flow (browser + callback server)
+- Initiate OAuth flow (browser + callback server) only for explicit setup/login
 - Validate tokens with Accounts API
 - Store credentials securely
+- Never run implicitly from native plugin install, package activation, generated install scripts, or fallback `install --harness`
 
 **Files:**
 - `auth-manager.ts` - Main auth orchestrator
@@ -177,9 +172,10 @@ export async function clearCredentials(): Promise<void>;
 ### Skills Module (`packages/core/src/skills/`)
 
 **Responsibilities:**
-- Copy skills from source to `~/.agents/skills/`
-- Create harness-specific symlinks (Unix) or copies/junctions (Windows)
-- Track installed skills for uninstall
+- Copy skills for fallback/direct installs from source to `~/.agents/skills/` or harness-specific paths
+- Create harness-specific symlinks (Unix) or copies/junctions (Windows) for fallback installs
+- Track fallback-installed skills for uninstall
+- Leave generated native artifacts self-contained; artifact materialization is owned by `scripts/build-plugin-artifacts.mjs`
 
 **Files:**
 - `skill-copier.ts` - Copy skills to canonical location
@@ -302,19 +298,17 @@ export function getAdapter(harness: HarnessType): HarnessAdapter;
 }
 ```
 
-**JSON Schema:** Defined in `packages/core/schemas/bundle.schema.json`
+**Schema validation:** Defined in `packages/core/src/validate.ts`.
 
 #### Variable Expansion
 
-Placeholders in `mcpServers[].url` and `mcpServers[].headers` are expanded at **install time** (not runtime):
+Placeholders in `mcpServers[].url` and `mcpServers[].headers` are expanded when the CLI writes fallback/setup MCP config. Generated native MCP wrappers resolve credentials at runtime from `~/.agents/.nodesource-auth.json` instead of embedding secrets in artifacts.
 
 - `${MCP_URL}` — derived from `consoleUrl` credential using the pattern `consoleUrl.replace('.saas.', '.mcp.saas.')` (e.g. `https://abc123.saas.nodesource.io` → `https://abc123.mcp.saas.nodesource.io`)
 - `${AUTH_TOKEN}` — resolved from credentials at `~/.agents/.nodesource-auth.json` (`serviceToken` field)
 - `${AUTH_ORG_ID}` — resolved from credentials at `~/.agents/.nodesource-auth.json` (`organizationId` field)
 
-**Source precedence** (highest to lowest): environment variables → credential store (`~/.agents/.nodesource-auth.json`) → agent config.
-
-**Failure behavior**: If a required variable cannot be resolved, the installer logs a warning and writes the placeholder as-is. MCP servers will fail at runtime with a clear error if credentials are missing.
+**Failure behavior**: If credentials are missing, fallback install does not open a browser; it may write placeholders and prints guidance to run `nsolid-plugin setup --harness <harness>`. Native wrappers fail at runtime with the same setup guidance.
 
 #### MCP Dependency Validation (`requiresMcp`)
 
@@ -333,8 +327,12 @@ Skills may declare MCP dependencies via `requiresMcp: string[]`. During install:
 {
   "serviceToken": "nst_abc123...",
   "organizationId": "org_xyz789",
+  "saasToken": "nst_abc123...",
+  "consoleUrl": "https://<console-id>.saas.nodesource.io",
+  "mcpUrl": "https://<console-id>.mcp.saas.nodesource.io/",
   "expiresAt": "2026-12-31T23:59:59Z",
-  "permissions": ["nsolid:benchmark:run"]
+  "permissions": ["nsolid:benchmark:run"],
+  "accountsUrl": "https://accounts.nodesource.com"
 }
 ```
 
@@ -350,19 +348,23 @@ Skills may declare MCP dependencies via `requiresMcp: string[]`. During install:
   "skills": [
     {
       "name": "ns-analyze-vulnerabilities",
-      "path": "<resolved absolute path, e.g. /home/user/.agents/skills/ns-analyze-vulnerabilities or C:\\Users\\user\\.agents\\skills\\ns-analyze-vulnerabilities>"
+      "path": "<resolved absolute path, e.g. /home/user/.agents/skills/ns-analyze-vulnerabilities or C:\\Users\\user\\.agents\\skills\\ns-analyze-vulnerabilities>",
+      "installedAt": "2026-06-04T12:00:00Z",
+      "harnesses": ["claude"]
     }
   ],
   "mcpServers": [
     {
       "name": "ns-benchmark",
-      "configPath": "<resolved absolute path, e.g. /home/user/.claude.json or C:\\Users\\user\\.claude.json>"
+      "configPath": "<resolved absolute path, e.g. /home/user/.claude.json or C:\\Users\\user\\.claude.json>",
+      "harness": "claude",
+      "configuredAt": "2026-06-04T12:00:00Z"
     }
   ]
 }
 ```
 
-**File permissions:** `0600` (owner read/write only; limited effect on Windows — see Platform Filesystem Abstractions). Written atomically via temp-file rename: on Unix, `fs.rename()` overwrites atomically; on Windows, `fs.unlink()` the target first if it exists (since `fs.rename()` fails with `EPERM` when destination exists), then `fs.rename()`. Temp file must be on the same volume as the target.
+**File permissions:** `0600` (owner read/write only; limited effect on Windows — see Platform Filesystem Abstractions). Written atomically with `write-file-atomic`.
 
 > **Note**: Each skill entry includes a `harnesses: string[]` field to support multi-harness installations. The top-level `harness` field records the primary installing harness for backward compatibility.
 
@@ -416,16 +418,22 @@ X-Nsolid-Service-Token = "<token>"
 **OpenCode (`~/.config/opencode/opencode.jsonc`):**
 ```jsonc
 {
-  "mcpServers": {
+  "mcp": {
     "nsolid-console": {
+      "type": "remote",
+      "enabled": true,
       "url": "https://<id>.mcp.saas.nodesource.io",
       "headers": { "X-Nsolid-Service-Token": "<token>" }
     },
     "ns-benchmark": {
+      "type": "remote",
+      "enabled": true,
       "url": "https://benchmark.mcp.saas.nodesource.io/mcp",
       "headers": { "X-Nsolid-Org-Id": "<orgId>", "X-Nsolid-Service-Token": "<token>" }
     },
     "ncm": {
+      "type": "remote",
+      "enabled": true,
       "url": "https://mcp.ncm.nodesource.com",
       "headers": { "X-Nsolid-Service-Token": "<token>" }
     }
@@ -433,8 +441,8 @@ X-Nsolid-Service-Token = "<token>"
 }
 ```
 
-**Antigravity CLI (`~/.gemini/config/mcp_config.json`):**
-> **Note**: Antigravity uses `serverUrl` (not `url`) as the URL field name. Shared MCP configs across all Antigravity tools go in `~/.gemini/config/mcp_config.json`.
+**Antigravity CLI (`~/.gemini/antigravity-cli/mcp_config.json` fallback, or plugin-local `mcp_config.json` in native artifacts):**
+> **Note**: Antigravity uses `serverUrl` (not `url`) as the URL field name. Generated native artifacts include plugin-local `mcp_config.json`; fallback direct install writes `~/.gemini/antigravity-cli/mcp_config.json`.
 ```json
 {
   "mcpServers": {
@@ -454,60 +462,123 @@ X-Nsolid-Service-Token = "<token>"
 }
 ```
 
+**Pi Agent (`~/.pi/agent/mcp.json`):**
+> **Note**: Pi package-owned skills come from `@nodesource/pi-plugin`. `nsolid-plugin setup --harness pi` writes MCP config for `pi-mcp-adapter` and disables adapter OAuth auto-detection with `"auth": false` so NodeSource service-token headers are used.
+```json
+{
+  "mcpServers": {
+    "nsolid-console": {
+      "url": "https://<id>.mcp.saas.nodesource.io",
+      "auth": false,
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
+    },
+    "ns-benchmark": {
+      "url": "https://benchmark.mcp.saas.nodesource.io/mcp",
+      "auth": false,
+      "headers": { "X-Nsolid-Org-Id": "<orgId>", "X-Nsolid-Service-Token": "<token>" }
+    },
+    "ncm": {
+      "url": "https://mcp.ncm.nodesource.com",
+      "auth": false,
+      "headers": { "X-Nsolid-Service-Token": "<token>" }
+    }
+  }
+}
+```
+
 ## Data Flow
 
-### Installation Sequence
+### Artifact Build Sequence
 
 ```
-┌─────────────┐
-│  User runs  │
-│  marketplace│
-│  install    │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────────┐
-│ postinstall.js  │
-│ (marketplace    │
-│  package)       │
-└──────┬──────────┘
-       │
-       ▼
-┌─────────────────┐
-│ Core Installer  │
-│ install()       │
-└──────┬──────────┘
-       │
-       ├──────────────────┐
-       │                  │
-       ▼                  ▼
-┌──────────────┐   ┌──────────────┐
-│ Auth Module  │   │ Load bundle  │
-│ ensureAuth() │   │ descriptor   │
-└──────┬───────┘   └──────┬───────┘
-       │                  │
-       │                  │
-       ▼                  ▼
-┌──────────────┐   ┌──────────────┐
-│ OAuth flow   │   │ Skills       │
-│ (if needed)  │   │ Module       │
-└──────┬───────┘   │ installSkills│
-       │           └──────┬───────┘
-       │                  │
-       │                  ▼
-       │           ┌──────────────┐
-       │           │ MCP Module   │
-       │           │ configureMcp │
-       │           └──────┬───────┘
-       │                  │
-       │                  ▼
-       │           ┌──────────────┐
-       │           │ Harness      │
-       │           │ Adapter      │
-       │           │ writeConfig  │
-       │           └──────┬───────┘
-       │                  │
-       ▼                  ▼
+┌─────────────────────────────┐
+│ pnpm plugin:artifacts       │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ scripts/build-plugin-       │
+│ artifacts.mjs               │
+└──────────────┬──────────────┘
+               │
+               ├───────────────┬────────────────┐
+               ▼               ▼                ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│ Render Claude   │ │ Render Codex    │ │ Render          │
+│ template        │ │ template        │ │ Antigravity     │
+└────────┬────────┘ └────────┬────────┘ └────────┬────────┘
+         │                   │                   │
+         ▼                   ▼                   ▼
+┌──────────────────────────────────────────────────────────┐
+│ Copy artifact-local skills from packages/core/skills/    │
+│ Generate manifests, MCP wrappers/config, install scripts │
+│ Validate against bundle.json                             │
+└───────────────────────────┬──────────────────────────────┘
+                            ▼
+┌──────────────────────────────────────────────────────────┐
+│ dist/plugins/<harness>/nsolid-plugin/                    │
+│ dist/artifacts/nsolid-<harness>-plugin.tgz               │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Native Plugin Install Sequence
+
+```
+┌─────────────────────────────┐
+│ User installs generated     │
+│ native artifact             │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ Harness stages plugin files │
+│ from artifact-local bundle  │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ Docs/CLI/runtime wrapper    │
+│ provide explicit setup      │
+│ guidance when credentials   │
+│ are missing                 │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ No browser/auth is launched │
+│ by native install           │
+└─────────────────────────────┘
+```
+
+### Fallback Direct Install Sequence
+
+```
+┌─────────────────────────────┐
+│ nsolid-plugin install       │
+│ --harness <harness>         │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ Load bundle descriptor      │
+│ and source skills           │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ Copy/link fallback skills   │
+│ where applicable; skip Pi   │
+│ package-owned skills        │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ Merge MCP config; use creds │
+│ when present, otherwise     │
+│ print setup guidance        │
+└──────────────┬──────────────┘
+               │
+               ▼
 ┌─────────────────────────────┐
 │ Write tracking file         │
 │ ~/.agents/.nodesource-      │
@@ -515,11 +586,12 @@ X-Nsolid-Service-Token = "<token>"
 └─────────────────────────────┘
 ```
 
-### Auth Flow Sequence
+### Setup/Auth Flow Sequence
 
 ```
 ┌──────────┐
-│ Installer│
+│ setup/   │
+│ login    │
 └────┬─────┘
      │
      ▼
@@ -542,7 +614,7 @@ X-Nsolid-Service-Token = "<token>"
      ▼                │
 ┌─────────────────┐   │
 │ Open browser    │   │
-│ accounts.ns.com │   │
+│ accounts URL    │   │
 └────┬────────────┘   │
      │                │
      ▼                │
@@ -585,15 +657,16 @@ X-Nsolid-Service-Token = "<token>"
 ```
 ┌─────────────┐
 │  User runs  │
-│  marketplace│
-│  uninstall  │
+│  native or  │
+│  CLI cleanup│
 └──────┬──────┘
        │
        ▼
 ┌─────────────────┐
-│ preuninstall.js │
-│ (marketplace    │
-│  package)       │
+│ Harness removes │
+│ generated native│
+│ artifact, or CLI│
+│ calls uninstall │
 └──────┬──────────┘
        │
        ▼
@@ -636,8 +709,8 @@ X-Nsolid-Service-Token = "<token>"
 ### Auth Errors
 
 1. **OAuth timeout**: After 5 minutes, shut down callback server, return error with retry guidance
-2. **Token validation failure**: Store credentials optimistically, warn user, let MCP servers validate on first use
-3. **Accounts API unavailable**: Same as validation failure - optimistic storage with warning
+2. **Token validation failure**: Treat invalid credentials as fatal and do not store them
+3. **Accounts API unavailable**: Store credentials optimistically with a warning; MCP servers validate on first use
 4. **Port conflict**: Try alternative ports (8766-8770), fail with actionable message if all occupied
 
 ### Installation Errors
@@ -655,17 +728,17 @@ X-Nsolid-Service-Token = "<token>"
 
 ## Design Decisions
 
-### Why shared core + marketplace wrappers?
+### Why shared core + generated native artifacts?
 
 **Alternatives considered:**
-1. **Single installer CLI** (`npx @nodesource/ai-skills install`): Rejected because user wants marketplace presence
-2. **Five separate codebases**: Rejected due to maintenance burden and drift risk
-3. **Shared core + wrappers**: Chosen for single source of truth + marketplace discoverability
+1. **Single installer CLI only**: Rejected because native harness plugin UX is still valuable where supported.
+2. **Five separate hand-maintained plugin packages**: Rejected due to duplicated skills, duplicated manifests, workspace noise, and high drift risk.
+3. **Shared core + generated artifacts + Pi package**: Chosen for one source of truth, reproducible native bundles, and package-native Pi support.
 
 **Tradeoffs:**
-- More complex build/release process (5 packages vs 1)
-- Requires npm workspace setup
-- But: users get native marketplace UX, single source of truth for logic
+- Release now has an explicit artifact build step (`pnpm plugin:artifacts`).
+- Generated outputs are not visible in source until built locally or in CI.
+- But: source remains canonical, skills are not duplicated across package folders, and marketplaces/local install flows receive self-contained plugin bundles.
 
 ### Why adapt nsentinel auth flow?
 
@@ -679,14 +752,14 @@ X-Nsolid-Service-Token = "<token>"
 - Simplify state management (no VSCode state API)
 - Keep same Accounts API endpoints
 
-### Why `~/.agents/skills/` as canonical path?
+### Why `packages/core/skills/` as canonical source?
 
 **Rationale:**
-- Universal path supported by Claude, Codex, OpenCode
-- Pi Agent uses `~/.pi/agent/skills/` but can symlink (Unix) or copy (Windows) from `~/.agents/`
-- Pi Agent also reads from `~/.agents/skills/` natively, so skills placed there are auto-discovered
-- Single source of truth for skill content
-- Harness adapters create symlinks on Unix, directory junctions or copies on Windows
+- The repository needs exactly one committed N|Solid skill source to avoid divergent copies.
+- Generated Claude/Codex/Antigravity artifacts include artifact-local `skills/` directories because their plugin formats expect self-contained bundles.
+- Pi package artifacts receive `skills/` only during pack/materialization.
+- Fallback direct installs can still copy/link skills into `~/.agents/skills/` or harness paths when native plugin install is unavailable.
+- `pnpm plugin:check` enforces this source/artifact boundary.
 
 ### Why JSON for credentials and tracking?
 
@@ -695,48 +768,48 @@ X-Nsolid-Service-Token = "<token>"
 2. **TOML**: Rejected - not universally supported in Node.js
 3. **JSON**: Chosen - native support, simple, sufficient for this use case
 
-### Why harness-native triggers instead of npm `postinstall`?
+### Why no install-time auth or startup hooks?
 
 **Rationale:**
-- Claude Code and Codex CLI copy plugin directories and do not run npm lifecycle scripts.
-- OpenCode installs npm plugins with Bun, which is default-secure and skips `postinstall` unless the package is in the user's `trustedDependencies` allowlist.
-- Antigravity CLI has no install-time or session-start hook at all (only tool/invocation hooks).
-- Pi Agent packages are loaded via the `pi` manifest and have no install-time hook, but `pi.extensions` runs on package load.
-- Therefore each harness's native trigger is used:
-  - Claude/Codex: `SessionStart` hook → `scripts/setup.js` → `packages/core/scripts/setup.mjs`.
-  - OpenCode: plugin module load → `index.js` → shared setup script.
-  - Antigravity: manual one-time `scripts/install.js` → `core.install()`.
-  - Pi: `pi.extensions` entrypoint → `core.install()`.
+- Native plugin install should be predictable and non-interactive; it should not unexpectedly open a browser.
+- Claude/Codex/Antigravity startup/setup hooks are not shipped because CLI/UI visibility is inconsistent and startup contexts are a poor place for OAuth prompts.
+- Antigravity native install stages plugin assets; setup/auth is a separate user action.
+- Pi package activation should not surprise users with auth or MCP config mutations.
+- Therefore only `nsolid-plugin setup` / `nsolid-plugin login` may run OAuth.
 
-**Tradeoff:** Antigravity requires a manual install step because no hook exists. This is the least-bad option and keeps auth/MCP/skills consistent with the other harnesses.
+**Tradeoff:** Users have one explicit post-install step. This is acceptable because missing credentials produce actionable runtime/setup guidance instead of hidden interactive behavior.
 
 ## Migration Strategy
 
-This is a **new project** - no migration needed. However, the design supports:
+The project migrated from hand-maintained per-harness package directories to generated artifacts:
 
-1. **Adding new skills**: Update `bundle.json`, re-run installer, new skills added
-2. **Adding new MCP servers**: Update `bundle.json`, re-run installer, new servers configured
-3. **Adding new harnesses**: Create new harness adapter + marketplace package
-4. **Updating existing installations**: Re-run installer, idempotent merge behavior
+1. **Canonical source cleanup**: Keep N|Solid skills only in `packages/core/skills/`; remove generated/package-local skill copies from source.
+2. **Artifact templates**: Move Claude/Codex/Antigravity source-only pieces into `plugins/templates/<harness>/`.
+3. **Generated outputs**: Render self-contained plugin directories under `dist/plugins/` and archives under `dist/artifacts/`.
+4. **Pi exception**: Keep `packages/pi-plugin` as a real package with `prepack` skill materialization and post-pack/source cleanup.
+5. **Auth split**: Remove browser/auth behavior from install paths; make `setup`/`login` the only OAuth entry points.
+
+Future changes use this model:
+
+1. **Adding new skills**: Update `packages/core/skills/` and `bundle.json`; run `pnpm plugin:check` and `pnpm plugin:artifacts`.
+2. **Adding new MCP servers**: Update `bundle.json` and generator/runtime config helpers; validate generated `.mcp.json`/`mcp_config.json` outputs.
+3. **Adding new generated harnesses**: Add a harness adapter if fallback install is needed, a template under `plugins/templates/`, and generator coverage in `scripts/plugin-generators.mjs`.
+4. **Updating existing installations**: Re-run native artifact install or fallback install; both paths are idempotent and non-authenticating.
 
 ## Deployment Order
 
-1. **Phase 1**: Core package (`packages/core`)
-   - Auth module
-   - Skills module
-   - MCP module
-   - Harness adapters (Claude, Codex, OpenCode first)
+1. **Core and Pi packages**
+   - Publish/build `@nodesource/plugin-core`.
+   - Pack/publish `@nodesource/pi-plugin` with materialized skills.
 
-2. **Phase 2**: Marketplace packages
-   - Claude plugin
-   - Codex plugin
-   - OpenCode plugin
+2. **Generated native artifacts**
+   - Run `pnpm plugin:artifacts`.
+   - Upload `dist/artifacts/nsolid-<harness>-plugin.tgz` to releases or use `dist/plugins/<harness>/nsolid-plugin/` for local install/marketplace staging.
 
-3. **Phase 3**: Additional harnesses
-   - Antigravity plugin (after Antigravity docs reviewed)
-   - Pi plugin (skills only)
+3. **Marketplace submission where available**
+   - Submit/generated Claude and Codex plugin directories to curated/community marketplace paths when accepted.
+   - Use generated artifacts/local install paths while curation is pending.
+   - Use generated Antigravity local/remote plugin install until a curated marketplace path exists.
 
-4. **Phase 4**: Testing and verification
-   - Manual marketplace install tests
-   - Automated integration tests
-   - Doctor command verification
+4. **Validation**
+   - Run `pnpm plugin:check`, `pnpm plugin:artifacts:check`, `pnpm lint`, `pnpm test`, and `pnpm test:marketplace` before release.
