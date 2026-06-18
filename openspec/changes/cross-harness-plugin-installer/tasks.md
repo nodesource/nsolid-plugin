@@ -373,7 +373,7 @@
 - **Testing**: Trigger each error scenario, verify message clarity and actionability on all platforms.
 
 ### Task 35: Implement config backup and restore ✓
-- [x] **Description**: Before modifying harness configs, create backup at `~/.agents/.config-backup/<harness>/<timestamp>.json`. Add restore command to CLI for manual recovery. Document backup location in README. Implemented in `19a6a0e`: `utils/backup.ts` (create/list/restore), `getConfigBackupDir()` in `utils/path.ts`, backups wired into `mcp-config-writer.ts` before mutation, `nsolid-plugin restore` CLI command (latest/specific/`--list`), README docs, and `test/integration/backup-restore.test.ts` + `test/unit/utils/backup.test.ts`.
+- [x] **Description**: Before modifying harness configs, create backup at `~/.agents/.config-backup/<harness>/<timestamp>-<uuid>.<ext>` where `<ext>` matches the original config file's extension (`.json`, `.toml`, `.jsonc`, etc.). Add restore command to CLI for manual recovery. Document backup location in README. Implemented in `19a6a0e`: `utils/backup.ts` (create/list/restore), `getConfigBackupDir()` in `utils/path.ts`, backups wired into `mcp-config-writer.ts` before mutation, `nsolid-plugin restore` CLI command (latest/specific/`--list`), README docs, and `test/integration/backup-restore.test.ts` + `test/unit/utils/backup.test.ts`.
 - **Depends on**: Task 20
 - **Files**:
   - `packages/core/src/utils/backup.ts`

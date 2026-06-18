@@ -54,6 +54,15 @@ describe('createConfigBackup', () => {
     const entry = createConfigBackup('claude', join(tmpDir, 'missing.json'))
     assert.strictEqual(entry, null)
   })
+
+  it('creates distinct backup paths for back-to-back calls', () => {
+    const configPath = join(tmpDir, '.claude.json')
+    writeFileSync(configPath, 'v1', 'utf8')
+    const first = createConfigBackup('claude', configPath)!
+    const second = createConfigBackup('claude', configPath)!
+    assert.notStrictEqual(first.backupPath, second.backupPath)
+    assert.strictEqual(listConfigBackups('claude').length, 2)
+  })
 })
 
 describe('listConfigBackups', () => {

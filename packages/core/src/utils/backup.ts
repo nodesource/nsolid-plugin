@@ -1,7 +1,8 @@
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, readFileSync as fsReadFileSync } from 'node:fs'
 import type { HarnessType } from '../types.js'
-import { getConfigBackupDir } from './path.js'
+import { getConfigBackupDir, resolveHome } from './path.js'
 import { atomicWriteSync } from './fs.js'
 import { readJsonFile } from './config.js'
 import { formatPluginError, toPluginError, PluginError } from '../errors.js'
@@ -22,7 +23,7 @@ interface BackupMeta {
 
 function backupName (originalPath: string, timestamp: number): string {
   const ext = path.extname(originalPath) || '.bak'
-  return `${timestamp}${ext}`
+  return `${timestamp}-${randomUUID()}${ext}`
 }
 
 function metaPath (backupPath: string): string {
@@ -35,6 +36,8 @@ export function createConfigBackup (
   options?: { reason?: string }
 ): BackupEntry | null {
   if (!existsSync(originalPath)) return null
+
+  originalPath = path.resolve(resolveHome(originalPath))
 
   const dir = getConfigBackupDir(harness)
   mkdirSync(dir, { recursive: true })

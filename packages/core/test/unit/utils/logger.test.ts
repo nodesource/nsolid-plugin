@@ -3,20 +3,25 @@ import assert from 'node:assert/strict'
 import { createLogger, isVerboseEnabled } from '../../../src/utils/logger.js'
 
 let originalVerbose: string | undefined
+let originalWrite: typeof process.stderr.write | undefined
 let stderrOutput: string
 
 beforeEach(() => {
   originalVerbose = process.env.NSOLID_PLUGIN_VERBOSE
   delete process.env.NSOLID_PLUGIN_VERBOSE
   stderrOutput = ''
-  const originalWrite = process.stderr.write
+  originalWrite = process.stderr.write
   process.stderr.write = ((chunk: unknown, ...args: unknown[]) => {
     stderrOutput += String(chunk)
-    return originalWrite.apply(process.stderr, [chunk, ...args] as Parameters<typeof originalWrite>)
+    return originalWrite!.apply(process.stderr, [chunk, ...args] as Parameters<typeof process.stderr.write>)
   }) as typeof process.stderr.write
 })
 
 afterEach(() => {
+  if (originalWrite !== undefined) {
+    process.stderr.write = originalWrite
+    originalWrite = undefined
+  }
   if (originalVerbose !== undefined) {
     process.env.NSOLID_PLUGIN_VERBOSE = originalVerbose
   } else {
