@@ -151,8 +151,15 @@ describe('token-storage', () => {
       mkdirSync(getAgentsDir(), { recursive: true })
       mkdirSync(getAuthFilePath(), { recursive: true })
 
-      assert.throws(() => removeCredentials(), /Failed to remove credentials at/)
-      assert.throws(() => removeCredentials(), new RegExp(getAuthFilePath()))
+      // Use a predicate (not new RegExp(path)) so Windows backslash separators in the
+      // path (e.g. `\nsolid-...`) are not reinterpreted as regex escapes (`\n` => newline).
+      assert.throws(
+        () => removeCredentials(),
+        (err: Error) =>
+          err.message.includes('Failed to remove credentials at') &&
+          err.message.includes(getAuthFilePath()),
+        'removeCredentials should throw an error containing the failing path'
+      )
     })
   })
 })
