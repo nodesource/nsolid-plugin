@@ -97,6 +97,47 @@ describe('validateBundle', () => {
     assert.throws(() => validateBundle(bad), /validation failed/i)
   })
 
+  it('accepts valid origin-only accountsUrl values', () => {
+    const urls = [
+      'https://accounts.nodesource.com',
+      'https://accounts.nodesource.com/',
+      'https://accounts.nodesource.com:8080',
+      'https://accounts.nodesource.com:8080/',
+    ]
+    for (const accountsUrl of urls) {
+      const bundle = {
+        ...validBundle,
+        auth: {
+          type: 'oauth',
+          provider: 'nodesource',
+          accountsUrl,
+        }
+      }
+      assert.doesNotThrow(() => validateBundle(bundle), `Expected ${accountsUrl} to be valid`)
+    }
+  })
+
+  it('rejects accountsUrl with path, query, or hash', () => {
+    const urls = [
+      'https://accounts.nodesource.com/api/v1',
+      'https://accounts.nodesource.com?foo=bar',
+      'https://accounts.nodesource.com#section',
+      'https://accounts.nodesource.com/path?query=1#hash',
+      'not-a-url',
+    ]
+    for (const accountsUrl of urls) {
+      const bundle = {
+        ...validBundle,
+        auth: {
+          type: 'oauth',
+          provider: 'nodesource',
+          accountsUrl,
+        }
+      }
+      assert.throws(() => validateBundle(bundle), /validation failed/i, `Expected ${accountsUrl} to be invalid`)
+    }
+  })
+
   it('rejects skill with duplicate requiresMcp entries', () => {
     const bad = {
       ...validBundle,
