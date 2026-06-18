@@ -1,5 +1,5 @@
 export { ensureAuthenticated } from './auth-manager.js'
-export { saveCredentials, loadCredentials, isExpired } from './token-storage.js'
+export { saveCredentials, loadCredentials, isExpired, removeCredentials } from './token-storage.js'
 export { validateToken } from './token-validator.js'
 export type { ValidationResult } from './token-validator.js'
 export { startOAuthServer } from './oauth-server.js'

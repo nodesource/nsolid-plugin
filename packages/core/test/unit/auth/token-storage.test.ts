@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Credentials } from '../../../src/types.js'
@@ -114,5 +114,45 @@ describe('token-storage', () => {
     }
 
     assert.strictEqual(isExpired(creds), true)
+  })
+
+  describe('removeCredentials', () => {
+    it('removes an existing credentials file', async () => {
+      const { saveCredentials, removeCredentials } = await import('../../../src/auth/token-storage.js')
+      const { getAuthFilePath, getAgentsDir } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+
+      mkdirSync(getAgentsDir(), { recursive: true })
+      saveCredentials({
+        serviceToken: 'token',
+        organizationId: 'org',
+        saasToken: 'saas',
+        consoleUrl: 'https://test.saas.nodesource.io',
+        mcpUrl: 'https://org.mcp.saas.nodesource.io',
+        expiresAt: '2099-01-01T00:00:00Z',
+      })
+
+      assert.ok(removeCredentials(), 'returns true when file existed')
+      assert.ok(!existsSync(getAuthFilePath()), 'credentials file is gone')
+    })
+
+    it('returns false when no credentials file exists', async () => {
+      const { removeCredentials } = await import('../../../src/auth/token-storage.js')
+
+      assert.strictEqual(removeCredentials(), false)
+    })
+
+    it('throws a descriptive error when removal fails', async () => {
+      const { removeCredentials } = await import('../../../src/auth/token-storage.js')
+      const { getAuthFilePath, getAgentsDir } = await import('../../../src/utils/path.js')
+
+      // Make the auth path a directory so unlinkSync of the "file" fails,
+      // independent of filesystem permissions (works even when running as root).
+      mkdirSync(getAgentsDir(), { recursive: true })
+      mkdirSync(getAuthFilePath(), { recursive: true })
+
+      assert.throws(() => removeCredentials(), /Failed to remove credentials at/)
+      assert.throws(() => removeCredentials(), new RegExp(getAuthFilePath()))
+    })
   })
 })

@@ -12,6 +12,7 @@ const SETUP_TIMEOUT_MS = 120000
 // Windows drive letters (new URL(...).pathname yields an invalid "/D:/..." path
 // on Windows, which would make every existsSync check fail).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const CLI_PATH = join(REPO_ROOT, 'packages/core/dist/src/cli.js')
 const HARNESS_LIST = [
   { name: 'claude', configRel: '.claude.json', urlKey: 'url' },
   { name: 'codex', configRel: '.codex/config.toml', urlKey: 'url' },
@@ -61,7 +62,7 @@ for (const h of HARNESS_LIST) {
     const uninstall = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs', 'uninstall'])
     assertOk(uninstall, `${tag} uninstall exit code`)
 
-    assert(existsSync(join(home, '.agents', '.nodesource-auth.json')), `${tag} credentials preserved`)
+    assert(!existsSync(join(home, '.agents', '.nodesource-auth.json')), `${tag} credentials purged on last-harness uninstall`)
 
     assert(!existsSync(join(harnessSkillsPath, probeSkill)), `${tag} harness skill link removed`)
 
@@ -69,6 +70,33 @@ for (const h of HARNESS_LIST) {
   } catch (err) {
     failed++
     console.error(`\x1b[31m✗ ${h.name} FAILED: ${err.message}\x1b[0m`)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+// Second pass: --keep-credentials must preserve the auth file on the last harness.
+for (const h of HARNESS_LIST) {
+  const home = mkdtempSync(join(tmpdir(), `nsolid-keep-${h.name}-`))
+  const env = { ...process.env, HOME: home, USERPROFILE: home, NSOLID_HARNESS: h.name }
+
+  mkdirSync(join(home, '.agents'), { recursive: true })
+  writeFileSync(join(home, '.agents', '.nodesource-auth.json'), JSON.stringify(FAKE_CREDS))
+
+  const tag = `[${h.name} --keep-credentials]`
+  try {
+    const install = run(REPO_ROOT, env, ['packages/core/scripts/setup.mjs'])
+    assertOk(install, `${tag} install exit code`)
+
+    const uninstall = run(REPO_ROOT, env, [CLI_PATH, 'uninstall', '--harness', h.name, '--keep-credentials'])
+    assertOk(uninstall, `${tag} uninstall exit code`)
+
+    assert(existsSync(join(home, '.agents', '.nodesource-auth.json')), `${tag} credentials preserved with --keep-credentials`)
+
+    console.log(`\x1b[32m✓ ${h.name} --keep-credentials preserves credentials\x1b[0m`)
+  } catch (err) {
+    failed++
+    console.error(`\x1b[31m✗ ${h.name} --keep-credentials FAILED: ${err.message}\x1b[0m`)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

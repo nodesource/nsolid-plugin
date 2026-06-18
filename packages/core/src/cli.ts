@@ -3,7 +3,7 @@
 import { parseArgs } from 'node:util'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { install, uninstall, doctor, restore } from './index.js'
+import { install, uninstall, logout, doctor, restore } from './index.js'
 import type { HarnessType } from './types.js'
 import { HARNESS_VALUES } from './types.js'
 import { formatPluginError } from './errors.js'
@@ -22,12 +22,14 @@ function printUsage (): void {
 Commands:
   install    Install NodeSource skills for a harness
   uninstall  Remove NodeSource skills for a harness
+  logout     Forget your stored NodeSource login (removes credentials only)
   doctor     Check installation health for a harness
   restore    Restore a harness MCP config from the latest backup
 
 Options:
-  --harness <harness>   Target harness (required): ${HARNESS_VALUES.join(', ')}
-  --bundle <path>       Path to bundle.json (default: core package bundle.json)
+  --harness <harness>    Target harness (required for install/uninstall/doctor/restore): ${HARNESS_VALUES.join(', ')}
+  --keep-credentials     Do not remove credentials even if this was the last harness (uninstall only)
+  --bundle <path>        Path to bundle.json (default: core package bundle.json)
   --skills-source <path> Path to skills source directory (default: core package root)
   --backup <path>       Restore a specific backup file (restore command only)
   --list                List available backups (restore command only)
@@ -53,6 +55,7 @@ async function main (): Promise<void> {
       'no-color': { type: 'boolean' },
       staging: { type: 'boolean' },
       'accounts-url': { type: 'string' },
+      'keep-credentials': { type: 'boolean' },
       help: { type: 'boolean', short: 'H' },
     },
   })
@@ -113,7 +116,11 @@ async function main (): Promise<void> {
       break
     }
     case 'uninstall': {
-      const result = await uninstall(requireHarness(), { bundlePath: values.bundle, ...commonOptions })
+      const result = await uninstall(requireHarness(), {
+        bundlePath: values.bundle,
+        ...commonOptions,
+        keepCredentials: values['keep-credentials'] === true,
+      })
       if (result.errors.length > 0) {
         console.error('Uninstall completed with errors:')
         for (const err of result.errors) {
@@ -122,6 +129,22 @@ async function main (): Promise<void> {
         process.exit(1)
       }
       console.log(`Uninstalled NodeSource skills for ${harness}`)
+      if (result.credentialsPurged) {
+        const { supportsColor } = await import('./utils/format.js')
+        const color = values['no-color'] !== true && supportsColor()
+        const fmt = (s: string) => color ? `\x1b[33m${s}\x1b[0m` : s
+        console.log(fmt('No NodeSource installs remain — removed stored credentials.'))
+        console.log(fmt('  Re-run any install to authenticate again.'))
+      }
+      break
+    }
+    case 'logout': {
+      const result = await logout()
+      if (result.removed) {
+        console.log(`Removed credentials at ${result.path}`)
+      } else {
+        console.log('No credentials found — nothing to log out.')
+      }
       break
     }
     case 'restore': {

@@ -15,7 +15,7 @@ import type {
   Logger,
 } from './types.js'
 import { validateBundle } from './validate.js'
-import { ensureAuthenticated, loadCredentials, isExpired } from './auth/index.js'
+import { ensureAuthenticated, loadCredentials, isExpired, removeCredentials } from './auth/index.js'
 import { installSkills, uninstallSkills, SkillCopyError } from './skills/skill-copier.js'
 import { linkSkillsToHarness, unlinkSkillsFromHarness } from './skills/skill-linker.js'
 import {
@@ -33,7 +33,7 @@ import {
 import { getAdapter } from './harnesses/index.js'
 import type { HarnessAdapter } from './harnesses/index.js'
 import { readJsonFile } from './utils/config.js'
-import { getSkillsDir } from './utils/path.js'
+import { getSkillsDir, getAuthFilePath } from './utils/path.js'
 import { createLogger, isVerboseEnabled } from './utils/logger.js'
 import { restoreConfigBackup, type BackupEntry } from './utils/backup.js'
 import { toPluginError } from './errors.js'
@@ -188,10 +188,38 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   return result
 }
 
+export interface LogoutResult {
+  removed: boolean
+  path: string
+}
+
+/**
+ * Forget the stored NodeSource login. Idempotent: returns removed=false if no
+ * credentials were present. Does NOT uninstall skills or MCP config — that is
+ * `uninstall()`'s job. Use `logout` when you want to clear auth only.
+ */
+export async function logout (): Promise<LogoutResult> {
+  const path = getAuthFilePath()
+  const removed = removeCredentials()
+  return { removed, path }
+}
+
+export interface UninstallOptions {
+  bundlePath?: string
+  verbose?: boolean
+  logger?: Logger
+  keepCredentials?: boolean
+}
+
+export interface UninstallResult {
+  errors: string[]
+  credentialsPurged?: boolean
+}
+
 export async function uninstall (
   harness: HarnessType,
-  options?: { bundlePath?: string; verbose?: boolean; logger?: Logger }
-): Promise<{ errors: string[] }> {
+  options?: UninstallOptions
+): Promise<UninstallResult> {
   const logger = options?.logger ?? createLogger({ verbose: isVerboseEnabled(options?.verbose) })
   const errors: string[] = []
   const adapter = getAdapter(harness)
@@ -239,13 +267,39 @@ export async function uninstall (
         errors.push(`Skill removal failed: ${pluginErr.message}`)
       }
     }
+
+    // After all per-harness removal, see whether ANY install remains across any harness.
+    // removeTrackedSkills/removeTrackedMcps already unlink the tracking file when it empties,
+    // so a null read == "nothing NodeSource-installed is left anywhere".
+    let credentialsPurged = false
+    if (!options?.keepCredentials) {
+      const remaining = await readTrackingFile(logger)
+      const isEmpty = !remaining || (remaining.skills.length === 0 && remaining.mcpServers.length === 0)
+      if (isEmpty) {
+        try {
+          if (removeCredentials()) {
+            credentialsPurged = true
+            logger.info('uninstall.credentials.purged', { reason: 'last-harness' })
+          }
+        } catch (err) {
+          // Non-fatal: uninstall still "succeeded" for this harness; surface as a warning.
+          errors.push(`Could not remove credentials: ${(err as Error).message}`)
+        }
+      }
+    }
+
+    logger.info('uninstall.finish', { harness, errors: errors.length, credentialsPurged })
+    return { errors, credentialsPurged }
   } else {
     const warnings = await bestEffortCleanup(harness, adapter, options, logger)
     errors.push(...warnings)
-  }
 
-  logger.info('uninstall.finish', { harness, errors: errors.length })
-  return { errors }
+    // Best-effort cleanup intentionally never purges credentials: without a
+    // tracking file we cannot reliably tell whether another harness is still
+    // installed. Users can run `nsolid-plugin logout` to remove credentials.
+    logger.info('uninstall.finish', { harness, errors: errors.length, bestEffort: true })
+    return { errors }
+  }
 }
 
 async function bestEffortCleanup (
