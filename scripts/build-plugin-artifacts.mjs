@@ -311,7 +311,7 @@ function buildArchive (artifactDir, artifactName) {
   const result = spawnSync(
     'npm',
     ['pack', artifactDir, '--pack-destination', ARTIFACTS_DIR],
-    { encoding: 'utf-8', stdio: 'pipe' }
+    { encoding: 'utf-8', stdio: 'pipe', shell: true }
   )
 
   if (result.status !== 0) {

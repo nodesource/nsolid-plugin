@@ -21,7 +21,9 @@ export function mergeMcpConfig (
   const merged: Record<string, McpServerConfig> = { ...existing.mcpServers }
 
   for (const server of newServers) {
+    const { command, args, env, type, ...preserved } = merged[server.name] ?? {}
     merged[server.name] = {
+      ...preserved,
       url: server.url,
       headers: { ...server.headers },
     }

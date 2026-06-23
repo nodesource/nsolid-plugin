@@ -9,10 +9,6 @@ dist/
 test-results.log
 
 # Generated plugin artifacts/materialized package skills
-packages/claude-plugin/skills/
-packages/codex-plugin/skills/
-packages/codex-plugin/plugins/nsolid-plugin/skills/
-packages/antigravity-plugin/skills/
 packages/pi-plugin/skills/
 
 # OpenCode

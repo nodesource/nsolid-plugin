@@ -229,27 +229,27 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
   if (bundle.auth) {
     const authConfig = { ...bundle.auth, accountsUrl: resolveAccountsUrl(bundle.auth.accountsUrl, logger) }
 
+    let existingCredentials: Credentials | null = null
     try {
-      const existingCredentials = loadCredentials()
-      if (existingCredentials && !isExpired(existingCredentials)) {
-        progress.step('Checking NodeSource login', 'already signed in')
-      } else {
-        result.hadToAuthenticate = true
-        progress.step('Checking NodeSource login', 'sign-in required')
-        await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth })
-      }
+      existingCredentials = loadCredentials()
     } catch {
-      // Corrupt credentials file - fall through to re-authenticate
-      result.hadToAuthenticate = true
+      // Corrupt credentials file — will re-authenticate via ensureAuthenticated
+    }
+
+    if (existingCredentials) {
+      progress.step('Checking NodeSource login', isExpired(existingCredentials) ? 'sign-in required' : 'already signed in')
+      result.hadToAuthenticate = isExpired(existingCredentials)
+    } else {
       progress.step('Checking NodeSource login', 'sign-in required')
-      try {
-        const authConfig = { ...bundle.auth, accountsUrl: resolveAccountsUrl(bundle.auth.accountsUrl, logger) }
-        await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth })
-      } catch (err) {
-        const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
-        result.errors.push(`Authentication failed: ${pluginErr.message}`)
-        return result
-      }
+      result.hadToAuthenticate = true
+    }
+
+    try {
+      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth })
+    } catch (err) {
+      const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
+      result.errors.push(`Authentication failed: ${pluginErr.message}`)
+      return result
     }
   }
 

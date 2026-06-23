@@ -40,7 +40,7 @@ describe('Pi plugin', () => {
     assert.ok(existsSync(indexPath))
     const source = readFileSync(indexPath, 'utf8')
     assert.match(source, /side-effect free/)
-    assert.doesNotMatch(source, /from '@nodesource\/plugin-core'/)
+    assert.doesNotMatch(source, /@nodesource\/plugin-core/)
     assert.doesNotMatch(source, /install\(|setup\(/)
   })
 })

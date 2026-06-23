@@ -55,23 +55,27 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
   }
 
   if (existing && !isExpired(existing)) {
-    try {
-      const validationAccountsUrl = existing.accountsUrl ?? authConfig.accountsUrl
-      const result = await validateToken(existing.serviceToken, existing.organizationId, validationAccountsUrl, logger)
-      if (result.valid) {
-        if (required.length > 0) {
-          checkRequiredPermissions(required, result.permissions)
+    if (existing.accountsUrl && existing.accountsUrl !== authConfig.accountsUrl) {
+      logger?.info('auth.credentials.originMismatch', { stored: existing.accountsUrl, current: authConfig.accountsUrl })
+    } else {
+      try {
+        const validationAccountsUrl = existing.accountsUrl ?? authConfig.accountsUrl
+        const result = await validateToken(existing.serviceToken, existing.organizationId, validationAccountsUrl, logger)
+        if (result.valid) {
+          if (required.length > 0) {
+            checkRequiredPermissions(required, result.permissions)
+          }
+          logger?.debug('auth.credentials.valid', { orgId: existing.organizationId })
+          return { ...existing, permissions: result.permissions }
         }
-        logger?.debug('auth.credentials.valid', { orgId: existing.organizationId })
-        return { ...existing, permissions: result.permissions }
+      } catch (err) {
+        // Re-throw permission errors (not API unavailability)
+        if (err instanceof PermissionError) {
+          throw err
+        }
+        // API unavailable - fall through to re-authenticate
+        logger?.warn('auth.credentials.validationUnavailable', { error: (err as Error).message })
       }
-    } catch (err) {
-      // Re-throw permission errors (not API unavailability)
-      if (err instanceof PermissionError) {
-        throw err
-      }
-      // API unavailable - fall through to re-authenticate
-      logger?.warn('auth.credentials.validationUnavailable', { error: (err as Error).message })
     }
   }
 

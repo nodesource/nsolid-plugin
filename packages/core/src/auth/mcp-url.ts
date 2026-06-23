@@ -17,5 +17,5 @@ export function deriveMcpUrlFromConsoleUrl (consoleUrl: string): string | null {
 
   if (!mcpHost) return null
 
-  return `${parsed.protocol}//${mcpHost}/`
+  return `https://${mcpHost}/`
 }
