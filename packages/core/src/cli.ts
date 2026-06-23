@@ -79,7 +79,7 @@ Options:
 Distribution notes:
   Claude/Codex/Antigravity: native plugin artifacts are generated with pnpm plugin:artifacts; install is fallback-only.
   Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
-  OpenCode: fallback direct install copies skills/MCP config locally.
+  OpenCode: use setup --harness opencode for auth + direct install; install is fallback/repair.
   Auth: only setup/login may open a browser.`)
 }
 
@@ -338,7 +338,7 @@ async function main (): Promise<void> {
         if (PLUGIN_OWNED_HARNESSES.has(installHarness)) {
           pluginOwnedReady.add(installHarness)
           const authNote = result.hadToAuthenticate
-            ? 'Authentication required — run: nsolid-plugin setup'
+            ? `Authentication required — run: nsolid-plugin setup --harness ${installHarness}`
             : 'Credentials present'
           console.log(`${paint.green('✓')} ${HARNESS_LABELS[installHarness]} — fallback direct install. ${authNote}`)
           if (installHarness === 'claude') {
@@ -383,7 +383,7 @@ async function main (): Promise<void> {
         console.log(`  ${paint.dim('MCP config:')} ${adapter.getMcpConfigPath()}`)
         console.log(`  ${paint.dim('MCP servers:')} ${result.mcpServersConfigured.join(', ')}`)
         if (result.hadToAuthenticate) {
-          console.log(`  ${paint.yellow('⚠ Authentication required for MCP servers — run: nsolid-plugin setup')}`)
+          console.log(`  ${paint.yellow(`⚠ Authentication required for MCP servers — run: nsolid-plugin setup --harness ${installHarness}`)}`)
         }
       }
 

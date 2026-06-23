@@ -11,5 +11,5 @@ agy plugin install ./dist/plugins/antigravity/nsolid-plugin
 Then authenticate with:
 
 ```bash
-nsolid-plugin setup
+nsolid-plugin setup --harness antigravity
 ```

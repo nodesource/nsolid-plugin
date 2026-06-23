@@ -7,15 +7,20 @@ nsolid-plugin — N|Solid performance & security skills for Node.js.
 ```bash
 pi install npm:@nodesource/pi-plugin
 nsolid-plugin setup --harness pi
+pi install npm:pi-mcp-adapter
 ```
 
-Or for local development:
+Or for local development from the repository root:
 
 ```bash
+pnpm plugin:materialize
 pi install ./packages/pi-plugin --no-approve
 nsolid-plugin setup --harness pi --staging
+pi install npm:pi-mcp-adapter
 /reload
 ```
+
+After local packaging tests, run `pnpm plugin:clean` to remove materialized skills from the source tree.
 
 Then verify:
 

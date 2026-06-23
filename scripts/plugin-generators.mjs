@@ -190,6 +190,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
+const SETUP_COMMAND = 'nsolid-plugin setup --harness ${harness}'
 
 const SERVER_NAMES = new Set(${JSON.stringify(serverNames)})
 const serverName = process.argv[2]
@@ -204,25 +205,25 @@ await runMcpRemote(server.url, server.headers)
 
 function readCredentials () {
   if (!existsSync(AUTH_FILE)) {
-    fail('NodeSource credentials not found. Run: nsolid-plugin setup')
+    fail(\`NodeSource credentials not found. Run: \${SETUP_COMMAND}\`)
   }
 
   let parsed
   try {
     parsed = JSON.parse(readFileSync(AUTH_FILE, 'utf8'))
   } catch (err) {
-    fail(\`NodeSource credentials are unreadable. Run: nsolid-plugin logout && nsolid-plugin setup. \${err.message}\`)
+    fail(\`NodeSource credentials are unreadable. Run: nsolid-plugin logout && \${SETUP_COMMAND}. \${err.message}\`)
   }
 
   const required = ['serviceToken', 'organizationId', 'consoleUrl', 'expiresAt']
   const missing = required.filter((key) => typeof parsed?.[key] !== 'string' || parsed[key].length === 0)
   if (missing.length > 0) {
-    fail(\`NodeSource credentials are incomplete (\${missing.join(', ')} missing). Run: nsolid-plugin setup\`)
+    fail(\`NodeSource credentials are incomplete (\${missing.join(', ')} missing). Run: \${SETUP_COMMAND}\`)
   }
 
   const expiresAt = Date.parse(parsed.expiresAt)
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-    fail('NodeSource credentials are expired. Run: nsolid-plugin setup')
+    fail(\`NodeSource credentials are expired. Run: \${SETUP_COMMAND}\`)
   }
 
   return parsed
@@ -234,7 +235,7 @@ function resolveServer (name, credentials) {
       const derivedUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
       const url = derivedUrl ?? credentials.mcpUrl
       if (!url) {
-        fail('Could not derive NodeSource console MCP URL from stored credentials. Run: nsolid-plugin setup')
+        fail(\`Could not derive NodeSource console MCP URL from stored credentials. Run: \${SETUP_COMMAND}\`)
       }
       return {
         url,

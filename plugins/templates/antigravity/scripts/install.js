@@ -57,7 +57,7 @@ console.log(`Installed NodeSource plugin to ${targetDir}`)
 console.log('Restart Antigravity to load the plugin-owned skills and MCPs.')
 console.log('')
 console.log('To authenticate with NodeSource, run:')
-console.log('  nsolid-plugin setup')
+console.log('  nsolid-plugin setup --harness antigravity')
 
 function installMcpRuntimeDependencies (pluginDir, targetDir) {
   const pkg = JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8'))

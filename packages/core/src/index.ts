@@ -321,7 +321,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     if (!credentials || isExpired(credentials)) {
       result.hadToAuthenticate = true
       progress.step('Checking NodeSource login', 'not signed in')
-      progress.warn('Authentication required for MCP servers', 'Run: nsolid-plugin setup')
+      progress.warn('Authentication required for MCP servers', `Run: nsolid-plugin setup --harness ${options.harness}`)
       // Install never opens a browser. Skills are still installed; MCP servers
       // are configured only after the user runs `nsolid-plugin setup`.
     } else {
@@ -411,7 +411,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
       result.errors.push(`MCP configuration failed: ${pluginErr.message}`)
     }
   } else if (adapter.supportsMcp() && bundle.mcpServers.length > 0 && !canConfigureMcp) {
-    progress.step('MCP servers', 'skipped — run nsolid-plugin setup first')
+    progress.step('MCP servers', `skipped — run nsolid-plugin setup --harness ${options.harness} first`)
   } else if (bundle.mcpServers.length > 0) {
     result.errors.push(
       `Bundle defines ${bundle.mcpServers.length} MCP server(s) but harness "${options.harness}" does not support MCP — they were not installed`
