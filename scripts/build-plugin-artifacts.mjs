@@ -110,6 +110,11 @@ const HARNESSES = [
   },
 ]
 
+if (HARNESS_ARG && !HARNESSES.some((h) => h.id === HARNESS_ARG)) {
+  console.error(`Invalid harness: ${HARNESS_ARG}. Valid options: ${HARNESSES.map((h) => h.id).join(', ')}`)
+  process.exit(1)
+}
+
 const harnessesToBuild = HARNESS_ARG
   ? HARNESSES.filter((h) => h.id === HARNESS_ARG)
   : HARNESSES
@@ -310,8 +315,7 @@ function buildArchive (artifactDir, artifactName) {
   )
 
   if (result.status !== 0) {
-    console.error(`npm pack failed for ${artifactName}: ${result.stderr}`)
-    return
+    throw new Error(`npm pack failed for ${artifactName}: ${result.stderr}`)
   }
 
   // npm pack produces a file named like @nodesource-claude-plugin-0.1.0.tgz.
@@ -321,9 +325,10 @@ function buildArchive (artifactDir, artifactName) {
   const producedPath = path.join(ARTIFACTS_DIR, producedName)
   const targetPath = path.join(ARTIFACTS_DIR, `${artifactName}.tgz`)
 
-  if (existsSync(producedPath)) {
-    if (existsSync(targetPath)) rmSync(targetPath)
-    renameSync(producedPath, targetPath)
-    console.log(`Wrote ${path.relative(ROOT, targetPath)}`)
+  if (!existsSync(producedPath)) {
+    throw new Error(`npm pack produced no tarball at expected path: ${producedPath}`)
   }
+  if (existsSync(targetPath)) rmSync(targetPath)
+  renameSync(producedPath, targetPath)
+  console.log(`Wrote ${path.relative(ROOT, targetPath)}`)
 }

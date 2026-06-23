@@ -11,10 +11,10 @@
 
 import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const __dirname = path.dirname(new URL(import.meta.url).pathname)
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
-const BUNDLE_PATH = path.join(ROOT, 'bundle.json')
 
 export function loadBundle (root = ROOT) {
   return JSON.parse(readFileSync(path.join(root, 'bundle.json'), 'utf8'))
@@ -179,6 +179,7 @@ export function generateMcpConfig (wrapperPath, bundle) {
 }
 
 export function generateMcpWrapper (harness) {
+  const serverNames = [...defaultBundle.mcpServers.map((s) => s.name)]
   return `#!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
@@ -190,7 +191,7 @@ import { pathToFileURL } from 'node:url'
 
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
 
-const SERVER_NAMES = new Set(['nsolid-console', 'ns-benchmark', 'ncm'])
+const SERVER_NAMES = new Set(${JSON.stringify(serverNames)})
 const serverName = process.argv[2]
 
 if (!SERVER_NAMES.has(serverName)) {

@@ -71,11 +71,6 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
       logger?.warn('auth.server.csrf.mismatch', { receivedState: state })
       res.writeHead(400, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>Authentication failed</h1><p>Invalid state parameter.</p></body></html>')
-      if (!settled) {
-        settled = true
-        settledResult = { success: false, reason: 'auth-failed' }
-        resolveCallback?.(settledResult)
-      }
       return
     }
 

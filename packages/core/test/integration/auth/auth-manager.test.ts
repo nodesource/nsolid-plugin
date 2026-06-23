@@ -38,6 +38,20 @@ function getStateFromExecFileCall (): string {
   return getUrlFromExecFileCall().searchParams.get('state')!
 }
 
+async function pollForState (getStateFn: () => string, timeoutMs = 5000): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const state = getStateFn()
+      if (state) return state
+    } catch {
+      // not ready yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('OAuth state not ready within timeout')
+}
+
 function sendCallback (port: number, state: string, overrides?: Record<string, string>): Promise<void> {
   const params = new URLSearchParams({
     success: 'true',
@@ -154,8 +168,7 @@ describe('ensureAuthenticated', () => {
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
     const promise = ensureAuthenticated(authConfig)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    const state = getStateFromExecFileCall()
+    const state = await pollForState(getStateFromExecFileCall)
     await sendCallback(8767, state, {
       consoleId: 'org-456',
       url: 'https://org-456.staging.saas.nodesource.io',

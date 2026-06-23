@@ -252,7 +252,7 @@ function insertMcpBlockBeforeClosing (
 ): string {
   const outerCloseBrace = findOuterClosingBrace(raw)
   if (outerCloseBrace === -1) {
-    return JSON.stringify({ mcpServers }, null, 2) + '\n'
+    return JSON.stringify({ [jsonMcpKey]: mcpServers }, null, 2) + '\n'
   }
 
   const indent = detectIndent(raw, outerCloseBrace)
@@ -426,7 +426,9 @@ export async function writeMcpConfig (
   const info = getMcpConfigInfo(harness)
   const resolvedPath = options?.configPath ?? info?.configPath
   if (!resolvedPath) return
-  const format = info?.format ?? formatFromPath(resolvedPath)
+  const format = options?.configPath
+    ? formatFromPath(resolvedPath)
+    : (info?.format ?? formatFromPath(resolvedPath))
   const jsonMcpKey = info?.jsonMcpKey ?? 'mcpServers'
 
   let resolvedServers = servers
@@ -463,7 +465,9 @@ export async function removeMcpConfig (
   const resolvedPath = options?.configPath ?? info?.configPath
   if (!resolvedPath) return
   if (!existsSync(resolvedPath)) return
-  const format = info?.format ?? formatFromPath(resolvedPath)
+  const format = options?.configPath
+    ? formatFromPath(resolvedPath)
+    : (info?.format ?? formatFromPath(resolvedPath))
   const jsonMcpKey = info?.jsonMcpKey ?? 'mcpServers'
 
   const existing = readExistingConfig(resolvedPath, format, jsonMcpKey)

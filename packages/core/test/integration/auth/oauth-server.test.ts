@@ -160,28 +160,45 @@ describe('oauth-server', () => {
     }
   })
 
-  it('settles auth-failed immediately on a state-mismatch callback', async () => {
+  it('does not settle on state mismatch — ignores wrong-state callback and waits for the real one', async () => {
     const { startOAuthServer } = await import('../../../src/auth/oauth-server.js')
     const server = await startOAuthServer(undefined, 'expected-state')
     cleanup.push(() => server.close())
 
     const callbackPromise = server.waitForCallback()
 
-    const params = new URLSearchParams({
+    // Send a wrong-state request — should be rejected (400) but NOT settle
+    const badParams = new URLSearchParams({
       success: 'true',
-      token: 'test-token',
+      token: 'bad-token',
       consoleId: 'org-123',
-      NSOLID_SAAS: 'test-saas-token',
+      NSOLID_SAAS: 'bad-saas-token',
       url: 'https://test.saas.nodesource.io',
       state: 'wrong-state',
     })
-    const response = await fetch(`http://127.0.0.1:${server.port}/?${params}`)
-    assert.strictEqual(response.status, 400)
+    const badResponse = await fetch(`http://127.0.0.1:${server.port}/?${badParams}`)
+    assert.strictEqual(badResponse.status, 400)
 
-    const result = await Promise.race([callbackPromise, timeout(1000)])
-    assert.ok(!result.success)
-    if (!result.success) {
-      assert.strictEqual(result.reason, 'auth-failed')
+    // Callback should NOT have settled — verify with a short timeout
+    await assert.rejects(Promise.race([callbackPromise, timeout(50)]), /timed out/)
+
+    // Send the correct callback — should succeed
+    const goodParams = new URLSearchParams({
+      success: 'true',
+      token: 'real-token',
+      consoleId: 'org-456',
+      NSOLID_SAAS: 'real-saas-token',
+      url: 'https://test.saas.nodesource.io',
+      state: 'expected-state',
+    })
+    const goodResponse = await fetch(`http://127.0.0.1:${server.port}/?${goodParams}`)
+    assert.strictEqual(goodResponse.status, 200)
+
+    const result = await callbackPromise
+    assert.ok(result.success)
+    if (result.success) {
+      assert.strictEqual(result.token, 'real-token')
+      assert.strictEqual(result.consoleId, 'org-456')
     }
   })
 

@@ -318,6 +318,35 @@ describe('install()', () => {
     assert.strictEqual(piServer.auth, false)
   })
 
+  it('skips MCP config when credentials are missing and bundle has auth', async () => {
+    const { install } = await import('../../src/index.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+
+    const result = await install({ harness: 'claude', bundlePath, skillsSource })
+
+    assert.strictEqual(result.hadToAuthenticate, true)
+    assert.deepStrictEqual(result.mcpServersConfigured, [])
+    const configPath = join(tmpDir, '.claude.json')
+    if (existsSync(configPath)) {
+      const { readJsonFile } = await import('../../src/utils/config.js')
+      const config = readJsonFile<Record<string, unknown>>(configPath)
+      const servers = config?.mcpServers as Record<string, { url?: string }> | undefined
+      assert.ok(!servers || !servers['nsolid-console'],
+        'MCP server with placeholders must not be written')
+    }
+  })
+
   it('returns error when bundle not found', async () => {
     const { install } = await import('../../src/index.js')
 
@@ -712,6 +741,29 @@ describe('doctor()', () => {
     assert.strictEqual(report.mcpServers.status, 'unreachable')
     assert.deepStrictEqual(report.mcpServers.reachable, [])
     assert.ok(report.mcpServers.unreachable.includes('ns-test-mcp'))
+  })
+
+  it('detects Pi package-owned skills from installed package settings', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    const packageRoot = join(tmpDir, 'pi-package')
+    mkdirSync(join(packageRoot, 'skills', 'ns-test-skill'), { recursive: true })
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+      name: '@nodesource/pi-plugin',
+      pi: { skills: ['./skills'] },
+    }))
+    writeFileSync(join(packageRoot, 'skills', 'ns-test-skill', 'SKILL.md'), '# ns-test-skill')
+    mkdirSync(join(tmpDir, '.pi', 'agent'), { recursive: true })
+    writeFileSync(join(tmpDir, '.pi', 'agent', 'settings.json'), JSON.stringify({
+      packages: [packageRoot],
+    }))
+
+    const report = await doctor('pi', bundlePath)
+
+    assert.strictEqual(report.skills.status, 'ok')
+    assert.deepStrictEqual(report.skills.installed, ['ns-test-skill'])
+    assert.deepStrictEqual(report.skills.missing, [])
   })
 
   it('reports errors when bundle path is invalid', async () => {

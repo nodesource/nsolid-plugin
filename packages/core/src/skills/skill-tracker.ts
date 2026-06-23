@@ -9,6 +9,7 @@ import { formatPluginError, toPluginError } from '../errors.js'
 export interface SkillTrackingEntry {
   name: string;
   path: string;
+  paths?: Record<string, string>;
   installedAt: string;
   harnesses: string[];
 }
@@ -67,10 +68,12 @@ export async function addTrackedSkills (
       harnessSet.add(harness)
       existing.harnesses = [...harnessSet]
       existing.path = normalizedPath
+      existing.paths = { ...(existing.paths ?? {}), [harness]: normalizedPath }
     } else {
       tracking.skills.push({
         name: skill.name,
         path: normalizedPath,
+        paths: { [harness]: normalizedPath },
         installedAt: now,
         harnesses: [harness],
       })

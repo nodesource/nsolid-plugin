@@ -2,6 +2,7 @@ export { getAdapter } from './harnesses/index.js'
 export type { HarnessAdapter, McpConfig, McpServerConfig } from './harnesses/index.js'
 export { loadCredentials, isExpired } from './auth/index.js'
 
+import os from 'node:os'
 import path from 'node:path'
 import { readdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -46,6 +47,7 @@ import { toPluginError } from './errors.js'
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
 const STAGING_ACCOUNTS_URL = 'https://staging.accounts.nodesource.com'
 const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
+const PI_PLUGIN_PACKAGE_NAME = '@nodesource/pi-plugin'
 
 function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedSkills?: boolean }): string {
   if (options.packageOwnedSkills === true) {
@@ -53,6 +55,90 @@ function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedS
   }
 
   return `${bundle.skills.length} skills, ${bundle.mcpServers.length} MCP servers`
+}
+
+function readPiPackageSourceEntries (settingsPath: string): string[] {
+  let settings: { packages?: Array<string | { source?: string }> } | null = null
+  try {
+    settings = readJsonFile<{ packages?: Array<string | { source?: string }> }>(settingsPath)
+  } catch {
+    return []
+  }
+  if (!settings || !Array.isArray(settings.packages)) return []
+
+  return settings.packages
+    .map((entry) => typeof entry === 'string' ? entry : entry.source)
+    .filter((source): source is string => typeof source === 'string' && source.length > 0)
+}
+
+function packageNameFromNpmSource (source: string): string | null {
+  if (!source.startsWith('npm:')) return null
+  const spec = source.slice('npm:'.length)
+  if (spec.startsWith('@')) {
+    const [scope, name] = spec.split('/')
+    if (!scope || !name) return null
+    return `${scope}/${name.split('@')[0]}`
+  }
+  return spec.split('@')[0] || null
+}
+
+function resolvePiPackageRootFromSource (source: string, settingsDir: string): string | null {
+  const npmPackageName = packageNameFromNpmSource(source)
+  if (npmPackageName) {
+    if (npmPackageName !== PI_PLUGIN_PACKAGE_NAME) return null
+    return path.join(settingsDir, 'npm', 'node_modules', PI_PLUGIN_PACKAGE_NAME)
+  }
+
+  if (source.startsWith('git:') || source.startsWith('http://') || source.startsWith('https://') || source.startsWith('ssh://')) {
+    return null
+  }
+
+  return path.resolve(settingsDir, source)
+}
+
+function findPiPluginPackageRoots (): string[] {
+  const settingsPaths = [
+    path.join(os.homedir(), '.pi', 'agent', 'settings.json'),
+    path.resolve('.pi', 'settings.json'),
+  ]
+  const roots = new Set<string>()
+
+  for (const settingsPath of settingsPaths) {
+    const settingsDir = path.dirname(settingsPath)
+    for (const source of readPiPackageSourceEntries(settingsPath)) {
+      const root = resolvePiPackageRootFromSource(source, settingsDir)
+      if (root) roots.add(root)
+    }
+  }
+
+  roots.add(path.join(os.homedir(), '.pi', 'agent', 'npm', 'node_modules', PI_PLUGIN_PACKAGE_NAME))
+  return [...roots]
+}
+
+function findPiPluginSkillRoots (): string[] {
+  const skillRoots: string[] = []
+  for (const packageRoot of findPiPluginPackageRoots()) {
+    const pkgPath = path.join(packageRoot, 'package.json')
+    let pkg: { name?: string; pi?: { skills?: string[] } } | null = null
+    try {
+      pkg = readJsonFile<{ name?: string; pi?: { skills?: string[] } }>(pkgPath)
+    } catch {
+      continue
+    }
+    if (pkg?.name !== PI_PLUGIN_PACKAGE_NAME) continue
+
+    const configuredSkillRoots = Array.isArray(pkg.pi?.skills) && pkg.pi.skills.length > 0
+      ? pkg.pi.skills
+      : ['./skills']
+    for (const skillRoot of configuredSkillRoots) {
+      skillRoots.push(path.resolve(packageRoot, skillRoot))
+    }
+  }
+  return skillRoots
+}
+
+function piPackageSkillExists (skillName: string): boolean {
+  return findPiPluginSkillRoots().some((skillRoot) => existsSync(path.join(skillRoot, skillName, 'SKILL.md')))
 }
 
 async function shouldShowInitialInstallProgress (
@@ -243,6 +329,8 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     }
   }
 
+  const canConfigureMcp = !bundle.auth || (!!credentials && !isExpired(credentials))
+
   let linkedSkills: typeof bundle.skills = []
   let trackedSkillsDir: string | undefined
   if (options.packageOwnedSkills === true) {
@@ -292,7 +380,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   }
 
   const variables: Record<string, string> = {}
-  if (credentials) {
+  if (credentials && canConfigureMcp) {
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
     const derivedMcpUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
@@ -306,7 +394,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
 
   const mcpConfigPath = adapter.getMcpConfigPath()
 
-  if (adapter.supportsMcp() && bundle.mcpServers.length > 0) {
+  if (adapter.supportsMcp() && bundle.mcpServers.length > 0 && canConfigureMcp) {
     try {
       await writeMcpConfig(options.harness, bundle.mcpServers, variables, {
         configPath: mcpConfigPath ?? undefined,
@@ -320,6 +408,8 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
       const pluginErr = toPluginError(err, 'MCP_CONFIG_WRITE_FAILED', { harness: options.harness, path: mcpConfigPath ?? undefined })
       result.errors.push(`MCP configuration failed: ${pluginErr.message}`)
     }
+  } else if (adapter.supportsMcp() && bundle.mcpServers.length > 0 && !canConfigureMcp) {
+    progress.step('MCP servers', 'skipped — run nsolid-plugin setup first')
   } else if (bundle.mcpServers.length > 0) {
     result.errors.push(
       `Bundle defines ${bundle.mcpServers.length} MCP server(s) but harness "${options.harness}" does not support MCP — they were not installed`
@@ -600,13 +690,14 @@ export async function doctor (
     for (const skill of bundle.skills) {
       const tracked = trackedByName.get(skill.name)
       const inTracking = tracked !== undefined
-      const diskPath = tracked?.path ?? path.join(skillsDirForHarness, skill.name)
+      const diskPath = tracked?.paths?.[harness] ?? tracked?.path ?? path.join(skillsDirForHarness, skill.name)
       const onDisk = existsSync(diskPath)
-      if (inTracking || onDisk) {
+      const inPiPackage = harness === 'pi' && piPackageSkillExists(skill.name)
+      if (inTracking || onDisk || inPiPackage) {
         report.skills.installed.push(skill.name)
-        if (inTracking && !onDisk) {
+        if (!inPiPackage && inTracking && !onDisk) {
           report.errors.push(`Skill "${skill.name}" tracked but not on disk — tracking may be stale`)
-        } else if (onDisk && !inTracking) {
+        } else if (!inPiPackage && onDisk && !inTracking) {
           report.errors.push(`Skill "${skill.name}" on disk but not tracked — tracking may be stale`)
         }
       } else {

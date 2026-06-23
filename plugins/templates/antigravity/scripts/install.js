@@ -34,8 +34,8 @@ for (const asset of PLUGIN_OWNED_ASSETS) {
   const src = join(pluginDir, asset)
   const dst = join(targetDir, asset)
   if (!existsSync(src)) {
-    console.warn(`  skipping missing asset: ${asset}`)
-    continue
+    console.error(`  missing required asset: ${asset}`)
+    process.exit(1)
   }
   cpSync(src, dst, { recursive: true, dereference: true })
   console.log(`  copied ${asset}`)
@@ -89,9 +89,9 @@ function installMcpRuntimeDependencies (pluginDir, targetDir) {
   )
 
   if (result.status !== 0) {
-    console.warn('  npm install MCP runtime dependencies failed; wrapper may not resolve dependencies')
-    if (result.stderr) console.warn(result.stderr.trim())
-    return
+    console.error('  npm install MCP runtime dependencies failed')
+    if (result.stderr) console.error(result.stderr.trim())
+    process.exit(1)
   }
 
   console.log('  installed MCP runtime dependencies')
