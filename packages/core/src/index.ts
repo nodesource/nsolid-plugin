@@ -384,11 +384,13 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
     const derivedMcpUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
-    if (!credentials.mcpUrl && !derivedMcpUrl) {
+    const explicitMcpUrl = credentials.mcpUrl || undefined
+    const mcpUrl = explicitMcpUrl ?? derivedMcpUrl
+    if (!mcpUrl) {
       result.errors.push('Could not derive MCP URL from console URL pattern')
       return result
     }
-    variables.MCP_URL = derivedMcpUrl ?? credentials.mcpUrl
+    variables.MCP_URL = mcpUrl
     logger.debug('install.variables.derived', { orgId: credentials.organizationId })
   }
 

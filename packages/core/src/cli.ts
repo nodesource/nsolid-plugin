@@ -45,10 +45,8 @@ function harnessPromptLabel (harness: HarnessType, command: string): string {
   return base
 }
 
-function promptHarnessChoices (command: string): HarnessType[] {
-  return command === 'install'
-    ? HARNESS_VALUES.filter((value) => value !== 'pi')
-    : [...HARNESS_VALUES]
+function promptHarnessChoices (): HarnessType[] {
+  return [...HARNESS_VALUES]
 }
 
 function printUsage (): void {
@@ -96,7 +94,7 @@ function createPrompt () {
 async function promptForHarnesses (command: string, multiple: boolean): Promise<HarnessType[]> {
   const stdin = process.stdin
   const wasRaw = stdin.isRaw
-  const choices = promptHarnessChoices(command)
+  const choices = promptHarnessChoices()
   const selected = new Set<HarnessType>([choices[0]])
   const action = promptActionLabel(command)
   let cursor = 0
@@ -122,7 +120,7 @@ async function promptForHarnesses (command: string, multiple: boolean): Promise<
         return `  ${pointer} ${marker} ${harnessPromptLabel(value, command)}`
       }),
       ...(command === 'install'
-        ? ['', 'Pi is package-owned: use `pi install ...` for skills and `nsolid-plugin setup --harness pi` for MCP config.']
+        ? ['', 'Pi is package-owned: use `pi install ...` for skills; this installer only writes MCP config.']
         : []),
       '',
       multiple

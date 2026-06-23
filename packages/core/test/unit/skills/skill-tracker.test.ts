@@ -80,6 +80,30 @@ describe('addTrackedSkills', () => {
     assert.deepStrictEqual(entry!.harnesses, ['claude', 'codex'])
   })
 
+  it('backfills per-harness paths without overwriting an existing shared path', async () => {
+    const { addTrackedSkills, readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+    const { getTrackingFilePath } = await import('../../../src/utils/path.js')
+    const sharedDir = join(tmpDir, 'shared-skills')
+    const opencodeDir = join(tmpDir, 'opencode-skills')
+
+    await addTrackedSkills([skills[0]], 'claude', undefined, sharedDir)
+
+    const legacyTracking = await readTrackingFile()
+    delete legacyTracking!.skills[0].paths
+    writeFileSync(getTrackingFilePath(), JSON.stringify(legacyTracking, null, 2))
+
+    await addTrackedSkills([skills[0]], 'opencode', undefined, opencodeDir)
+
+    const tracking = await readTrackingFile()
+    const entry = tracking!.skills.find((s) => s.name === 'ns-analyze-cpu')!
+    assert.deepStrictEqual(entry.harnesses, ['claude', 'opencode'])
+    assert.strictEqual(entry.path, join(sharedDir, 'ns-analyze-cpu'))
+    assert.deepStrictEqual(entry.paths, {
+      claude: join(sharedDir, 'ns-analyze-cpu'),
+      opencode: join(opencodeDir, 'ns-analyze-cpu'),
+    })
+  })
+
   it('does not duplicate harness entries', async () => {
     const { addTrackedSkills, readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
 
@@ -123,6 +147,22 @@ describe('removeTrackedSkills', () => {
     const tracking = await readTrackingFile()
     const entry = tracking!.skills.find((s) => s.name === 'ns-analyze-cpu')
     assert.deepStrictEqual(entry!.harnesses, ['codex'])
+  })
+
+  it('removes per-harness path and keeps legacy path aligned with remaining harness', async () => {
+    const { addTrackedSkills, removeTrackedSkills, readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+    const sharedDir = join(tmpDir, 'shared-skills')
+    const opencodeDir = join(tmpDir, 'opencode-skills')
+
+    await addTrackedSkills([skills[0]], 'claude', undefined, sharedDir)
+    await addTrackedSkills([skills[0]], 'opencode', undefined, opencodeDir)
+    await removeTrackedSkills([skills[0]], 'claude')
+
+    const tracking = await readTrackingFile()
+    const entry = tracking!.skills.find((s) => s.name === 'ns-analyze-cpu')!
+    assert.deepStrictEqual(entry.harnesses, ['opencode'])
+    assert.strictEqual(entry.path, join(opencodeDir, 'ns-analyze-cpu'))
+    assert.deepStrictEqual(entry.paths, { opencode: join(opencodeDir, 'ns-analyze-cpu') })
   })
 
   it('removes entire entry when last harness removed', async () => {

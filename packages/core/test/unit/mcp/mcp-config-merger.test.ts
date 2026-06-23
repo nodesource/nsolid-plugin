@@ -55,6 +55,36 @@ describe('mergeMcpConfig', () => {
     assert.strictEqual(result.mcpServers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
   })
 
+  it('preserves extended server fields and headers when upserting', async () => {
+    const { mergeMcpConfig } = await import('../../../src/mcp/mcp-config-merger.js')
+
+    const existing = {
+      mcpServers: {
+        'ns-benchmark': {
+          url: 'https://old-url.example.com',
+          headers: { 'X-Nsolid-Service-Token': 'old-token', 'X-Custom': 'keep' },
+          type: 'stdio',
+          command: 'node',
+          args: ['server.js'],
+          env: { NODE_ENV: 'test' },
+          customField: true,
+        },
+      },
+    }
+
+    const result = mergeMcpConfig(existing, [serverA])
+    const server = result.mcpServers['ns-benchmark']
+
+    assert.strictEqual(server.url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
+    assert.strictEqual(server.headers['X-Nsolid-Service-Token'], '${AUTH_TOKEN}')
+    assert.strictEqual(server.headers['X-Custom'], 'keep')
+    assert.strictEqual(server.type, 'stdio')
+    assert.strictEqual(server.command, 'node')
+    assert.deepStrictEqual(server.args, ['server.js'])
+    assert.deepStrictEqual(server.env, { NODE_ENV: 'test' })
+    assert.strictEqual(server.customField, true)
+  })
+
   it('handles mixed scenario (preserves and updates)', async () => {
     const { mergeMcpConfig } = await import('../../../src/mcp/mcp-config-merger.js')
 

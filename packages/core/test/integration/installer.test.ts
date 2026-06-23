@@ -262,7 +262,7 @@ describe('install()', () => {
     assert.strictEqual(piServer.auth, false)
   })
 
-  it('derives staging console MCP URL without appending /mcp', async () => {
+  it('prefers stored explicit MCP URL over derived console URL', async () => {
     const { install } = await import('../../src/index.js')
     const { readJsonFile } = await import('../../src/utils/config.js')
     const bundle = createBundle({
@@ -279,9 +279,37 @@ describe('install()', () => {
     const skillsSource = createSkillSource('ns-test-skill')
     seedCredentials({
       consoleUrl: 'https://test-org.staging.saas.nodesource.io',
-      // Existing credentials may have been saved before staging MCP derivation
-      // was fixed; install should prefer the console-derived host.
-      mcpUrl: 'https://test-org.mcp.saas.nodesource.io',
+      mcpUrl: 'https://custom-mcp.example.com/entry',
+    })
+
+    const result = await install({ harness: 'claude', bundlePath, skillsSource })
+
+    assert.strictEqual(result.success, true)
+    const claudeConfig = readJsonFile<Record<string, unknown>>(join(tmpDir, '.claude.json'))
+    assert.ok(claudeConfig?.mcpServers && typeof claudeConfig.mcpServers === 'object')
+    const servers = claudeConfig.mcpServers as Record<string, { type?: string; url?: string }>
+    assert.strictEqual(servers['nsolid-console'].type, 'http')
+    assert.strictEqual(servers['nsolid-console'].url, 'https://custom-mcp.example.com/entry')
+  })
+
+  it('derives staging console MCP URL without appending /mcp when no explicit MCP URL is stored', async () => {
+    const { install } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({
+      consoleUrl: 'https://test-org.staging.saas.nodesource.io',
+      mcpUrl: '',
     })
 
     const result = await install({ harness: 'claude', bundlePath, skillsSource })

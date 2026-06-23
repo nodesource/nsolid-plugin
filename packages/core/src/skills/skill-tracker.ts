@@ -64,11 +64,18 @@ export async function addTrackedSkills (
     const existing = tracking.skills.find((s) => s.name === skill.name)
 
     if (existing) {
-      const harnessSet = new Set(existing.harnesses)
+      const previousHarnesses = existing.harnesses
+      const previousPaths = { ...(existing.paths ?? {}) }
+      for (const trackedHarness of previousHarnesses) {
+        previousPaths[trackedHarness] ??= existing.path
+      }
+      const harnessSet = new Set(previousHarnesses)
       harnessSet.add(harness)
       existing.harnesses = [...harnessSet]
-      existing.path = normalizedPath
-      existing.paths = { ...(existing.paths ?? {}), [harness]: normalizedPath }
+      existing.paths = { ...previousPaths, [harness]: normalizedPath }
+      if (previousHarnesses.length === 1 && previousHarnesses[0] === harness) {
+        existing.path = normalizedPath
+      }
     } else {
       tracking.skills.push({
         name: skill.name,
@@ -97,8 +104,11 @@ export async function removeTrackedSkills (
 
     if (harness) {
       entry.harnesses = entry.harnesses.filter((h) => h !== harness)
+      if (entry.paths) delete entry.paths[harness]
       if (entry.harnesses.length === 0) {
         tracking.skills = tracking.skills.filter((s) => s.name !== skill.name)
+      } else {
+        entry.path = entry.paths?.[entry.harnesses[0]] ?? entry.path
       }
     } else {
       tracking.skills = tracking.skills.filter((s) => s.name !== skill.name)

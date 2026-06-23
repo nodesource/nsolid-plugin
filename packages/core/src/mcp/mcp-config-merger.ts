@@ -21,11 +21,14 @@ export function mergeMcpConfig (
   const merged: Record<string, McpServerConfig> = { ...existing.mcpServers }
 
   for (const server of newServers) {
-    const { command, args, env, type, ...preserved } = merged[server.name] ?? {}
+    const existingServer = merged[server.name]
     merged[server.name] = {
-      ...preserved,
+      ...existingServer,
       url: server.url,
-      headers: { ...server.headers },
+      headers: {
+        ...(existingServer?.headers ?? {}),
+        ...server.headers,
+      },
     }
   }
 

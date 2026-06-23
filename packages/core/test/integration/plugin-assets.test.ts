@@ -62,6 +62,7 @@ function copyTemplates (root: string): void {
 
 function runSync (root: string, args: string[] = []): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [SYNC_SCRIPT, ...args], {
+    cwd: root,
     env: { ...process.env, NSOLID_PLUGIN_SYNC_ROOT: root },
     encoding: 'utf-8',
   })
@@ -69,6 +70,7 @@ function runSync (root: string, args: string[] = []): ReturnType<typeof spawnSyn
 
 function runArtifacts (root: string, args: string[] = []): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [ARTIFACT_SCRIPT, ...args], {
+    cwd: root,
     env: { ...process.env, NSOLID_PLUGIN_ARTIFACTS_ROOT: root },
     encoding: 'utf-8',
   })
