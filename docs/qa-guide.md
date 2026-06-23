@@ -2,6 +2,8 @@
 
 Use from the repository root. Commands are macOS/Linux shell commands unless noted.
 
+This guide is local/pre-release QA first. Production/release-artifact variants are included where useful, but the default path is to build and install from this checkout.
+
 ## 0. Prerequisites
 
 ```bash
@@ -40,8 +42,16 @@ Expected: every command exits `0`.
 
 ## 2. Plugin artifact QA inputs
 
-Production QA should use released plugin artifacts, not source package directories.
-A release should provide one archive per native plugin-owned harness:
+For local pre-release QA, generate the release-shaped plugin artifacts from this repo and install those generated directories:
+
+```bash
+pnpm plugin:artifacts
+export CLAUDE_PLUGIN_ARTIFACT="$(pwd)/dist/plugins/claude/nsolid-plugin"
+export CODEX_PLUGIN_ARTIFACT="$(pwd)/dist/plugins/codex/nsolid-plugin"
+export ANTIGRAVITY_PLUGIN_ARTIFACT="$(pwd)/dist/plugins/antigravity/nsolid-plugin"
+```
+
+For production/release QA, use released plugin artifacts, not source package directories. A release should provide one archive per native plugin-owned harness:
 
 ```text
 nsolid-claude-plugin.tgz       # plugin root contains .claude-plugin/{plugin,marketplace}.json, .mcp.json, scripts/, skills/
@@ -49,13 +59,7 @@ nsolid-codex-plugin.tgz        # plugin root contains .codex-plugin/plugin.json,
 nsolid-antigravity-plugin.tgz  # plugin root contains plugin.json, mcp_config.json, scripts/, skills/
 ```
 
-For local pre-release QA, generate the same artifact shape from this repo:
-
-```bash
-pnpm plugin:artifacts
-```
-
-Set the paths QA will install from. For production, extract the downloaded archives into plugin-root directories:
+Extract the downloaded archives into plugin-root directories and point QA at them:
 
 ```bash
 export ARTIFACT_DIR="$(mktemp -d -t nsolid-plugin-artifacts-XXXXXX)"
@@ -66,14 +70,6 @@ tar -xzf /path/to/nsolid-antigravity-plugin.tgz -C "$ARTIFACT_DIR/antigravity" -
 export CLAUDE_PLUGIN_ARTIFACT="$ARTIFACT_DIR/claude"
 export CODEX_PLUGIN_ARTIFACT="$ARTIFACT_DIR/codex"
 export ANTIGRAVITY_PLUGIN_ARTIFACT="$ARTIFACT_DIR/antigravity"
-```
-
-For local pre-release QA, use the generated equivalents:
-
-```bash
-export CLAUDE_PLUGIN_ARTIFACT="$(pwd)/dist/plugins/claude/nsolid-plugin"
-export CODEX_PLUGIN_ARTIFACT="$(pwd)/dist/plugins/codex/nsolid-plugin"
-export ANTIGRAVITY_PLUGIN_ARTIFACT="$(pwd)/dist/plugins/antigravity/nsolid-plugin"
 ```
 
 Validate the selected artifacts:
@@ -159,7 +155,7 @@ for h in claude codex antigravity opencode pi; do
 done
 ```
 
-Expected: no browser opens. Missing auth should print a setup instruction, not start OAuth.
+Expected: no browser opens. Missing auth should print `nsolid-plugin setup --harness <harness>`, not start OAuth.
 
 Required end-of-step cleanup before continuing. This removes fallback user-level MCP entries so native plugin QA does not show duplicate MCP servers:
 
@@ -326,7 +322,7 @@ $CLI uninstall --harness antigravity --keep-credentials || true
 
 ## 10. Pi package install QA
 
-Production accounts:
+Local pre-release package QA with production accounts:
 
 ```bash
 export HOME="$REAL_HOME"
@@ -335,26 +331,42 @@ find "$HOME/.pi/agent/skills" "$HOME/.agents/skills" -maxdepth 1 -name 'ns-*' -e
 pnpm plugin:materialize
 pi install ./packages/pi-plugin --no-approve
 $CLI setup --harness pi --yes
+pi install npm:pi-mcp-adapter
 $CLI doctor --harness pi || true
 ```
 
-Staging accounts:
+Local pre-release package QA with staging accounts:
 
 ```bash
 export HOME="$REAL_HOME"
 $CLI uninstall --harness pi --keep-credentials || true
+find "$HOME/.pi/agent/skills" "$HOME/.agents/skills" -maxdepth 1 -name 'ns-*' -exec rm -rf {} + 2>/dev/null || true
 pnpm plugin:materialize
 pi install ./packages/pi-plugin --no-approve
 $CLI setup --harness pi --yes --staging
+pi install npm:pi-mcp-adapter
+$CLI doctor --harness pi || true
+```
+
+Production package QA uses the published Pi package instead of the local package directory:
+
+```bash
+export HOME="$REAL_HOME"
+$CLI uninstall --harness pi --keep-credentials || true
+find "$HOME/.pi/agent/skills" "$HOME/.agents/skills" -maxdepth 1 -name 'ns-*' -exec rm -rf {} + 2>/dev/null || true
+pi install npm:@nodesource/pi-plugin
+$CLI setup --harness pi --yes
+pi install npm:pi-mcp-adapter
 $CLI doctor --harness pi || true
 ```
 
 Expected:
-- Pi package installs.
+- Pi package installs from npm for production QA or from `./packages/pi-plugin` for local pre-release QA.
 - Pi package activation is side-effect free: no browser, no user-level skill copy, no MCP config write.
 - `setup` is the only step that may open browser.
 - Pi `setup` writes/refreshes MCP config but skips user-level skill copies because the Pi package owns skills.
-- `packages/pi-plugin/skills/` exists only after materialization/pack steps.
+- `pi-mcp-adapter` is installed so Pi can read `~/.pi/agent/mcp.json` and expose MCP-backed package skills.
+- `packages/pi-plugin/skills/` exists only after local materialization/pack steps.
 - Pi should not report N|Solid skill conflicts from stale fallback copies in `~/.pi/agent/skills` or `~/.agents/skills`.
 - `~/.pi/agent/mcp.json` NodeSource entries include `"auth": false` so `pi-mcp-adapter` does not attempt OAuth dynamic registration; authentication uses the NodeSource service-token headers written by setup.
 
@@ -371,9 +383,9 @@ $CLI uninstall --harness pi --keep-credentials || true
 pnpm plugin:clean
 ```
 
-## 11. OpenCode fallback install QA
+## 11. OpenCode CLI-only install QA
 
-OpenCode is fallback/direct-install only.
+OpenCode is CLI-only. `setup --harness opencode` is the primary onboarding command because it authenticates and then performs the direct install; `install --harness opencode` is a no-browser fallback/repair path.
 
 Production accounts:
 
