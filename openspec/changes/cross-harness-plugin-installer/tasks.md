@@ -1,5 +1,24 @@
 # Tasks
 
+> **Amendment (2026-06-24):** The distribution model changed after validation.
+> Tasks describing the **generated-artifact** flow (`scripts/build-plugin-artifacts.mjs`,
+> `plugins/templates/`, `dist/plugins/`, `.tgz` archives, `pnpm plugin:artifacts`) are
+> **superseded**. Claude/Codex/Antigravity now install from the **GitHub repository root**
+> via committed manifests materialized by `scripts/materialize-github-marketplace.mjs`
+> (`pnpm plugin:root`). See `design.md` (Architecture, Deployment Order) and
+> `proposal.md` (Proposed Solution) for the current model. The completed tasks below are
+> retained as a historical record of what was built; only the distribution mechanism
+> changed — auth, fallback install, MCP config, skills, adapters, and uninstall logic
+> remain accurate.
+>
+> **Current distribution tasks (GitHub-root model):**
+> - [x] Commit root manifests: `.claude-plugin/{marketplace,plugin}.json`, `.codex-plugin/plugin.json`, `.agents/plugins/marketplace.json`, `plugin.json`, `mcp_config.json`, `.claude-mcp.json`, `.mcp.json`, `scripts/mcp-wrapper.js`.
+> - [x] Add `scripts/materialize-github-marketplace.mjs` (`pnpm plugin:root`) and regenerate root manifests from `bundle.json`.
+> - [x] Remove `scripts/build-plugin-artifacts.mjs`, `plugins/templates/`, and the `dist/plugins` + `.tgz` generation flow.
+> - [x] Move canonical skills from `packages/core/skills/` to repository-root `skills/`.
+> - [x] Validate root plugin assets in `scripts/test-marketplace-install.js` (Claude/Codex/Antigravity/pi roots).
+> - [ ] Merge root manifests to the default branch so the GitHub URL resolves for end users.
+
 ## Phase 1: Project Setup and Core Infrastructure
 
 ### Task 1: Initialize monorepo structure ✓
@@ -232,7 +251,7 @@
   - `packages/core/src/index.ts`
   - `packages/core/scripts/check-bundle-sync.mjs`
   - `packages/core/package.json`
-- **Testing**: Run `pnpm --filter @nodesource/plugin-core bundle:check`. In a throwaway HOME, run `NSOLID_HARNESS=claude node packages/core/scripts/setup.mjs` and confirm MCP config has resolved absolute paths.
+- **Testing**: Run `pnpm --filter nsolid-plugin bundle:check`. In a throwaway HOME, run `NSOLID_HARNESS=claude node packages/core/scripts/setup.mjs` and confirm MCP config has resolved absolute paths.
 - **Spec reference**: Variable Expansion in design.md
 
 ### Task 22c: Create shared setup script ✓
@@ -322,7 +341,7 @@
 - **Files**:
   - `packages/core/src/cli.ts`
   - `packages/core/package.json` (add bin entry)
-- **Testing**: Run `npx @nodesource/plugin-core doctor --harness claude`. Verify output format and colors.
+- **Testing**: Run `npx nsolid-plugin doctor --harness claude`. Verify output format and colors.
 
 ### Task 31: Write README documentation ✓
 - [x] **Description**: Create comprehensive README.md with installation instructions for each marketplace, authentication flow explanation, troubleshooting guide, and development setup.
@@ -485,7 +504,7 @@ This phase supersedes the earlier source-package interpretation of Phase 7 for C
 - **Testing**: Dry run script, verify timing and clarity.
 
 ### Task 40: Final integration testing and bug fixes
-- **Description**: Perform end-to-end testing of generated native artifacts, the Pi package, and fallback direct install paths on clean systems (macOS, Linux, and Windows). Document and fix any issues found. Verify all acceptance criteria from proposal.md are met. Pay special attention to platform-specific behavior: path separators, symlink/junction behavior, file permissions, and atomic writes on Windows.
+- **Description**: Perform end-to-end testing of the GitHub-root plugin install (Claude/Codex/Antigravity), the Pi package, and fallback direct install paths on clean systems (macOS, Linux, and Windows). Document and fix any issues found. Verify all acceptance criteria from proposal.md are met. Pay special attention to platform-specific behavior: path separators, symlink/junction behavior, file permissions, and atomic writes on Windows.
 - **Depends on**: Tasks 23-32 and Phase 9b
 - **Files**:
   - Update any files with bug fixes

@@ -1,21 +1,27 @@
 # Installation Flow Specification
 
-## Scenario: Generated native artifacts are built
+## Scenario: Root marketplace/plugin manifests are materialized
 
 **Given** the repository is in source mode
-**When** the release process runs `pnpm plugin:artifacts`
-**Then** plugin directories are generated under `dist/plugins/{claude,codex,antigravity}/nsolid-plugin/`
-**And** archives are generated under `dist/artifacts/nsolid-{claude,codex,antigravity}-plugin.tgz`
-**And** each generated plugin contains all skills from `packages/core/skills/`
-**And** each generated plugin contains the harness manifest/config/wrapper files required by its native format
-**And** no generated artifact is committed to source control
+**When** the maintainer runs `pnpm plugin:root`
+**Then** the root manifests are (re)generated from `bundle.json` and committed at the repository root:
+- `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json`
+- `.agents/plugins/marketplace.json` and `.codex-plugin/plugin.json`
+- `plugin.json` and `mcp_config.json` (Antigravity)
+- `.claude-mcp.json` and `.mcp.json` (plugin-local MCP configs)
+- `scripts/mcp-wrapper.js` (shared MCP wrapper)
+**And** the materialization validates that every bundle skill exists at `skills/<name>/SKILL.md`
+**And** the root acts as a single installable plugin for Claude, Codex, and Antigravity (no `dist/plugins/` directories or `.tgz` archives are produced)
 
-## Scenario: Native plugin installation with no existing credentials
+## Scenario: Native plugin installation from the GitHub root with no existing credentials
 
 **Given** the user has not previously authenticated with NodeSource
 **And** no credentials exist at `~/.agents/.nodesource-auth.json`
-**When** the user installs a generated Claude, Codex, or Antigravity plugin artifact through the harness
-**Then** the harness stages plugin assets from the generated artifact
+**When** the user installs the plugin from the GitHub root through the harness
+- Claude: `claude plugin marketplace add NodeSource/nsolid-plugin` then `claude plugin install nsolid-plugin@nodesource`
+- Codex: `codex plugin marketplace add NodeSource/nsolid-plugin` then `codex plugin add nsolid-plugin@nodesource`
+- Antigravity: `agy plugin install https://github.com/NodeSource/nsolid-plugin.git` (or a `/tree/<branch>` URL for pre-merge QA)
+**Then** the harness clones/registers the root and stages plugin assets (skills, MCP config, wrapper) from it
 **And** no browser opens
 **And** no OAuth callback server starts
 **And** no credentials file is written
@@ -62,7 +68,7 @@
 
 ## Scenario: Installation failure during skill copy
 
-**Given** fallback installation or artifact generation has started
+**Given** fallback installation has started
 **When** skill copying fails (e.g., disk full, permission denied)
 **Then** the operation rolls back partially copied skills where possible
 **And** an error message is displayed with actionable guidance
@@ -159,7 +165,7 @@
 ## Scenario: Expired token during native install or fallback install
 
 **Given** credentials are missing or expired
-**When** a generated native install script, native artifact activation, Pi package activation, or fallback `install --harness` path runs
+**When** native plugin activation (GitHub-root install), Pi package activation, or fallback `install --harness` path runs
 **Then** the path does not open a browser
 **And** the output or runtime error tells the user to run `nsolid-plugin setup --harness <harness>`
 
@@ -171,7 +177,7 @@
 
 **Given** the plugin is installed natively or through fallback direct install
 **When** the user uninstalls through the harness UI/CLI or runs `nsolid-plugin uninstall --harness <harness>`
-**Then** native uninstall removes the generated plugin directory where the harness owns it
+**Then** native uninstall removes the staged plugin directory where the harness owns it
 **And** fallback uninstall reads `~/.agents/.nodesource-installed.json` when tracking exists
 **And** tracked NodeSource MCP entries are removed from harness configs
 **And** tracked NodeSource skill directories, symlinks, and copies are deleted from fallback harness-specific paths (`~/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, `~/.gemini/antigravity-cli/skills/`, `~/.pi/agent/skills/`)
@@ -239,8 +245,8 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 **When** the user runs the doctor command
 **Then** the check verifies:
 - Credentials exist and are valid when authenticated MCP servers are expected
-- All bundle skills exist in the relevant native artifact, Pi package, or fallback skill path
-- MCP configurations are present in the relevant native artifact or harness config
+- All bundle skills exist in the staged GitHub-root plugin, Pi package, or fallback skill path
+- MCP configurations are present in the staged plugin or harness config
 - MCP servers are reachable (health endpoint responds)
 **And** a green status is reported with summary
 
@@ -253,10 +259,10 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 
 ## Scenario: Missing skills
 
-**Given** some skills are missing from the native artifact, Pi package, or fallback skill path
+**Given** some skills are missing from the staged GitHub-root plugin, Pi package, or fallback skill path
 **When** doctor runs
 **Then** a yellow status lists missing skills
-**And** actionable fix: "Rebuild artifacts or re-run fallback installation to restore skills"
+**And** actionable fix: "Reinstall the plugin or re-run fallback installation to restore skills"
 
 ## Scenario: MCP server unreachable
 
@@ -267,25 +273,26 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 
 ## Scenario: Harness cannot discover skills
 
-**Given** skills exist in the native artifact, Pi package, or fallback skill path
+**Given** skills exist in the staged GitHub-root plugin, Pi package, or fallback skill path
 **When** harness skill discovery check fails
 **Then** a yellow status indicates discovery issue
-**And** actionable fix: "Restart harness, rebuild/reinstall the artifact, or check skill path configuration"
+**And** actionable fix: "Restart harness, reinstall the plugin, or check skill path configuration"
 
 ---
 
 # Per-Harness Configuration Mapping Specification
 
-## Scenario: Claude Code native artifact
+## Scenario: Claude Code GitHub-root plugin
 
-**Given** the generated Claude artifact exists
-**Then** it contains:
-- `.claude-plugin/plugin.json`
-- `.mcp.json` or equivalent plugin-local MCP config
+**Given** the root Claude marketplace and plugin manifests are committed
+**Then** the root contains:
+- `.claude-plugin/plugin.json` (lists `./skills/<name>` for every bundle skill and `mcpServers: "./.claude-mcp.json"`)
+- `.claude-plugin/marketplace.json` (marketplace `nodesource` whose single plugin `source: "./"` points at the root)
+- `.claude-mcp.json` (plugin-local MCP config referencing `scripts/mcp-wrapper.js`)
 - `scripts/mcp-wrapper.js`
 - `skills/<skill>/SKILL.md` for every bundle skill
-**And** the generated artifact does not contain startup/setup hooks or `scripts/setup.js`.
-**And** the artifact install does not write user-level `~/.claude/skills/` unless the user chooses fallback direct install.
+**And** the root does not contain startup/setup hooks or `scripts/setup.js`.
+**And** `claude plugin marketplace add NodeSource/nsolid-plugin` then `claude plugin install nsolid-plugin@nodesource` installs from the root without writing user-level `~/.claude/skills/` unless the user chooses fallback direct install.
 
 ## Scenario: Claude Code fallback configuration
 
@@ -294,17 +301,17 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 **Then** entries are merged into `~/.claude.json`
 **And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.claude/skills/`.
 
-## Scenario: Codex CLI native artifact
+## Scenario: Codex CLI GitHub-root plugin
 
-**Given** the generated Codex artifact exists
-**Then** it contains:
-- `.codex-plugin/plugin.json` with `skills: "./skills/"`
-- local marketplace metadata for `codex plugin marketplace add` flows
-- `.mcp.json` or equivalent plugin-local MCP config
+**Given** the root Codex marketplace and plugin manifests are committed
+**Then** the root contains:
+- `.codex-plugin/plugin.json` with `skills: "./skills/"` and `mcpServers: "./.mcp.json"`
+- `.agents/plugins/marketplace.json` (marketplace `nodesource` whose single plugin sources the root via `{ source: "local", path: "./" }`)
+- `.mcp.json` (plugin-local MCP config referencing `scripts/mcp-wrapper.js`)
 - `scripts/mcp-wrapper.js`
 - `skills/<skill>/SKILL.md` for every bundle skill
-**And** the generated artifact does not contain `hooks/hooks.json` or `scripts/setup.js`.
-**And** native install never launches auth/browser.
+**And** the root does not contain `hooks/hooks.json` or `scripts/setup.js`.
+**And** `codex plugin marketplace add NodeSource/nsolid-plugin` then `codex plugin add nsolid-plugin@nodesource` installs from the root without launching auth/browser.
 
 ## Scenario: Codex CLI fallback configuration
 
@@ -320,17 +327,16 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 **Then** entries are merged under the `mcp` key in `~/.config/opencode/opencode.jsonc`
 **And** skills are symlinked (Unix) or junction-linked/copied (Windows) to `~/.config/opencode/skills/`.
 
-## Scenario: Antigravity native artifact
+## Scenario: Antigravity GitHub-root plugin
 
-**Given** the generated Antigravity artifact exists
-**Then** it contains:
+**Given** the root Antigravity plugin manifest is committed
+**Then** the root contains:
 - `plugin.json`
-- `mcp_config.json`
-- `scripts/install.js`
+- `mcp_config.json` (referencing `scripts/mcp-wrapper.js`)
 - `scripts/mcp-wrapper.js`
 - `skills/<skill>/SKILL.md` for every bundle skill
-**And** the generated artifact does not contain `hooks.json` or `scripts/setup.js`.
-**And** `agy plugin install <artifact-or-dir>` stages the plugin under `~/.gemini/antigravity-cli/plugins/nsolid-plugin/`
+**And** the root does not contain `hooks.json` or `scripts/setup.js`.
+**And** `agy plugin install https://github.com/NodeSource/nsolid-plugin.git` stages the plugin under `~/.gemini/antigravity-cli/plugins/nsolid-plugin/`
 **And** native install does not launch auth/browser.
 
 ## Scenario: Antigravity fallback configuration
@@ -344,7 +350,7 @@ When no tracking file is present, the uninstaller scans only these predefined pa
 
 **Given** the user installs the Pi package
 **When** the package is packed or released
-**Then** `packages/pi-plugin/skills/` is materialized from `packages/core/skills/` for the package artifact
+**Then** `packages/pi-plugin/skills/` is materialized from the root `skills/` for the package artifact
 **And** source-mode cleanup removes materialized Pi skills after pack
 **And** Pi package activation is side-effect free: no browser auth, no user-level skill copy/link, and no MCP config write
 **When** the user runs `nsolid-plugin setup --harness pi`
