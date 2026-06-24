@@ -4,7 +4,7 @@
 
 The cross-harness plugin installer follows a **shared core + GitHub-root plugin + Pi package** architecture. The source tree keeps one canonical skill bundle at the repository root and one shared installer/runtime package. The repository root is itself the installable plugin for Claude, Codex, and Antigravity (a single GitHub URL works across all three, mirroring `addyosmani/agent-skills`); there are no generated `dist/plugins/` directories or `.tgz` archives. Pi remains a real package because Pi installs packages directly.
 
-```
+```text
 nsolid-plugin/
 ├── packages/
 │   ├── core/                    # Shared CLI, setup, fallback install, auth, MCP, skills
@@ -51,7 +51,7 @@ nsolid-plugin/
 5. **Auth/setup is separate from install**: Only explicit `nsolid-plugin setup` / `nsolid-plugin login` may open a browser. Native plugin installation (GitHub root), Pi package activation, and fallback `install --harness` must not launch auth.
 
 6. **Native install vs fallback install**:
-   - Native install places a generated harness plugin artifact where the harness can load it.
+   - Native install loads the plugin from the committed GitHub-root manifests (Claude/Codex/Antigravity): the harness clones/reads the repository root, which already contains `.claude-plugin/`, `.codex-plugin/`/`.agents/plugins/`, and `plugin.json`, so there is no build or artifact generation step.
    - Fallback install (`nsolid-plugin install --harness <harness>`) directly copies/links skills and writes MCP config for users without a viable native plugin path; Pi is the exception because its package owns skills, so CLI fallback/setup writes MCP config only.
    - Setup/auth (`nsolid-plugin setup --harness <harness>`) prepares credentials and any harness config that truly needs explicit setup.
 
@@ -492,7 +492,7 @@ X-Nsolid-Service-Token = "<token>"
 
 ### Root Manifest Materialization Sequence
 
-```
+```text
 ┌─────────────────────────────┐
 │ pnpm plugin:root            │
 └──────────────┬──────────────┘
@@ -522,7 +522,7 @@ X-Nsolid-Service-Token = "<token>"
 
 ### Native Plugin Install Sequence
 
-```
+```text
 ┌─────────────────────────────┐
 │ User installs from GitHub   │
 │ root (claude/codex/agy)     │
@@ -553,7 +553,7 @@ X-Nsolid-Service-Token = "<token>"
 
 ### Fallback Direct Install Sequence
 
-```
+```text
 ┌─────────────────────────────┐
 │ nsolid-plugin install       │
 │ --harness <harness>         │
@@ -589,7 +589,7 @@ X-Nsolid-Service-Token = "<token>"
 
 ### Setup/Auth Flow Sequence
 
-```
+```text
 ┌──────────┐
 │ setup/   │
 │ login    │
@@ -655,7 +655,7 @@ X-Nsolid-Service-Token = "<token>"
 
 ### Uninstall Sequence
 
-```
+```text
 ┌─────────────┐
 │  User runs  │
 │  native or  │
