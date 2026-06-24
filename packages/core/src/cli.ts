@@ -3,6 +3,7 @@
 import { parseArgs } from 'node:util'
 import { createInterface } from 'node:readline/promises'
 import path from 'node:path'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { install, setup, uninstall, logout, doctor, restore } from './index.js'
 import type { AuthConfirmation, HarnessType } from './types.js'
@@ -11,9 +12,6 @@ import { formatPluginError } from './errors.js'
 import { listConfigBackups } from './utils/backup.js'
 import { C, supportsColor } from './utils/format.js'
 import { createConsoleProgress, silentProgress } from './utils/progress.js'
-const CLAUDE_RELEASE_ARTIFACT_TARGET = '<nsolid-claude-plugin-root>'
-const CODEX_RELEASE_ARTIFACT_TARGET = '<nsolid-codex-plugin-root>'
-const ANTIGRAVITY_RELEASE_ARTIFACT_TARGET = '<nsolid-antigravity-plugin-root>'
 const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set<HarnessType>(['pi'])
 const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set<HarnessType>(['opencode'])
@@ -23,7 +21,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // bundle.json and skills/ ship at the package root (per package.json "files"),
 // not under dist/ — resolve up two levels to reach the package root.
 const CORE_PKG_ROOT = path.resolve(__dirname, '..', '..')
-const BUNDLE_PATH = path.join(CORE_PKG_ROOT, 'bundle.json')
+const REPO_ROOT = path.resolve(CORE_PKG_ROOT, '..', '..')
+const DEFAULT_SOURCE_ROOT = existsSync(path.join(REPO_ROOT, 'bundle.json')) && existsSync(path.join(REPO_ROOT, 'skills'))
+  ? REPO_ROOT
+  : CORE_PKG_ROOT
+const BUNDLE_PATH = path.join(DEFAULT_SOURCE_ROOT, 'bundle.json')
 
 const HARNESS_LABELS: Record<HarnessType, string> = {
   claude: 'Claude Code',
@@ -77,7 +79,7 @@ Options:
   --help                Show this help message
 
 Distribution notes:
-  Claude/Codex/Antigravity: native plugin artifacts are generated with pnpm plugin:artifacts; install is fallback-only.
+  Claude/Codex/Antigravity: install from the GitHub plugin root; setup is auth-only.
   Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
   OpenCode: use setup --harness opencode for auth + direct install; install is fallback/repair.
   Auth: only setup/login may open a browser.`)
@@ -256,7 +258,7 @@ async function main (): Promise<void> {
   const bundlePath = values.bundle ? path.resolve(values.bundle) : BUNDLE_PATH
   const skillsSource = values['skills-source']
     ? path.resolve(values['skills-source'])
-    : CORE_PKG_ROOT
+    : DEFAULT_SOURCE_ROOT
 
   const commonOptions = { verbose: values.verbose === true }
   const color = values['no-color'] !== true && supportsColor()
@@ -342,16 +344,11 @@ async function main (): Promise<void> {
             : 'Credentials present'
           console.log(`${paint.green('✓')} ${HARNESS_LABELS[installHarness]} — fallback direct install. ${authNote}`)
           if (installHarness === 'claude') {
-            console.log(`  ${paint.dim('Native plugin artifact:')} extract ${paint.yellow('nsolid-claude-plugin.tgz')} to a plugin root, then run:`)
-            console.log(`        ${paint.yellow(`claude plugin marketplace add ${CLAUDE_RELEASE_ARTIFACT_TARGET}`)}`)
-            console.log(`        ${paint.yellow('claude plugin install nsolid-plugin@nodesource-local')}`)
+            console.log(`  ${paint.dim('Native plugin:')} ${paint.yellow('claude plugin marketplace add NodeSource/nsolid-plugin && claude plugin install nsolid-plugin@nodesource')}`)
           } else if (installHarness === 'codex') {
-            console.log(`  ${paint.dim('Native plugin artifact:')} extract ${paint.yellow('nsolid-codex-plugin.tgz')} to a plugin root, then run:`)
-            console.log(`        ${paint.yellow(`codex plugin marketplace add ${CODEX_RELEASE_ARTIFACT_TARGET}`)}`)
-            console.log(`        ${paint.yellow('codex plugin add nsolid-plugin@codex-plugin')}`)
+            console.log(`  ${paint.dim('Native plugin:')} ${paint.yellow('codex plugin marketplace add NodeSource/nsolid-plugin && codex plugin add nsolid-plugin@nodesource')}`)
           } else if (installHarness === 'antigravity') {
-            console.log(`  ${paint.dim('Native plugin artifact:')} extract ${paint.yellow('nsolid-antigravity-plugin.tgz')} to a plugin root, then run:`)
-            console.log(`        ${paint.yellow(`agy plugin install ${ANTIGRAVITY_RELEASE_ARTIFACT_TARGET}`)}`)
+            console.log(`  ${paint.dim('Native plugin:')} ${paint.yellow('agy plugin install https://github.com/NodeSource/nsolid-plugin.git')}`)
           }
           continue
         }
@@ -369,7 +366,7 @@ async function main (): Promise<void> {
             console.log(fmt('      pi install npm:pi-mcp-adapter'))
             console.log(fmt(`    MCP config written to ${getAdapter('pi').getMcpConfigPath()}`))
             console.log(fmt('    Install/reload the Pi package to load package-owned skills:'))
-            console.log(fmt('      pi install npm:@nodesource/pi-plugin'))
+            console.log(fmt('      pi install npm:nsolid-pi-plugin'))
             console.log(fmt('      (local QA: pi install ./packages/pi-plugin --no-approve, then /reload)'))
           }
           continue

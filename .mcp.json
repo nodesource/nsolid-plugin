@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "nsolid-console": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const roots=[path.join(os.homedir(),'.codex','plugins','cache'),process.cwd()];const candidates=[];for(const root of roots){try{const stack=[root];while(stack.length){const dir=stack.pop();if(!fs.existsSync(dir))continue;const direct=path.join(dir,...rel);if(fs.existsSync(direct))candidates.push(direct);for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(entry.isDirectory())stack.push(path.join(dir,entry.name))}}}catch{}}const wrapper=candidates.find((p)=>p.includes(`${path.sep}nsolid-plugin${path.sep}`));if(!wrapper){console.error('[nsolid-plugin] Could not locate Codex MCP wrapper. Reinstall with: codex plugin marketplace add NodeSource/nsolid-plugin && codex plugin add nsolid-plugin@nodesource');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)",
+        "nsolid-console"
+      ]
+    },
+    "ns-benchmark": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const roots=[path.join(os.homedir(),'.codex','plugins','cache'),process.cwd()];const candidates=[];for(const root of roots){try{const stack=[root];while(stack.length){const dir=stack.pop();if(!fs.existsSync(dir))continue;const direct=path.join(dir,...rel);if(fs.existsSync(direct))candidates.push(direct);for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(entry.isDirectory())stack.push(path.join(dir,entry.name))}}}catch{}}const wrapper=candidates.find((p)=>p.includes(`${path.sep}nsolid-plugin${path.sep}`));if(!wrapper){console.error('[nsolid-plugin] Could not locate Codex MCP wrapper. Reinstall with: codex plugin marketplace add NodeSource/nsolid-plugin && codex plugin add nsolid-plugin@nodesource');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)",
+        "ns-benchmark"
+      ]
+    },
+    "ncm": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const roots=[path.join(os.homedir(),'.codex','plugins','cache'),process.cwd()];const candidates=[];for(const root of roots){try{const stack=[root];while(stack.length){const dir=stack.pop();if(!fs.existsSync(dir))continue;const direct=path.join(dir,...rel);if(fs.existsSync(direct))candidates.push(direct);for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(entry.isDirectory())stack.push(path.join(dir,entry.name))}}}catch{}}const wrapper=candidates.find((p)=>p.includes(`${path.sep}nsolid-plugin${path.sep}`));if(!wrapper){console.error('[nsolid-plugin] Could not locate Codex MCP wrapper. Reinstall with: codex plugin marketplace add NodeSource/nsolid-plugin && codex plugin add nsolid-plugin@nodesource');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)",
+        "ncm"
+      ]
+    }
+  }
+}

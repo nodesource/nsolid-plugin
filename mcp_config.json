@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "nsolid-console": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const candidates=[path.join(os.homedir(),'.gemini','config','plugins','nsolid-plugin',...rel),path.join(os.homedir(),'.gemini','antigravity-cli','plugins','nsolid-plugin',...rel),path.join(process.cwd(),'packages','antigravity-plugin',...rel),path.join(process.cwd(),...rel)];const wrapper=candidates.find((p)=>fs.existsSync(p));if(!wrapper){console.error('[nsolid-plugin] Could not locate Antigravity MCP wrapper. Reinstall with: agy plugin install https://github.com/NodeSource/nsolid-plugin.git');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)",
+        "nsolid-console"
+      ]
+    },
+    "ns-benchmark": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const candidates=[path.join(os.homedir(),'.gemini','config','plugins','nsolid-plugin',...rel),path.join(os.homedir(),'.gemini','antigravity-cli','plugins','nsolid-plugin',...rel),path.join(process.cwd(),'packages','antigravity-plugin',...rel),path.join(process.cwd(),...rel)];const wrapper=candidates.find((p)=>fs.existsSync(p));if(!wrapper){console.error('[nsolid-plugin] Could not locate Antigravity MCP wrapper. Reinstall with: agy plugin install https://github.com/NodeSource/nsolid-plugin.git');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)",
+        "ns-benchmark"
+      ]
+    },
+    "ncm": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const candidates=[path.join(os.homedir(),'.gemini','config','plugins','nsolid-plugin',...rel),path.join(os.homedir(),'.gemini','antigravity-cli','plugins','nsolid-plugin',...rel),path.join(process.cwd(),'packages','antigravity-plugin',...rel),path.join(process.cwd(),...rel)];const wrapper=candidates.find((p)=>fs.existsSync(p));if(!wrapper){console.error('[nsolid-plugin] Could not locate Antigravity MCP wrapper. Reinstall with: agy plugin install https://github.com/NodeSource/nsolid-plugin.git');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)",
+        "ncm"
+      ]
+    }
+  }
+}

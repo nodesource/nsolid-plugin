@@ -1,6 +1,6 @@
 {
-  "name": "@nodesource/plugin-core",
-  "version": "0.1.0",
+  "name": "nsolid-plugin",
+  "version": "1.0.0-next.0",
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
@@ -22,7 +22,12 @@
     "skills:check": "node scripts/sync-shared-skill-assets.mjs --check",
     "bundle:sync": "node scripts/check-bundle-sync.mjs --sync",
     "bundle:check": "node scripts/check-bundle-sync.mjs --check",
-    "prepack": "pnpm run skills:sync && pnpm run bundle:sync"
+    "prepublishOnly": "pnpm run build",
+    "prepack": "pnpm run build && pnpm run skills:sync && pnpm run bundle:sync && node -e \"require('node:fs').chmodSync('dist/src/cli.js', 0o755)\""
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "dependencies": {
     "smol-toml": "^1.3.1",

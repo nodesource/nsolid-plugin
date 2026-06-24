@@ -1,5 +1,7 @@
 # Pi Agent MCP Support Research
 
+> **Amendment (2026-06-24):** Packages were renamed — `@nodesource/plugin-core` → `nsolid-plugin` and `@nodesource/pi-plugin` → `nsolid-pi-plugin`. References below use the old names; the analysis itself is unchanged.
+
 ## Problem
 
 The NodeSource cross-harness plugin installer supports five AI harnesses. Four of them (Claude Code, Codex CLI, OpenCode, Antigravity) have native or file-based MCP configuration mechanisms. Pi Agent does not natively support the Model Context Protocol (MCP). This means MCP-backed NodeSource skills have no tools available when the user installs `@nodesource/pi-plugin`.
@@ -154,7 +156,7 @@ Pi users should install in this order:
 
 ```bash
 # 1. Install the NodeSource plugin (writes ~/.pi/agent/mcp.json and skills)
-pi install npm:@nodesource/pi-plugin
+pi install npm:nsolid-pi-plugin
 
 # 2. Install pi-mcp-adapter so Pi can use the configured servers.
 #    It reads ~/.pi/agent/mcp.json automatically.

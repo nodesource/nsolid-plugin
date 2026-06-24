@@ -1,0 +1,23 @@
+{
+  "name": "nodesource",
+  "interface": {
+    "displayName": "NodeSource"
+  },
+  "plugins": [
+    {
+      "name": "nsolid-plugin",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE",
+        "products": [
+          "CODEX"
+        ]
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

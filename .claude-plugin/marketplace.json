@@ -1,0 +1,30 @@
+{
+  "name": "nodesource",
+  "owner": {
+    "name": "NodeSource"
+  },
+  "description": "NodeSource agent plugins",
+  "plugins": [
+    {
+      "name": "nsolid-plugin",
+      "source": "./",
+      "displayName": "N|Solid Plugin",
+      "version": "1.0.0",
+      "description": "N|Solid performance & security skills + MCP servers",
+      "author": {
+        "name": "NodeSource"
+      },
+      "homepage": "https://nodesource.com",
+      "repository": "https://github.com/NodeSource/nsolid-plugin",
+      "license": "MIT",
+      "category": "developer-tools",
+      "tags": [
+        "nodesource",
+        "nsolid",
+        "nodejs",
+        "performance",
+        "security"
+      ]
+    }
+  ]
+}

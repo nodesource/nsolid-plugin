@@ -9,7 +9,7 @@
  * the expected file contents as strings.  Callers decide where to write them.
  */
 
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -43,27 +43,13 @@ export function generateClaudePluginJson (pluginPkgVersion, bundle) {
     description: 'N|Solid performance & security skills + MCP servers',
     author: { name: 'NodeSource' },
     homepage: 'https://nodesource.com',
+    repository: 'https://github.com/NodeSource/nsolid-plugin',
     license: 'MIT',
     skills: b.skills.map((skill) => `./skills/${skill.name}`),
+    mcpServers: './.mcp.json',
   }
 
   return stableJson(manifest)
-}
-
-export function generateClaudeMarketplaceJson (bundle) {
-  const b = getBundle(bundle)
-  return stableJson({
-    name: 'nodesource-local',
-    owner: { name: 'NodeSource' },
-    description: 'Local NodeSource plugin artifacts',
-    plugins: [
-      {
-        name: b.name,
-        source: './',
-        description: 'N|Solid performance & security skills + MCP servers',
-      },
-    ],
-  })
 }
 
 export function generateClaudeMcpJson (bundle) {
@@ -95,16 +81,17 @@ export function generateAntigravityMcpJson (bundle) {
   return stableJson({ mcpServers })
 }
 
-export function generateAntigravityWrapper () {
-  return generateMcpWrapper('antigravity')
-}
-
 export function generateCodexPluginJson (pluginPkgVersion, bundle) {
   const b = getBundle(bundle)
   return stableJson({
     name: b.name,
     version: pluginPkgVersion ?? b.version,
     description: 'N|Solid Plugin — AI skills and MCP servers for Codex',
+    author: { name: 'NodeSource', url: 'https://nodesource.com' },
+    homepage: 'https://nodesource.com',
+    repository: 'https://github.com/NodeSource/nsolid-plugin',
+    license: 'MIT',
+    keywords: ['nodesource', 'nsolid', 'nodejs', 'performance', 'security'],
     skills: './skills/',
     mcpServers: './.mcp.json',
     interface: {
@@ -113,31 +100,6 @@ export function generateCodexPluginJson (pluginPkgVersion, bundle) {
       category: 'Productivity',
       developerName: 'NodeSource',
     },
-  })
-}
-
-export function generateCodexMarketplaceJson (bundle) {
-  const b = getBundle(bundle)
-  return stableJson({
-    name: 'codex-plugin',
-    interface: {
-      displayName: 'NodeSource local',
-    },
-    plugins: [
-      {
-        name: b.name,
-        source: {
-          source: 'local',
-          path: './plugins/nsolid-plugin',
-        },
-        policy: {
-          installation: 'AVAILABLE',
-          authentication: 'ON_USE',
-          products: ['CODEX'],
-        },
-        category: 'Developer Tools',
-      },
-    ],
   })
 }
 
@@ -154,16 +116,16 @@ export function generateCodexMcpJson (bundle) {
   return stableJson({ mcpServers })
 }
 
-export function generateCodexWrapper () {
-  return generateMcpWrapper('codex')
-}
-
 export function generateCodexBootstrap () {
-  return "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const roots=[path.join(os.homedir(),'.codex','plugins','cache'),process.cwd()];const candidates=[];for(const root of roots){try{const stack=[root];while(stack.length){const dir=stack.pop();if(!fs.existsSync(dir))continue;const direct=path.join(dir,...rel);if(fs.existsSync(direct))candidates.push(direct);for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(entry.isDirectory())stack.push(path.join(dir,entry.name))}}}catch{}}const wrapper=candidates.find((p)=>p.includes(`${path.sep}nsolid-plugin${path.sep}`))||candidates[0];if(!wrapper){console.error('[nsolid-plugin] Could not locate Codex MCP wrapper. Reinstall with: codex plugin marketplace add <nsolid-codex-plugin-root> && codex plugin add nsolid-plugin@codex-plugin');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)"
+  // Fail closed: only trust wrappers positively identified as this plugin's
+  // install root (a path segment matching `nsolid-plugin`). Never fall back to
+  // an unrelated discovered scripts/mcp-wrapper.js.
+  // eslint-disable-next-line no-template-curly-in-string -- codegen: ${path.sep} must stay literal in the generated bootstrap string, it is evaluated at runtime in the host process
+  return "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const roots=[path.join(os.homedir(),'.codex','plugins','cache'),process.cwd()];const candidates=[];for(const root of roots){try{const stack=[root];while(stack.length){const dir=stack.pop();if(!fs.existsSync(dir))continue;const direct=path.join(dir,...rel);if(fs.existsSync(direct))candidates.push(direct);for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(entry.isDirectory())stack.push(path.join(dir,entry.name))}}}catch{}}const wrapper=candidates.find((p)=>p.includes(`${path.sep}nsolid-plugin${path.sep}`));if(!wrapper){console.error('[nsolid-plugin] Could not locate Codex MCP wrapper. Reinstall with: codex plugin marketplace add NodeSource/nsolid-plugin && codex plugin add nsolid-plugin@nodesource');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)"
 }
 
 export function generateAntigravityBootstrap () {
-  return "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const candidates=[path.join(os.homedir(),'.gemini','config','plugins','nsolid-plugin',...rel),path.join(os.homedir(),'.gemini','antigravity-cli','plugins','nsolid-plugin',...rel),path.join(process.cwd(),'packages','antigravity-plugin',...rel),path.join(process.cwd(),...rel)];const wrapper=candidates.find((p)=>fs.existsSync(p));if(!wrapper){console.error('[nsolid-plugin] Could not locate Antigravity MCP wrapper. Reinstall with: agy plugin install ./dist/plugins/antigravity/nsolid-plugin');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)"
+  return "const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const {pathToFileURL}=require('node:url');const serverName=process.argv[1];const rel=['scripts','mcp-wrapper.js'];const candidates=[path.join(os.homedir(),'.gemini','config','plugins','nsolid-plugin',...rel),path.join(os.homedir(),'.gemini','antigravity-cli','plugins','nsolid-plugin',...rel),path.join(process.cwd(),'packages','antigravity-plugin',...rel),path.join(process.cwd(),...rel)];const wrapper=candidates.find((p)=>fs.existsSync(p));if(!wrapper){console.error('[nsolid-plugin] Could not locate Antigravity MCP wrapper. Reinstall with: agy plugin install https://github.com/NodeSource/nsolid-plugin.git');process.exit(1)}process.argv=[process.execPath,wrapper,serverName];import(pathToFileURL(wrapper).href)"
 }
 
 export function generateMcpConfig (wrapperPath, bundle) {
@@ -190,7 +152,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
-const SETUP_COMMAND = 'nsolid-plugin setup --harness ${harness}'
+const SETUP_COMMAND = 'npx -y @nodesource/nsolid-plugin setup --harness ${harness}'
 
 const SERVER_NAMES = new Set(${JSON.stringify(serverNames)})
 const serverName = process.argv[2]
@@ -212,7 +174,7 @@ function readCredentials () {
   try {
     parsed = JSON.parse(readFileSync(AUTH_FILE, 'utf8'))
   } catch (err) {
-    fail(\`NodeSource credentials are unreadable. Run: nsolid-plugin logout && \${SETUP_COMMAND}. \${err.message}\`)
+    fail(\`NodeSource credentials are unreadable. Run: npx -y nsolid-plugin logout && \${SETUP_COMMAND}. \${err.message}\`)
   }
 
   const required = ['serviceToken', 'organizationId', 'consoleUrl', 'expiresAt']
@@ -314,11 +276,4 @@ function fail (message) {
   process.exit(1)
 }
 `
-}
-
-export function readPluginPkgVersion (packageDir) {
-  const pkgPath = path.join(packageDir, 'package.json')
-  if (!existsSync(pkgPath)) return defaultBundle.version
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
-  return pkg.version ?? defaultBundle.version
 }

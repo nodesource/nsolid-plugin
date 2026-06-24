@@ -4,7 +4,7 @@
 
 export default async function nodesourcePiPlugin () {
   return {
-    name: 'nsolid-plugin',
+    name: 'nsolid-pi-plugin',
     skills: 'package-owned',
     setup: 'nsolid-plugin setup --harness pi',
   }

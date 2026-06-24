@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "nsolid-console": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js",
+        "nsolid-console"
+      ]
+    },
+    "ns-benchmark": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js",
+        "ns-benchmark"
+      ]
+    },
+    "ncm": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js",
+        "ncm"
+      ]
+    }
+  }
+}

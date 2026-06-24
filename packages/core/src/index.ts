@@ -47,7 +47,7 @@ import { toPluginError } from './errors.js'
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
 const STAGING_ACCOUNTS_URL = 'https://staging.accounts.nodesource.com'
 const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
-const PI_PLUGIN_PACKAGE_NAME = '@nodesource/pi-plugin'
+const PI_PLUGIN_PACKAGE_NAME = 'nsolid-pi-plugin'
 
 function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedSkills?: boolean }): string {
   if (options.packageOwnedSkills === true) {

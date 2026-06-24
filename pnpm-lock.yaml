@@ -45,7 +45,7 @@ importers:
 
   packages/pi-plugin:
     dependencies:
-      '@nodesource/plugin-core':
+      nsolid-plugin:
         specifier: workspace:*
         version: link:../core
 

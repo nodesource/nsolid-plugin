@@ -4,13 +4,12 @@
  *
  * Source of truth:
  *   - bundle.json
- *   - packages/core/skills/
+ *   - skills/
  *
  * Remaining committed workspace package:
  *   - packages/pi-plugin
  *
- * Generated plugin artifacts (Claude/Codex/Antigravity) are produced by
- * scripts/build-plugin-artifacts.mjs instead.
+ * Claude/Codex/Antigravity install directly from the repository root.
  *
  * Usage:
  *   node scripts/sync-plugin-assets.mjs                       # clean materialized skill copies
@@ -38,7 +37,7 @@ const ROOT = process.env.NSOLID_PLUGIN_SYNC_ROOT
 const CHECK_MODE = process.argv.includes('--check')
 const MATERIALIZE_SKILLS = process.argv.includes('--materialize-skills')
 
-const CORE_SKILLS_DIR = path.join(ROOT, 'packages', 'core', 'skills')
+const CORE_SKILLS_DIR = path.join(ROOT, 'skills')
 const PI_PLUGIN_DIR = path.join(ROOT, 'packages', 'pi-plugin')
 
 const bundle = loadBundle(ROOT)
@@ -145,7 +144,10 @@ function materializePiSkills () {
 
 function checkSourceHygiene () {
   let drift = false
-  // Reject any package-local skills dirs outside the canonical core source.
+  // Reject any package-local skills dirs in removed/legacy plugin packages.
+  // NOTE: packages/core is intentionally excluded — it legitimately materializes
+  // a skills/ dir during prepack (skills:sync). Its presence is governed by
+  // packages/core/scripts/sync-shared-skill-assets.mjs, not this hygiene check.
   const packageRoots = [
     path.join(ROOT, 'packages', 'claude-plugin'),
     path.join(ROOT, 'packages', 'codex-plugin'),

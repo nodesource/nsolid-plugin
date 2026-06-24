@@ -2,7 +2,6 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,7 +16,6 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..')
 const SYNC_SCRIPT = join(REPO_ROOT, 'scripts', 'sync-plugin-assets.mjs')
-const ARTIFACT_SCRIPT = join(REPO_ROOT, 'scripts', 'build-plugin-artifacts.mjs')
 
 function makeWorkspaceRoot (): string {
   return mkdtempSync(join(tmpdir(), 'plugin-assets-test-'))
@@ -51,13 +49,9 @@ function writeBundle (root: string, skills: string[], mcpServers: string[]): voi
 }
 
 function writeSkill (root: string, name: string, content: string): void {
-  const skillDir = join(root, 'packages', 'core', 'skills', name)
+  const skillDir = join(root, 'skills', name)
   mkdirSync(skillDir, { recursive: true })
   writeFileSync(join(skillDir, 'SKILL.md'), content)
-}
-
-function copyTemplates (root: string): void {
-  cpSync(join(REPO_ROOT, 'plugins'), join(root, 'plugins'), { recursive: true })
 }
 
 function runSync (root: string, args: string[] = []): ReturnType<typeof spawnSync> {
@@ -68,23 +62,11 @@ function runSync (root: string, args: string[] = []): ReturnType<typeof spawnSyn
   })
 }
 
-function runArtifacts (root: string, args: string[] = []): ReturnType<typeof spawnSync> {
-  return spawnSync(process.execPath, [ARTIFACT_SCRIPT, ...args], {
-    cwd: root,
-    env: { ...process.env, NSOLID_PLUGIN_ARTIFACTS_ROOT: root },
-    encoding: 'utf-8',
-  })
-}
-
-function readJson (path: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
-}
-
 function outputText (output: string | Buffer | null | undefined): string {
   return typeof output === 'string' ? output : output?.toString('utf8') ?? ''
 }
 
-describe('plugin source hygiene and artifact generation', () => {
+describe('plugin source hygiene', () => {
   let root: string
 
   beforeEach(() => {
@@ -102,9 +84,10 @@ describe('plugin source hygiene and artifact generation', () => {
     const materialize = runSync(root, ['--materialize-skills'])
     assert.strictEqual(materialize.status, 0, outputText(materialize.stderr))
 
-    const expected = readFileSync(join(root, 'packages', 'core', 'skills', 'ns-alpha', 'SKILL.md'))
+    const expected = readFileSync(join(root, 'skills', 'ns-alpha', 'SKILL.md'))
     const actual = readFileSync(join(root, 'packages', 'pi-plugin', 'skills', 'ns-alpha', 'SKILL.md'))
     assert.deepStrictEqual(actual, expected)
+    assert.strictEqual(existsSync(join(root, 'packages', 'core', 'skills')), false)
     assert.strictEqual(existsSync(join(root, 'packages', 'claude-plugin', 'skills')), false)
     assert.strictEqual(existsSync(join(root, 'packages', 'codex-plugin', 'skills')), false)
     assert.strictEqual(existsSync(join(root, 'packages', 'antigravity-plugin', 'skills')), false)
@@ -121,66 +104,11 @@ describe('plugin source hygiene and artifact generation', () => {
     assert.strictEqual(check.status, 0, outputText(check.stderr))
   })
 
-  it('fails check when a bundle skill is missing from core skills', () => {
+  it('fails check when a bundle skill is missing from root skills', () => {
     writeBundle(root, ['ns-missing'], ['ns-one'])
 
     const check = runSync(root, ['--check'])
-    assert.notStrictEqual(check.status, 0, 'check should fail when core skill is missing')
+    assert.notStrictEqual(check.status, 0, 'check should fail when root skill is missing')
     assert.match(outputText(check.stderr), /Missing core skill directory/)
-  })
-
-  it('builds self-contained Claude, Codex, and Antigravity artifacts', () => {
-    writeSkill(root, 'ns-alpha', '# alpha')
-    writeSkill(root, 'ns-beta', '# beta')
-    writeBundle(root, ['ns-alpha', 'ns-beta'], ['ns-one', 'ns-two'])
-    copyTemplates(root)
-
-    const result = runArtifacts(root)
-    assert.strictEqual(result.status, 0, outputText(result.stderr))
-
-    for (const harness of ['claude', 'codex', 'antigravity']) {
-      const artifactRoot = join(root, 'dist', 'plugins', harness, 'nsolid-plugin')
-      assert.ok(existsSync(artifactRoot), `${harness} artifact root exists`)
-      assert.ok(existsSync(join(artifactRoot, 'skills', 'ns-alpha', 'SKILL.md')), `${harness} skill alpha exists`)
-      assert.ok(existsSync(join(artifactRoot, 'skills', 'ns-beta', 'SKILL.md')), `${harness} skill beta exists`)
-    }
-
-    const claudeManifest = readJson(join(root, 'dist', 'plugins', 'claude', 'nsolid-plugin', '.claude-plugin', 'plugin.json'))
-    assert.deepStrictEqual(claudeManifest.skills, ['./skills/ns-alpha', './skills/ns-beta'])
-    assert.strictEqual(claudeManifest.hooks, undefined)
-    assert.strictEqual(existsSync(join(root, 'dist', 'plugins', 'claude', 'nsolid-plugin', 'hooks')), false)
-    const claudeMarketplace = readJson(join(root, 'dist', 'plugins', 'claude', 'nsolid-plugin', '.claude-plugin', 'marketplace.json'))
-    assert.strictEqual(claudeMarketplace.name, 'nodesource-local')
-    assert.deepStrictEqual(claudeMarketplace.plugins, [{
-      name: 'nsolid-plugin',
-      source: './',
-      description: 'N|Solid performance & security skills + MCP servers',
-    }])
-
-    const codexManifest = readJson(join(root, 'dist', 'plugins', 'codex', 'nsolid-plugin', '.codex-plugin', 'plugin.json'))
-    assert.strictEqual(codexManifest.skills, './skills/')
-    assert.strictEqual(codexManifest.mcpServers, './.mcp.json')
-    const codexMcp = readJson(join(root, 'dist', 'plugins', 'codex', 'nsolid-plugin', '.mcp.json'))
-    assert.match(JSON.stringify(codexMcp), /\.codex.*plugins.*cache/)
-    assert.doesNotMatch(JSON.stringify(codexMcp), /PLUGIN_ROOT/)
-    assert.ok(existsSync(join(root, 'dist', 'plugins', 'codex', 'nsolid-plugin', 'plugins', 'nsolid-plugin', 'skills', 'ns-alpha', 'SKILL.md')))
-
-    assert.strictEqual(codexManifest.hooks, undefined)
-    assert.strictEqual(existsSync(join(root, 'dist', 'plugins', 'codex', 'nsolid-plugin', 'hooks')), false)
-
-    const antigravityInstall = readFileSync(join(root, 'dist', 'plugins', 'antigravity', 'nsolid-plugin', 'scripts', 'install.js'), 'utf8')
-    assert.doesNotMatch(antigravityInstall, /login|openBrowser|ensureAuthenticated|open\(/i)
-    assert.match(antigravityInstall, /nsolid-plugin setup/)
-    assert.doesNotMatch(antigravityInstall, /'hooks\.json'/)
-    assert.match(antigravityInstall, /'skills'/)
-    assert.strictEqual(existsSync(join(root, 'dist', 'plugins', 'antigravity', 'nsolid-plugin', 'hooks.json')), false)
-    assert.strictEqual(existsSync(join(root, 'dist', 'plugins', 'antigravity', 'nsolid-plugin', 'scripts', 'setup.js')), false)
-
-    assert.ok(existsSync(join(root, 'dist', 'artifacts', 'nsolid-claude-plugin.tgz')))
-    assert.ok(existsSync(join(root, 'dist', 'artifacts', 'nsolid-codex-plugin.tgz')))
-    assert.ok(existsSync(join(root, 'dist', 'artifacts', 'nsolid-antigravity-plugin.tgz')))
-
-    const check = runArtifacts(root, ['--check'])
-    assert.strictEqual(check.status, 0, outputText(check.stderr))
   })
 })

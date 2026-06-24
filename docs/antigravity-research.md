@@ -1,5 +1,7 @@
 # Antigravity CLI — Plugin Research (Task 38)
 
+> **Amendment (2026-06-24):** The shared core was renamed `@nodesource/plugin-core` → `nsolid-plugin`. The `scripts/install.js` approach described here was superseded — Antigravity now installs directly from the GitHub repository root. See `docs/qa-guide.md` §9.
+
 **Status:** Complete (June 2026).  
 **Verdict:** Antigravity has no install-time/session-start hook, so the plugin must ship a one-time `scripts/install.js` that the user runs manually. That script copies the plugin directory for discovery and invokes the shared core installer so auth, MCP config, and skills work consistently with the other harnesses.
 

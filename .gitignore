@@ -9,6 +9,7 @@ dist/
 test-results.log
 
 # Generated plugin artifacts/materialized package skills
+packages/core/skills/
 packages/pi-plugin/skills/
 
 # OpenCode

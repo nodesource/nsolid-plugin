@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const fetchAssetPath = join(__dirname, '../../../skills/_shared/fetch-asset.cjs')
+const fetchAssetPath = join(__dirname, '../../../../../skill-assets/fetch-asset.cjs')
 
 let originalAllowInsecure: string | undefined
 

@@ -1,7 +1,6 @@
 {
-  "name": "@nodesource/pi-plugin",
-  "version": "0.1.0",
-  "private": true,
+  "name": "nsolid-pi-plugin",
+  "version": "1.0.0-next.0",
   "type": "module",
   "description": "N|Solid Plugin for Pi Agent",
   "keywords": [
@@ -17,7 +16,15 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@nodesource/plugin-core": "workspace:*"
+    "nsolid-plugin": "workspace:*"
+  },
+  "files": [
+    "index.js",
+    "skills/"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "scripts": {
     "lint": "eslint index.js test/",

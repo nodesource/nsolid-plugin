@@ -209,7 +209,7 @@ describe('ensureAuthenticated', () => {
     assert.strictEqual(result.organizationId, 'org-456')
   })
 
-  it('falls back to OAuth when API is unavailable during fast path', { timeout: 10000 }, async () => {
+  it('trusts stored credentials when validation API is unavailable during fast path', async () => {
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const creds: Credentials = {
       serviceToken: 'valid-token',
@@ -218,17 +218,18 @@ describe('ensureAuthenticated', () => {
       consoleUrl: 'https://valid.saas.nodesource.io',
       mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
       expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      permissions: ['nsolid:benchmark:run'],
     }
     saveCredentials(creds)
 
+    // The validation API is unreachable (ECONNREFUSED) or returns a non-JSON
+    // payload (e.g. an SPA shell). In both cases validateToken THROWS, and the
+    // fast path must trust the unexpired, origin-matching stored credentials
+    // instead of forcing a re-login on every setup.
     globalThis.fetch = mock.fn(async () => {
       throw new Error('ECONNREFUSED')
     }) as unknown as typeof fetch
 
-    // The API being unavailable triggers an expected logger.warn from
-    // auth-manager ("Could not validate token. Storing credentials optimistically.").
-    // Inject a capturing logger so the warning doesn't pollute the test reporter's
-    // dot row, and assert it fired — this documents the degraded-mode behavior.
     const warnings: string[] = []
     const logger = {
       debug: () => {},
@@ -238,7 +239,44 @@ describe('ensureAuthenticated', () => {
     }
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig, logger)
+    const result = await ensureAuthenticated(authConfig, logger)
+
+    // Stored credentials returned verbatim — no OAuth re-authentication.
+    assert.strictEqual(result.serviceToken, 'valid-token')
+    assert.strictEqual(result.organizationId, 'org-123')
+    assert.strictEqual(execFileCalls.length, 0, 'browser must not open when API is unavailable')
+    assert.ok(
+      warnings.some((w) => w.includes('auth.credentials.validationUnavailable')),
+      'expected a validationUnavailable warning when validation API is unavailable'
+    )
+  })
+
+  it('re-authenticates when validation API returns 401/403 during fast path', async () => {
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
+    const creds: Credentials = {
+      serviceToken: 'revoked-token',
+      organizationId: 'org-123',
+      saasToken: 'revoked-saas',
+      consoleUrl: 'https://valid.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    }
+    saveCredentials(creds)
+
+    // A revoked token gets 401/403 from the API — validateToken returns
+    // { valid: false } (does NOT throw), so the fast path must fall through to
+    // re-authenticate. This preserves revocation detection. The fresh OAuth
+    // token from the callback then validates OK.
+    globalThis.fetch = mock.fn(async (input: RequestInfo | URL) => {
+      const target = typeof input === 'string' ? input : input.toString()
+      const revoked = target.includes('tokenId=revoked-token')
+      return revoked
+        ? { ok: false, status: 401, headers: new Headers({ 'content-type': 'application/json' }), json: async () => ({}) }
+        : { ok: true, status: 200, headers: new Headers({ 'content-type': 'application/json' }), json: async () => ({ permissions: [] }) }
+    }) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     const state = getStateFromExecFileCall()
@@ -247,10 +285,37 @@ describe('ensureAuthenticated', () => {
 
     assert.strictEqual(result.serviceToken, 'oauth-token')
     assert.strictEqual(result.organizationId, 'org-456')
-    assert.ok(
-      warnings.some((w) => w.includes('Could not validate token')),
-      'expected an optimistic-storage warning when validation API is unavailable'
-    )
+  })
+
+  it('trusts stored credentials when validation API returns an HTML shell (200 text/html)', async () => {
+    // Regression: the accounts API serves its SPA index.html (HTTP 200,
+    // content-type text/html) for server-side callers, which made validateToken
+    // throw "unexpected content type" on every setup and forced a re-login.
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
+    const creds: Credentials = {
+      serviceToken: 'valid-token',
+      organizationId: 'org-123',
+      saasToken: 'valid-saas',
+      consoleUrl: 'https://valid.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      permissions: ['nsolid:benchmark:run'],
+    }
+    saveCredentials(creds)
+
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/html' }),
+      text: async () => '<!DOCTYPE html><html>...</html>',
+    })) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const result = await ensureAuthenticated(authConfig)
+
+    assert.strictEqual(result.serviceToken, 'valid-token')
+    assert.strictEqual(result.organizationId, 'org-123')
+    assert.strictEqual(execFileCalls.length, 0, 'browser must not open when API returns an HTML shell')
   })
 })
 

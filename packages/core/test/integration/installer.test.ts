@@ -778,7 +778,7 @@ describe('doctor()', () => {
     const packageRoot = join(tmpDir, 'pi-package')
     mkdirSync(join(packageRoot, 'skills', 'ns-test-skill'), { recursive: true })
     writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
-      name: '@nodesource/pi-plugin',
+      name: 'nsolid-pi-plugin',
       pi: { skills: ['./skills'] },
     }))
     writeFileSync(join(packageRoot, 'skills', 'ns-test-skill', 'SKILL.md'), '# ns-test-skill')

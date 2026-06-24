@@ -1,6 +1,23 @@
 # Plugin Marketplace and Artifact Research
 
-Date: 2026-06-19
+	Date: 2026-06-19
+
+> **Amendment (2026-06-24):** The generated-artifact direction described below
+> was **superseded**. Claude, Codex, and Antigravity no longer produce
+> `dist/plugins/...` roots or `.tgz` archives via `pnpm plugin:artifacts`
+> (that script and `plugins/templates/` were removed). Instead, the **repository
+> root is itself the installable plugin** — mirroring `addyosmani/agent-skills` —
+> with `.claude-plugin/{plugin,marketplace}.json`,
+> `.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`, and an
+> Antigravity `plugin.json` all pointing at the shared root `skills/` and
+> `scripts/mcp-wrapper.js`. Harnesses install directly:
+> `claude plugin marketplace add NodeSource/nsolid-plugin`,
+> `codex plugin marketplace add NodeSource/nsolid-plugin`,
+> `agy plugin install https://github.com/NodeSource/nsolid-plugin.git`.
+> Root manifests are refreshed by `pnpm plugin:root`
+> (`scripts/materialize-github-marketplace.mjs`). Pi and OpenCode conclusions
+> below remain accurate. Treat the rest of this doc as historical context for
+> why the original refactor was attempted, not as the current distribution model.
 
 ## Purpose
 

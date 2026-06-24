@@ -2,11 +2,16 @@
 
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { existsSync } from 'node:fs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const corePkgRoot = path.resolve(__dirname, '..')
-const bundlePath = path.join(corePkgRoot, 'bundle.json')
-const skillsSource = corePkgRoot
+const repoRoot = path.resolve(corePkgRoot, '..', '..')
+const defaultSourceRoot = existsSync(path.join(repoRoot, 'bundle.json')) && existsSync(path.join(repoRoot, 'skills'))
+  ? repoRoot
+  : corePkgRoot
+const bundlePath = path.join(defaultSourceRoot, 'bundle.json')
+const skillsSource = defaultSourceRoot
 
 const harness = process.env.NSOLID_HARNESS
 const action = process.argv[2] ?? 'install'
@@ -29,7 +34,7 @@ if (!VALID_HARNESS.includes(harness)) {
   process.exit(1)
 }
 
-const { install, setup, uninstall } = await import('@nodesource/plugin-core')
+const { install, setup, uninstall } = await import('nsolid-plugin')
 
 const PLUGIN_OWNED_HARNESSES = new Set(['claude', 'codex', 'antigravity'])
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set(['pi'])

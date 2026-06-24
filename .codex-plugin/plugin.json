@@ -1,0 +1,27 @@
+{
+  "name": "nsolid-plugin",
+  "version": "1.0.0",
+  "description": "N|Solid Plugin — AI skills and MCP servers for Codex",
+  "author": {
+    "name": "NodeSource",
+    "url": "https://nodesource.com"
+  },
+  "homepage": "https://nodesource.com",
+  "repository": "https://github.com/NodeSource/nsolid-plugin",
+  "license": "MIT",
+  "keywords": [
+    "nodesource",
+    "nsolid",
+    "nodejs",
+    "performance",
+    "security"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "N|Solid Plugin",
+    "shortDescription": "N|Solid performance & security",
+    "category": "Productivity",
+    "developerName": "NodeSource"
+  }
+}

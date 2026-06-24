@@ -45,7 +45,7 @@ const authStub = await startAuthStub()
 let failed = 0
 
 try {
-  verifyPluginOwnedPackages()
+  verifyRootPluginAssets()
 
   for (const h of LEGACY_HARNESSES) {
     const home = mkdtempSync(join(tmpdir(), `nsolid-manual-${h.name}-`))
@@ -133,64 +133,42 @@ function testEnv (home, harness) {
   }
 }
 
-function verifyPluginOwnedPackages () {
-  const artifacts = spawnSync(process.execPath, ['scripts/build-plugin-artifacts.mjs'], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    timeout: SETUP_TIMEOUT_MS,
-  })
-  if (artifacts.status !== 0) {
+function verifyRootPluginAssets () {
+  try {
+    const claudeManifest = readJson(join(REPO_ROOT, '.claude-plugin/plugin.json'))
+    assert(claudeManifest.name === 'nsolid-plugin', '[claude root] manifest name')
+    assert(claudeManifest.mcpServers === './.claude-mcp.json', '[claude root] manifest declares MCP config')
+    const claudeMarketplace = readJson(join(REPO_ROOT, '.claude-plugin/marketplace.json'))
+    assert(claudeMarketplace.name === 'nodesource', '[claude root] marketplace name')
+    assert(claudeMarketplace.plugins?.[0]?.source === './', '[claude root] marketplace source')
+    assert(existsSync(join(REPO_ROOT, '.claude-mcp.json')), '[claude root] plugin-owned MCP config')
+    assert(existsSync(join(REPO_ROOT, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[claude root] canonical skill')
+    console.log('\x1b[32m✓ claude root plugin assets OK\x1b[0m')
+  } catch (err) {
     failed++
-    console.error(`\x1b[31m✗ generated plugin artifacts FAILED: ${(artifacts.stderr || artifacts.stdout || '').trim()}\x1b[0m`)
-    return
+    console.error(`\x1b[31m✗ claude root plugin FAILED: ${err.message}\x1b[0m`)
   }
 
   try {
-    const claudeRoot = join(REPO_ROOT, 'dist/plugins/claude/nsolid-plugin')
-    const claudeManifest = readJson(join(claudeRoot, '.claude-plugin/plugin.json'))
-    assert(claudeManifest.name === 'nsolid-plugin', '[claude artifact] manifest name')
-    const claudeMarketplace = readJson(join(claudeRoot, '.claude-plugin/marketplace.json'))
-    assert(claudeMarketplace.name === 'nodesource-local', '[claude artifact] local marketplace name')
-    assert(claudeMarketplace.plugins?.[0]?.source === './', '[claude artifact] local marketplace source')
-    assert(existsSync(join(claudeRoot, '.mcp.json')), '[claude artifact] plugin-owned MCP config')
-    assert(claudeManifest.hooks === undefined, '[claude artifact] no startup hooks')
-    assert(!existsSync(join(claudeRoot, 'hooks/hooks.json')), '[claude artifact] no setup hook config')
-    assert(!existsSync(join(claudeRoot, 'scripts/setup.js')), '[claude artifact] no setup hook script')
-    assert(existsSync(join(claudeRoot, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[claude artifact] materialized skill')
-    console.log('\x1b[32m✓ claude generated artifact assets OK\x1b[0m')
+    const codexManifest = readJson(join(REPO_ROOT, '.codex-plugin/plugin.json'))
+    assert(codexManifest.name === 'nsolid-plugin', '[codex root] manifest name')
+    assert(codexManifest.skills === './skills/', '[codex root] manifest declares skills')
+    assert(codexManifest.mcpServers === './.mcp.json', '[codex root] manifest declares MCP config')
+    assert(existsSync(join(REPO_ROOT, '.mcp.json')), '[codex root] plugin-owned MCP config')
+    assert(existsSync(join(REPO_ROOT, '.agents/plugins/marketplace.json')), '[codex root] marketplace manifest')
+    console.log('\x1b[32m✓ codex root plugin assets OK\x1b[0m')
   } catch (err) {
     failed++
-    console.error(`\x1b[31m✗ claude generated artifact FAILED: ${err.message}\x1b[0m`)
-  }
-
-  try {
-    const codexRoot = join(REPO_ROOT, 'dist/plugins/codex/nsolid-plugin')
-    const codexManifest = readJson(join(codexRoot, '.codex-plugin/plugin.json'))
-    assert(codexManifest.name === 'nsolid-plugin', '[codex artifact] manifest name')
-    assert(existsSync(join(codexRoot, '.mcp.json')), '[codex artifact] plugin-owned MCP config')
-    assert(existsSync(join(codexRoot, '.agents/plugins/marketplace.json')), '[codex artifact] local marketplace manifest')
-    assert(codexManifest.skills === './skills/', '[codex artifact] manifest declares skills')
-    assert(codexManifest.mcpServers === './.mcp.json', '[codex artifact] manifest declares MCP config')
-    assert(codexManifest.hooks === undefined, '[codex artifact] no startup hooks')
-    assert(!existsSync(join(codexRoot, 'hooks/hooks.json')), '[codex artifact] no setup hook config')
-    assert(!existsSync(join(codexRoot, 'scripts/setup.js')), '[codex artifact] no setup hook script')
-    const codexMcp = readJson(join(codexRoot, '.mcp.json'))
-    assert(JSON.stringify(codexMcp).includes('.codex'), '[codex artifact] MCP wrapper resolves via Codex cache')
-    assert(!JSON.stringify(codexMcp).includes('PLUGIN_ROOT'), '[codex artifact] MCP wrapper avoids unsupported PLUGIN_ROOT interpolation')
-    assert(existsSync(join(codexRoot, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[codex artifact] materialized root skill')
-    assert(existsSync(join(codexRoot, 'plugins/nsolid-plugin/skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[codex artifact] materialized nested skill')
-    console.log('\x1b[32m✓ codex generated artifact assets OK\x1b[0m')
-  } catch (err) {
-    failed++
-    console.error(`\x1b[31m✗ codex generated artifact FAILED: ${err.message}\x1b[0m`)
+    console.error(`\x1b[31m✗ codex root plugin FAILED: ${err.message}\x1b[0m`)
   }
 
   try {
     const piManifest = readJson(join(REPO_ROOT, 'packages/pi-plugin/package.json'))
-    assert(piManifest.name === '@nodesource/pi-plugin', '[pi-plugin] package name')
+    assert(piManifest.name === 'nsolid-pi-plugin', '[pi-plugin] package name')
     assert(piManifest.pi?.skills?.includes('./skills'), '[pi-plugin] package-owned skills manifest')
     assert(!existsSync(join(REPO_ROOT, 'packages/pi-plugin/skills')), '[pi-plugin] generated skills should not be committed')
-    assert(existsSync(join(REPO_ROOT, 'packages/core/skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[pi-plugin] canonical skill source')
+    assert(!existsSync(join(REPO_ROOT, 'packages/core/skills')), '[pi-plugin] generated core package skills should not be committed')
+    assert(existsSync(join(REPO_ROOT, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[pi-plugin] canonical skill source')
     console.log('\x1b[32m✓ pi package-owned skill assets OK\x1b[0m')
   } catch (err) {
     failed++
@@ -198,17 +176,15 @@ function verifyPluginOwnedPackages () {
   }
 
   try {
-    const antigravityRoot = join(REPO_ROOT, 'dist/plugins/antigravity/nsolid-plugin')
-    const antigravityManifest = readJson(join(antigravityRoot, 'plugin.json'))
-    assert(antigravityManifest.name === 'nsolid-plugin', '[antigravity artifact] manifest name')
-    assert(existsSync(join(antigravityRoot, 'mcp_config.json')), '[antigravity artifact] plugin-owned MCP config')
-    assert(!existsSync(join(antigravityRoot, 'hooks.json')), '[antigravity artifact] no setup hook config')
-    assert(!existsSync(join(antigravityRoot, 'scripts/setup.js')), '[antigravity artifact] no setup hook script')
-    assert(existsSync(join(antigravityRoot, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[antigravity artifact] materialized skill')
-    console.log('\x1b[32m✓ antigravity generated artifact assets OK\x1b[0m')
+    const antigravityManifest = readJson(join(REPO_ROOT, 'plugin.json'))
+    assert(antigravityManifest.name === 'nsolid-plugin', '[antigravity root] manifest name')
+    assert(existsSync(join(REPO_ROOT, 'mcp_config.json')), '[antigravity root] plugin-owned MCP config')
+    assert(existsSync(join(REPO_ROOT, 'scripts/mcp-wrapper.js')), '[antigravity root] MCP wrapper')
+    assert(existsSync(join(REPO_ROOT, 'skills/ns-advanced-memory-leak-hunter/SKILL.md')), '[antigravity root] canonical skill')
+    console.log('\x1b[32m✓ antigravity root plugin assets OK\x1b[0m')
   } catch (err) {
     failed++
-    console.error(`\x1b[31m✗ antigravity generated artifact FAILED: ${err.message}\x1b[0m`)
+    console.error(`\x1b[31m✗ antigravity root plugin FAILED: ${err.message}\x1b[0m`)
   }
 }
 
