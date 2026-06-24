@@ -41,12 +41,23 @@ const TIMEOUT_MS = 5 * 60 * 1000
  * The page is fully static — all styling is inline CSS with zero network
  * requests. It is served from a loopback URL and avoids any external resource.
  */
+function escapeHtml (s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 function renderCallbackPage (opts: {
   ok: boolean
   title: string
   message: string
 }): string {
-  const { ok, title, message } = opts
+  const { ok, title: rawTitle, message: rawMessage } = opts
+  const title = escapeHtml(rawTitle)
+  const message = escapeHtml(rawMessage)
   const closer = ok
     ? '<p class="ns-text">This tab will close automatically. If it doesn\u2019t, you can close it manually.</p><script>setTimeout(function(){try{window.close()}catch(e){}},800)</script>'
     : '<p class="ns-text">Please return to N\u002FSolid and try again.</p>'
@@ -156,7 +167,7 @@ export async function startOAuthServer (preferredPort?: number, expectedState?: 
 
     const headers = {
       'Content-Type': 'text/html',
-      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
       Connection: 'close',
     }
 
