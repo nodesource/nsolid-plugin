@@ -21,4 +21,4 @@ export function getAdapter (harness: HarnessType): HarnessAdapter {
   }
 }
 
-export type { HarnessAdapter, McpConfig, McpServerConfig } from './harness-adapter.js'
+export type { HarnessAdapter, McpConfig, McpServerConfig, NativePluginStatus } from './harness-adapter.js'

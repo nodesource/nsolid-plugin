@@ -7,6 +7,25 @@ export const C = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
 }
 
+/** Harnesses that install the plugin/package natively and get a Plugin line. */
+const NATIVE_PLUGIN_HARNESSES = new Set(['claude', 'codex', 'antigravity', 'pi'])
+
+/** Native install command shown when the plugin is missing for a harness. */
+function nativeInstallHint (harness: string): string {
+  switch (harness) {
+    case 'claude':
+      return 'claude plugin marketplace add NodeSource/nsolid-plugin && claude plugin install nsolid-plugin@nodesource'
+    case 'codex':
+      return 'codex plugin marketplace add NodeSource/nsolid-plugin && codex plugin add nsolid-plugin@nodesource'
+    case 'antigravity':
+      return 'agy plugin install https://github.com/NodeSource/nsolid-plugin'
+    case 'pi':
+      return 'pi install npm:nsolid-pi-plugin'
+    default:
+      return ''
+  }
+}
+
 export function supportsColor (stream: { isTTY?: boolean } = process.stdout): boolean {
   if (process.env.NO_COLOR !== undefined) return false
   if (process.env.FORCE_COLOR === '0') return false
@@ -20,6 +39,16 @@ function credLine (status: DoctorReport['credentials']['status'], color: boolean
   if (status === 'ok') return line('Credentials', '✓ ok', C.green, '', color)
   if (status === 'expired') return line('Credentials', '✗ expired', C.red, 'Re-run installation to re-authenticate', color)
   return line('Credentials', '✗ missing', C.red, 'Run installation to authenticate', color)
+}
+
+function pluginLine (p: DoctorReport['plugin'], harness: string, color: boolean): string | null {
+  // Non-native harnesses (e.g. opencode) have no plugin model — no line shown.
+  if (!NATIVE_PLUGIN_HARNESSES.has(harness)) return null
+  if (p.status === 'ok') {
+    const label = p.label ? ` (${p.label})` : ''
+    return line('Plugin', `✓ installed${label}`, C.green, '', color)
+  }
+  return line('Plugin', '✗ not installed', C.red, nativeInstallHint(harness), color)
 }
 
 function skillsLine (s: DoctorReport['skills'], color: boolean): string {
@@ -47,6 +76,8 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   const title = color ? C.dim(`NodeSource plugin health — ${harness}`) : `NodeSource plugin health — ${harness}`
   out.push(title, '─'.repeat(34))
   out.push(credLine(report.credentials.status, color))
+  const plugin = pluginLine(report.plugin, harness, color)
+  if (plugin) out.push(plugin)
   out.push(skillsLine(report.skills, color))
   out.push(mcpLine(report.mcpServers, color))
 

@@ -2,7 +2,6 @@ export { getAdapter } from './harnesses/index.js'
 export type { HarnessAdapter, McpConfig, McpServerConfig } from './harnesses/index.js'
 export { loadCredentials, isExpired } from './auth/index.js'
 
-import os from 'node:os'
 import path from 'node:path'
 import { readdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -37,6 +36,7 @@ import {
 } from './mcp/index.js'
 import { getAdapter } from './harnesses/index.js'
 import type { HarnessAdapter } from './harnesses/index.js'
+import { findPiPluginSkillRoots } from './harnesses/pi-plugin-detector.js'
 import { readJsonFile } from './utils/config.js'
 import { getSkillsDir, getAuthFilePath } from './utils/path.js'
 import { createLogger, isVerboseEnabled } from './utils/logger.js'
@@ -47,7 +47,13 @@ import { toPluginError } from './errors.js'
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
 const STAGING_ACCOUNTS_URL = 'https://staging.accounts.nodesource.com'
 const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
-const PI_PLUGIN_PACKAGE_NAME = 'nsolid-pi-plugin'
+/**
+ * Harnesses that install the nsolid plugin/package natively (owning skills and
+ * MCP config themselves) rather than via the shared CLI tracking file. The
+ * doctor probes each via `adapter.detectNativePlugin()`. Superset of
+ * {@link PLUGIN_OWNED_HARNESSES} plus the package-owned Pi harness.
+ */
+const NATIVE_PLUGIN_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity', 'pi'])
 
 function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedSkills?: boolean }): string {
   if (options.packageOwnedSkills === true) {
@@ -55,86 +61,6 @@ function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedS
   }
 
   return `${bundle.skills.length} skills, ${bundle.mcpServers.length} MCP servers`
-}
-
-function readPiPackageSourceEntries (settingsPath: string): string[] {
-  let settings: { packages?: Array<string | { source?: string }> } | null = null
-  try {
-    settings = readJsonFile<{ packages?: Array<string | { source?: string }> }>(settingsPath)
-  } catch {
-    return []
-  }
-  if (!settings || !Array.isArray(settings.packages)) return []
-
-  return settings.packages
-    .map((entry) => typeof entry === 'string' ? entry : entry.source)
-    .filter((source): source is string => typeof source === 'string' && source.length > 0)
-}
-
-function packageNameFromNpmSource (source: string): string | null {
-  if (!source.startsWith('npm:')) return null
-  const spec = source.slice('npm:'.length)
-  if (spec.startsWith('@')) {
-    const [scope, name] = spec.split('/')
-    if (!scope || !name) return null
-    return `${scope}/${name.split('@')[0]}`
-  }
-  return spec.split('@')[0] || null
-}
-
-function resolvePiPackageRootFromSource (source: string, settingsDir: string): string | null {
-  const npmPackageName = packageNameFromNpmSource(source)
-  if (npmPackageName) {
-    if (npmPackageName !== PI_PLUGIN_PACKAGE_NAME) return null
-    return path.join(settingsDir, 'npm', 'node_modules', PI_PLUGIN_PACKAGE_NAME)
-  }
-
-  if (source.startsWith('git:') || source.startsWith('http://') || source.startsWith('https://') || source.startsWith('ssh://')) {
-    return null
-  }
-
-  return path.resolve(settingsDir, source)
-}
-
-function findPiPluginPackageRoots (): string[] {
-  const settingsPaths = [
-    path.join(os.homedir(), '.pi', 'agent', 'settings.json'),
-    path.resolve('.pi', 'settings.json'),
-  ]
-  const roots = new Set<string>()
-
-  for (const settingsPath of settingsPaths) {
-    const settingsDir = path.dirname(settingsPath)
-    for (const source of readPiPackageSourceEntries(settingsPath)) {
-      const root = resolvePiPackageRootFromSource(source, settingsDir)
-      if (root) roots.add(root)
-    }
-  }
-
-  roots.add(path.join(os.homedir(), '.pi', 'agent', 'npm', 'node_modules', PI_PLUGIN_PACKAGE_NAME))
-  return [...roots]
-}
-
-function findPiPluginSkillRoots (): string[] {
-  const skillRoots: string[] = []
-  for (const packageRoot of findPiPluginPackageRoots()) {
-    const pkgPath = path.join(packageRoot, 'package.json')
-    let pkg: { name?: string; pi?: { skills?: string[] } } | null = null
-    try {
-      pkg = readJsonFile<{ name?: string; pi?: { skills?: string[] } }>(pkgPath)
-    } catch {
-      continue
-    }
-    if (pkg?.name !== PI_PLUGIN_PACKAGE_NAME) continue
-
-    const configuredSkillRoots = Array.isArray(pkg.pi?.skills) && pkg.pi.skills.length > 0
-      ? pkg.pi.skills
-      : ['./skills']
-    for (const skillRoot of configuredSkillRoots) {
-      skillRoots.push(path.resolve(packageRoot, skillRoot))
-    }
-  }
-  return skillRoots
 }
 
 function piPackageSkillExists (skillName: string): boolean {
@@ -644,6 +570,7 @@ export async function doctor (
   const report: DoctorReport = {
     healthy: true,
     credentials: { status: 'missing' },
+    plugin: { status: 'n/a', installed: false },
     skills: { status: 'ok', installed: [], missing: [] },
     mcpServers: { status: 'ok', reachable: [], unreachable: [] },
     errors: [],
@@ -678,9 +605,40 @@ export async function doctor (
 
   const adapter = getAdapter(harness)
 
+  // For plugin/package-owned harnesses the recommended install path is the
+  // harness's native mechanism, not the CLI tracking file. Probe it here; when
+  // present, skills and MCP servers are owned by the plugin and reported as ok.
+  const isNativeHarness = NATIVE_PLUGIN_HARNESSES.has(harness)
+  let nativeOwned = false
+  if (isNativeHarness && adapter.detectNativePlugin) {
+    const detected = adapter.detectNativePlugin()
+    if (detected.installed) {
+      nativeOwned = true
+      report.plugin = {
+        status: 'ok',
+        installed: true,
+        enabled: detected.enabled,
+        label: detected.label,
+      }
+    } else {
+      report.plugin = { status: 'missing', installed: false }
+    }
+  }
+
   if (!bundle) {
     report.skills.status = 'unknown'
     report.mcpServers.status = 'unknown'
+  } else if (nativeOwned) {
+    // The native plugin owns skills and MCP config; report them as satisfied
+    // rather than cross-referencing the (irrelevant) CLI tracking file.
+    report.skills.installed = bundle.skills.map((s) => s.name)
+    report.skills.missing = []
+    report.skills.status = 'ok'
+    if (adapter.supportsMcp()) {
+      report.mcpServers.reachable = bundle.mcpServers.map((s) => s.name)
+      report.mcpServers.unreachable = []
+      report.mcpServers.status = 'ok'
+    }
   } else {
     const expectedMcps = bundle.mcpServers.map((s) => s.name)
 
@@ -746,6 +704,12 @@ export async function doctor (
     }
   }
 
+  // The Plugin line is informational — it reflects whether the *native*
+  // plugin/package is installed. Health is driven by whether skills, MCP
+  // servers, and credentials are actually satisfied, regardless of which path
+  // (native plugin or direct CLI install) provided them. So a direct (fallback)
+  // install on a plugin-owned harness can still be healthy without the native
+  // plugin present.
   report.healthy =
     report.credentials.status === 'ok' &&
     report.skills.status === 'ok' &&

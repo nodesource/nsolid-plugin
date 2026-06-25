@@ -120,6 +120,13 @@ export type SetupResult = InstallResult
 export interface DoctorReport {
   healthy: boolean;
   credentials: { status: 'ok' | 'missing' | 'expired'; message?: string };
+  /**
+   * Native plugin/package install status. Only meaningful for plugin/package-
+   * owned harnesses (claude, codex, antigravity, pi); for others the status is
+   * `'n/a'`. When `installed`, skills and MCP servers are satisfied from the
+   * plugin itself rather than the CLI tracking file.
+   */
+  plugin: { status: 'ok' | 'missing' | 'n/a'; installed: boolean; enabled?: boolean; label?: string };
   /** `unknown` when the bundle could not be loaded — the listed `installed`/`missing` arrays are not meaningful. */
   skills: { status: 'ok' | 'partial' | 'missing' | 'unknown'; installed: string[]; missing: string[] };
   /** `unknown` when the bundle could not be loaded — the listed `reachable`/`unreachable` arrays are not meaningful. */

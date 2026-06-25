@@ -794,6 +794,139 @@ describe('doctor()', () => {
     assert.deepStrictEqual(report.skills.missing, [])
   })
 
+  it('detects a native Codex plugin from config.toml enabled flag', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    // Mirror what `codex plugin add nsolid-plugin@nodesource` writes.
+    mkdirSync(join(tmpDir, '.codex'), { recursive: true })
+    writeFileSync(join(tmpDir, '.codex', 'config.toml'), [
+      '[marketplaces.nodesource]',
+      'source = "https://github.com/NodeSource/nsolid-plugin.git"',
+      '',
+      '[plugins."nsolid-plugin@nodesource"]',
+      'enabled = true',
+      '',
+    ].join('\n'))
+
+    const report = await doctor('codex', bundlePath)
+
+    assert.strictEqual(report.plugin.status, 'ok')
+    assert.strictEqual(report.plugin.installed, true)
+    assert.strictEqual(report.plugin.enabled, true)
+    assert.strictEqual(report.plugin.label, 'nsolid-plugin@nodesource')
+    // Plugin-owned harness satisfies skills/MCP from the plugin itself.
+    assert.strictEqual(report.skills.status, 'ok')
+    assert.ok(report.skills.installed.includes('ns-test-skill'))
+    assert.deepStrictEqual(report.skills.missing, [])
+    assert.strictEqual(report.mcpServers.status, 'ok')
+    assert.ok(report.mcpServers.reachable.includes('ns-test-mcp'))
+    assert.deepStrictEqual(report.mcpServers.unreachable, [])
+  })
+
+  it('detects a native Codex plugin from the cloned marketplace bundle', async () => {
+    // Even without the [plugins.*] enabled flag, the cloned marketplace dir counts.
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    mkdirSync(join(tmpDir, '.codex', '.tmp', 'marketplaces', 'nodesource'), { recursive: true })
+    writeFileSync(join(tmpDir, '.codex', '.tmp', 'marketplaces', 'nodesource', 'bundle.json'), '{}')
+
+    const report = await doctor('codex', bundlePath)
+
+    assert.strictEqual(report.plugin.status, 'ok')
+    assert.strictEqual(report.plugin.installed, true)
+  })
+
+  it('detects a native Claude plugin from installed_plugins.json', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    mkdirSync(join(tmpDir, '.claude', 'plugins'), { recursive: true })
+    writeFileSync(join(tmpDir, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({
+      version: 2,
+      plugins: [{ id: 'nsolid-plugin@nodesource', enabled: true }],
+    }))
+
+    const report = await doctor('claude', bundlePath)
+
+    assert.strictEqual(report.plugin.status, 'ok')
+    assert.strictEqual(report.plugin.installed, true)
+    assert.strictEqual(report.skills.status, 'ok')
+    assert.strictEqual(report.mcpServers.status, 'ok')
+  })
+
+  it('detects a native Antigravity plugin from the staged plugins dir', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    mkdirSync(join(tmpDir, '.gemini', 'antigravity-cli', 'plugins', 'nsolid-plugin'), { recursive: true })
+
+    const report = await doctor('antigravity', bundlePath)
+
+    assert.strictEqual(report.plugin.status, 'ok')
+    assert.strictEqual(report.plugin.installed, true)
+    assert.strictEqual(report.skills.status, 'ok')
+    assert.strictEqual(report.mcpServers.status, 'ok')
+  })
+
+  it('reports plugin missing for a plugin-owned harness with no native install', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+
+    const report = await doctor('codex', bundlePath)
+
+    // Plugin line is informational: missing here, but health is driven by the
+    // other checks (creds/skills/mcp), not by this line alone.
+    assert.strictEqual(report.plugin.status, 'missing')
+    assert.strictEqual(report.plugin.installed, false)
+  })
+
+  it('marks plugin status as n/a for a non-native harness', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+
+    const report = await doctor('opencode', bundlePath)
+
+    assert.strictEqual(report.plugin.status, 'n/a')
+  })
+
+  it('reports a fully healthy report when a native plugin is installed and creds are valid', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const { getAuthFilePath, getAgentsDir } = await import('../../src/utils/path.js')
+    const { ensureDir } = await import('../../src/utils/fs.js')
+    ensureDir(getAgentsDir())
+    const futureDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    writeFileSync(getAuthFilePath(), JSON.stringify({
+      serviceToken: 'valid-token',
+      organizationId: 'valid-org',
+      saasToken: 'valid-saas',
+      consoleUrl: 'https://console.nodesource.com',
+      mcpUrl: 'https://mcp.nodesource.com',
+      expiresAt: futureDate,
+    }))
+
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    mkdirSync(join(tmpDir, '.codex'), { recursive: true })
+    writeFileSync(join(tmpDir, '.codex', 'config.toml'), [
+      '[plugins."nsolid-plugin@nodesource"]',
+      'enabled = true',
+      '',
+    ].join('\n'))
+
+    const report = await doctor('codex', bundlePath)
+
+    assert.strictEqual(report.healthy, true)
+    assert.strictEqual(report.credentials.status, 'ok')
+    assert.strictEqual(report.plugin.status, 'ok')
+    assert.strictEqual(report.skills.status, 'ok')
+    assert.strictEqual(report.mcpServers.status, 'ok')
+    assert.deepStrictEqual(report.errors, [])
+  })
+
   it('reports errors when bundle path is invalid', async () => {
     const { doctor } = await import('../../src/index.js')
 

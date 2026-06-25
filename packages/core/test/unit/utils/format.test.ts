@@ -6,6 +6,7 @@ function makeReport (overrides?: Partial<DoctorReport>): DoctorReport {
   return {
     healthy: true,
     credentials: { status: 'ok' },
+    plugin: { status: 'ok', installed: true, label: 'nsolid-plugin@nodesource' },
     skills: { status: 'ok', installed: ['ns-skill-1', 'ns-skill-2'], missing: [] },
     mcpServers: { status: 'ok', reachable: ['nsolid-console', 'ns-benchmark'], unreachable: [] },
     errors: [],
@@ -63,6 +64,40 @@ describe('formatDoctorReport', () => {
 
     assert.ok(out.includes('Credentials   ✗ expired'))
     assert.ok(out.includes('Re-run installation to re-authenticate'))
+  })
+
+  it('shows "✓ installed" Plugin line for an installed native plugin (no color)', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport()
+    const out = formatDoctorReport(report, 'codex', false)
+
+    assert.ok(out.includes('Plugin        ✓ installed (nsolid-plugin@nodesource)'))
+  })
+
+  it('shows "✗ not installed" Plugin line with install hint when plugin missing (no color)', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({ plugin: { status: 'missing', installed: false }, healthy: false })
+    const out = formatDoctorReport(report, 'codex', false)
+
+    assert.ok(out.includes('Plugin        ✗ not installed'))
+    assert.ok(out.includes('codex plugin marketplace add NodeSource/nsolid-plugin'))
+  })
+
+  it('shows the Pi install hint for a missing pi plugin', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({ plugin: { status: 'missing', installed: false }, healthy: false })
+    const out = formatDoctorReport(report, 'pi', false)
+
+    assert.ok(out.includes('Plugin        ✗ not installed'))
+    assert.ok(out.includes('pi install npm:nsolid-pi-plugin'))
+  })
+
+  it('omits the Plugin line for a non-native harness (opencode)', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({ plugin: { status: 'n/a', installed: false } })
+    const out = formatDoctorReport(report, 'opencode', false)
+
+    assert.ok(!out.includes('Plugin'))
   })
 
   it('shows "⚠ partial" on partial skills (no color)', async () => {

@@ -1,13 +1,22 @@
-import type { HarnessAdapter, McpConfig } from './harness-adapter.js'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import type { HarnessAdapter, McpConfig, NativePluginStatus } from './harness-adapter.js'
 import type { HarnessType } from '../types.js'
 import { resolveHome } from '../utils/path.js'
 import { writeAdapterMcpConfig, readExistingConfig } from '../mcp/mcp-config-writer.js'
+
+const PLUGIN_NAME = 'nsolid-plugin'
 
 export class AntigravityAdapter implements HarnessAdapter {
   readonly name: HarnessType = 'antigravity'
 
   getMcpConfigPath (): string {
     return resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+  }
+
+  getPluginsPath (): string {
+    // `agy plugin install` stages native plugins under the antigravity-cli root.
+    return resolveHome('~/.gemini/antigravity-cli/plugins')
   }
 
   getSkillsPath (): string {
@@ -33,5 +42,20 @@ export class AntigravityAdapter implements HarnessAdapter {
     // writeAdapterMcpConfig via applyHarnessWriteFormat, so this adapter stays
     // symmetric with the Claude/Codex/OpenCode adapters.
     writeAdapterMcpConfig(this.name, config)
+  }
+
+  /**
+   * Antigravity stages a native plugin at
+   * `~/.gemini/antigravity-cli/plugins/nsolid-plugin/`. There is no separate
+   * enable flag, so `installed` follows from the staged directory existing.
+   */
+  detectNativePlugin (): NativePluginStatus {
+    const status: NativePluginStatus = { installed: false, label: PLUGIN_NAME }
+    const staged = path.join(this.getPluginsPath(), PLUGIN_NAME)
+    if (existsSync(staged)) {
+      status.installed = true
+      status.enabled = true
+    }
+    return status
   }
 }
