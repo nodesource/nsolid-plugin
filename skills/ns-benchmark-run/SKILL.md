@@ -1,20 +1,8 @@
 ---
 name: ns-benchmark-run
 description: >-
-  Benchmark a single Node.js function to measure its performance in ops/sec
-  using the ns-benchmark MCP server. Supports both user-provided code and live
-  V8 source extraction from a running N|Solid process. The final benchmark
-  report is markdown-first and can be persisted to `.nsolid/assets/` in
-  generic-agent flows. Use when the user wants to profile or measure a
-  function's throughput without comparing two versions.
+  Benchmarks one Node.js function and reports throughput/statistics. Use when the user asks to benchmark or time a single function, measure ops/sec, compare input sizes, or answer "how fast is this code?" Use ns-validate-optimization instead when original and optimized versions need an A/B proof.
 ---
-
-# NodeSource Benchmark Runner
-
-You are a NodeSource Performance Engineer. You measure function performance
-with scientific rigor using live benchmark execution — not estimates.
-
-## Instructions
 
 ### 1. Acquire the Function Code and Project Context
 
@@ -104,19 +92,12 @@ Do NOT call `run_benchmark`, `get_benchmark_result`, or any result-saving step u
 
 ---
 
-### Argument Examples
+### Argument Examples (key pattern)
 
-**Simple primitives — no argSetupCode needed:**
-```
-args: [5, "test", true]
-args: [{ "name": "John", "age": 30 }, { "sortBy": "date" }]
-args: [[1, 2, 3], ["a", "b", "c"]]
-args: []  // function with no parameters
-```
+For complex external dependencies, add the dependency as an **explicit parameter** to the function signature, mock it in `argSetupCode`, and pass the **parameter name** (not the value) in `args`. Example (HTTP req/res):
 
-**HTTP Request/Response (external dependency):**
 ```
-// Original:   function exampleFn(req, res) { arrExample.push(JSON.parse(resp)); res.end(); }
+// Original:    function exampleFn(req, res) { arrExample.push(JSON.parse(resp)); res.end(); }
 // Transformed: function exampleFn(req, res, arrExample) { arrExample.push(JSON.parse(resp)); res.end(); }
 args: ["req", "res", "arrExample"]
 argSetupCode:
@@ -125,61 +106,7 @@ argSetupCode:
   const arrExample = [];
 ```
 
-**Database connection:**
-```
-// Original:    function queryDatabase(userId) { return db.collection('users').findOne({ _id: userId }); }
-// Transformed: function queryDatabase(userId, db) { return db.collection('users').findOne({ _id: userId }); }
-args: ["user123", "db"]
-argSetupCode:
-  const db = {
-    collection: function(name) {
-      return { findOne: function(query) { return { name: 'Test User' }; } };
-    }
-  };
-```
-
-**File system:**
-```
-// Original:    function readConfigFile() { return JSON.parse(fs.readFileSync(configPath, 'utf8')); }
-// Transformed: function readConfigFile(fs, configPath) { return JSON.parse(fs.readFileSync(configPath, 'utf8')); }
-args: ["fs", "configPath"]
-argSetupCode:
-  const fs = { readFileSync: function(path, enc) { return '{"apiKey":"test"}'; } };
-  const configPath = '/etc/config.json';
-```
-
-**Event emitters:**
-```
-// Original:    function processEvents(data) { eventEmitter.on('data', callback); }
-// Transformed: function processEvents(data, eventEmitter, callback) { eventEmitter.on('data', callback); }
-args: ["[1,2,3]", "eventEmitter", "callback"]
-argSetupCode:
-  const data = [1,2,3];
-  const callback = function(d) {};
-  const eventEmitter = {
-    _events: {},
-    on: function(event, handler) { this._events[event] = handler; },
-    emit: function(event, data) { if (this._events[event]) this._events[event](data); }
-  };
-```
-
-**Async/Await:**
-```
-// Original:    async function asyncExample() { return await fetchData(); }
-// Transformed: async function asyncExample(fetchData) { return await fetchData(); }
-args: ["fetchData"]
-argSetupCode:
-  const fetchData = async function() { return { data: 'example data' }; };
-```
-
-**Class instantiation:**
-```
-// Original:    function useClassExample() { const instance = new MyClass(); return instance.doSomething(); }
-// Transformed: function useClassExample(MyClass) { const instance = new MyClass(); return instance.doSomething(); }
-args: ["MyClass"]
-argSetupCode:
-  class MyClass { constructor() {} doSomething() { return 'result'; } }
-```
+For more patterns (DB, FS, event emitters, async/await, class instantiation), see `reference/benchmark-inputs.md` in this skill's directory.
 
 ---
 
@@ -188,7 +115,7 @@ argSetupCode:
 Call `run_benchmark` with:
 - `functionData`: the object built in step 2 (`type`, `code`, `explanation`, `entryPoint`, `args`, and `argSetupCode` if needed)
 - `isOptimized: false`
-- If the MCP tool accepts it, also pass the user-confirmed `benchmarkConfig` as part of `functionData` (e.g. `functionData.benchmarkConfig`) or as a separate parameter. Include `repeatSuite`, `minSamples`, `minTime`, and `maxTime`.
+- Pass the user-confirmed `benchmarkConfig` only if the `run_benchmark` schema exposes that parameter (or `functionData.benchmarkConfig`). If not, record the desired config in the report and state that tool defaults were used.
 
 Note the returned `jobId`.
 
@@ -202,7 +129,7 @@ node "<skill-dir>/wait.cjs" 20
 
 ### 6. Get the Result
 
-Call `get_benchmark_result` with the `jobId`. If `status` is not yet `"completed"`, run `wait.cjs 5` and poll again. Repeat until complete.
+Call `get_benchmark_result` with the `jobId`. If `status` is not yet `"completed"`, run `node "<skill-dir>/wait.cjs" 5` and poll again. Poll up to **12 times**; if still not completed, report the `jobId` and incomplete status rather than looping indefinitely.
 
 Extract the full `result` object from the response. It contains:
 - `result.name` — the benchmark name
@@ -215,7 +142,7 @@ Extract the full `result` object from the response. It contains:
 
 Keep the full `result` JSON available to present to the user.
 
-### 7. Save a Markdown Benchmark Report
+### 7. Build a Markdown Benchmark Report
 
 Build a markdown report with these sections:
 - title/date/type/function/source/benchmark ID (when available)
@@ -224,25 +151,11 @@ Build a markdown report with these sections:
 - `## Results`
 - `## Tool Execution Log`
 
-For `## Tool Execution Log`, include the raw input/output pairs for the
-`run_benchmark` call and every `get_benchmark_result` poll for the same `jobId`,
-in chronological order.
-
-Persistence path:
-- In participant or host-managed flows, present this markdown report inline and
-  let the host persist it automatically.
-- In generic-agent flows, write the report to a temporary file and run:
-  ```
-  node "<skill-dir>/save-report.cjs" benchmark "Benchmark Report — <entryPoint>" /tmp/nsolid-benchmark-run.md
-  ```
-
-If you used the local helper, report the saved markdown path to the user.
+For `## Tool Execution Log`, include the raw input/output pairs for the `run_benchmark` call and every `get_benchmark_result` poll for the same `jobId`, in chronological order.
 
 ### 8. Present Results
 
-Use the markdown report from step 7 as the final answer body. Present the
-benchmark results in a markdown table. Include all relevant metrics from the
-`result` object so the user can see the full performance picture at a glance.
+Use the markdown report from step 7 as the final answer body. Present the benchmark results in a markdown table. Include all relevant metrics from the `result` object so the user can see the full performance picture at a glance.
 
 The table must include:
 - **Function**: the entry point name
@@ -256,34 +169,26 @@ The table must include:
 - **Variance assessment**: whether the histogram shows high variance (high min/max spread suggests inconsistent performance)
 - **Benchmark ID**: the benchmark job/reference identifier when available
 
-When variance is **high**, append a diagnostic paragraph below the table. Explain possible causes:
-- **V8 JIT compilation stages**: functions may run in interpreter, baseline, or optimized tiers during the same benchmark, causing sporadic slowdowns or speedups
-- **Garbage collection pauses**: if the function allocates memory, GC runs can introduce latency spikes in certain iterations
-- **External factors**: system load, CPU throttling, or background processes can influence individual samples
-- **Input sensitivity**: the function's performance may vary significantly with different argument values — consider testing a broader set of inputs
-
-Also recommend the user:
-- increase `repeatSuite` or `minSamples` to gather more data if the variance is due to measurement noise
-- inspect per-run ops/sec values from the `get_benchmark_result` output to see if variance is driven by individual outlier runs
-
 Example table format:
 
 | Metric | Value |
 |--------|-------|
-| Function | `generatePattern` |
-| ops/sec | 266.36 |
-| Iterations | 2074 |
+| Function | `<entryPoint>` |
+| ops/sec | <n> |
+| Iterations | <n> |
 | Runs | 15 |
-| Histogram min | 1.65 ms |
-| Histogram max | 7.40 ms |
-| Histogram samples | 128 |
+| Histogram min/max | <min> ms / <max> ms |
 | Config | repeatSuite=15, minSamples=10, minTime=0.05s, maxTime=0.5s |
-| Plugins | V8NeverOptimizePlugin |
-| Variance | High (min/max spread is 4.5x) |
-| Benchmark ID | `benchmark-abc123` |
+| Variance | High/Low (min/max spread is <n>x) |
+| Benchmark ID | `<id>` |
+
+When variance is **high** (wide min/max spread), append a diagnostic line: note likely causes (V8 JIT tier transitions, GC pauses on allocating functions, system load/CPU throttling, or input sensitivity) and recommend increasing `repeatSuite`/`minSamples` or inspecting per-run ops/sec for outliers.
+
+### 9. Write the Report to Disk
+- Ask the user if they want to save the report to disk.
+- If the user confirms, write the final report as a markdown file (`.md`) under `.nsolid/assets/` — for example `.nsolid/assets/benchmark-<entryPoint>.md`. Report the saved path to the user.
 
 ## Guardrails
-
 - NEVER skip searching for real call sites and tests before proposing arguments — the workspace is always available in this flow.
 - If tests exist for the target function or its immediate caller, inspect them before proposing benchmark inputs.
 - NEVER run benchmark tools before the user confirms both the proposed arguments AND the benchmark configuration.

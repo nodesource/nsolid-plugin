@@ -2,23 +2,24 @@
   "wait.cjs": [
     "ns-advanced-memory-leak-hunter",
     "ns-analyze-asset",
-    "ns-analyze-cpu",
-    "ns-analyze-memory",
     "ns-benchmark-run",
-    "ns-benchmark-validate"
+    "ns-cpu-spike-analysis",
+    "ns-generate-asset",
+    "ns-memory-spike-analysis",
+    "ns-validate-optimization"
   ],
   "save-report.cjs": [
     "ns-advanced-memory-leak-hunter",
     "ns-analyze-asset",
-    "ns-analyze-cpu",
     "ns-analyze-event",
-    "ns-analyze-memory",
     "ns-benchmark-run",
-    "ns-benchmark-validate"
+    "ns-cpu-spike-analysis",
+    "ns-memory-spike-analysis",
+    "ns-validate-optimization"
   ],
   "fetch-asset.cjs": [
     "ns-advanced-memory-leak-hunter",
-    "ns-analyze-cpu",
-    "ns-analyze-memory"
+    "ns-cpu-spike-analysis",
+    "ns-memory-spike-analysis"
   ]
 }

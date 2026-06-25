@@ -13,19 +13,20 @@
   "skills": [
     "./skills/ns-advanced-memory-leak-hunter",
     "./skills/ns-analyze-asset",
-    "./skills/ns-analyze-cpu",
     "./skills/ns-analyze-event",
-    "./skills/ns-analyze-memory",
     "./skills/ns-analyze-tracing",
     "./skills/ns-analyze-vulnerabilities",
     "./skills/ns-audit-dependencies",
     "./skills/ns-benchmark-run",
-    "./skills/ns-benchmark-validate",
+    "./skills/ns-cpu-spike-analysis",
     "./skills/ns-generate-asset",
     "./skills/ns-generate-sbom",
+    "./skills/ns-memory-spike-analysis",
     "./skills/ns-node-upgrade",
+    "./skills/ns-optimize-function",
     "./skills/ns-replace-package",
-    "./skills/ns-upgrade-package"
+    "./skills/ns-upgrade-package",
+    "./skills/ns-validate-optimization"
   ],
   "mcpServers": "./.claude-mcp.json"
 }

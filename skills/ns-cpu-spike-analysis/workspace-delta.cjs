@@ -32,8 +32,8 @@ function main () {
 function printHelp () {
   process.stdout.write(
     'Usage:\n' +
-    '  node .agents/skills/ns-analyze-cpu/workspace-delta.cjs <input.json>\n' +
-    '  printf \'%s\' \'<json>\' | node .agents/skills/ns-analyze-cpu/workspace-delta.cjs\n\n' +
+    '  node .agents/skills/ns-cpu-spike-analysis/workspace-delta.cjs <input.json>\n' +
+    '  printf \'%s\' \'<json>\' | node .agents/skills/ns-cpu-spike-analysis/workspace-delta.cjs\n\n' +
     'Input JSON fields:\n' +
     '  workspaceRoot?: string\n' +
     '  targetAppName?: string\n' +

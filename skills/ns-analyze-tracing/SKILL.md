@@ -1,67 +1,58 @@
 ---
 name: ns-analyze-tracing
 description: >-
-  Analyze distributed tracing for HTTP latency, microservice topology, and
-  error origins using OpenTelemetry spans from N|Solid MCP. Use when the user
-  mentions: API timeout, microservice latency, slow endpoint, slow database
-  query, N+1 query, event loop lag, cascading failure, distributed trace,
-  OpenTelemetry, span, tracing, request waterfall, slow dashboard, async
-  bottleneck, await chain, service dependency, or "why is the API slow".
-  Prefer user-provided traces or span exports before querying for fresh data.
+  Analyzes N|Solid/OpenTelemetry tracing evidence for request latency, HTTP errors, and service dependencies. Use when the user asks about slow endpoints, API timeouts, distributed traces/spans, N+1 queries, await chains, microservice latency, cascading failures, or trace IDs. Query N|Solid only when no trace data was provided. Do not assume full waterfall details unless supplied.
 ---
 
-# NodeSource Tracing Analysis
-
-You are a Staff-level Distributed Systems Architect. While others look at
-single lines of code, you map cascading network topographies, database I/O,
-asynchronous Promise chains, and systemic distributed bottlenecks using
-OpenTelemetry data.
-
-## Instructions
-
 ### 1. Use Provided Trace Data First
-- Treat the prompt as primary evidence. Parse any provided trace ID, span list,
-  JSON export, waterfall table, endpoint name, status code, duration, or error
-  stack before calling tools.
-- If the user already supplied a trace export or a specific trace ID with child
-  spans, analyze that material first instead of starting with
-  `information-dashboard` or a broad `tracing` query.
-- If the prompt only contains a generic latency complaint with no trace data,
-  explain what is missing and then use MCP tools to locate the relevant trace.
-- If the user explicitly says read-only, offline, or "analyze this trace", do
-  not go hunting for other services unless a required identifier is missing.
+- Treat the prompt as primary evidence. Parse any provided trace ID, span list, app name, endpoint name, status code, duration, or error stack before calling tools.
+- If the user supplied a trace tree/export, map that hierarchy directly.
+- If the user supplied only a trace ID, call `tracing` with `span_traceId` for list-level rows only; the MCP tool does not expose full waterfall details.
 
 ### 2. Discover Connected Services Only When Needed
 - Call `information-dashboard` (no parameters) to list all connected agents and their `app` names and `id` values.
 - If the user mentions a specific service or app name, use that directly and skip this step.
-- Use `serverless-functions` instead if the user is asking about AWS Lambda.
-- Do NOT call `global-filter` — it returns ~18,000 tokens and will fill the context window.
-- Skip this step when the supplied trace data already identifies the relevant
-  service.
+- Use `serverless-functions` instead if the user is asking about a serverless function.
+- Skip this step when the supplied trace data already identifies the relevant service.
 
 ### 3. Find Slow Requests Only If No Trace Was Supplied
-- Call `tracing`. Use the `durations` parameter (e.g., `durations="1000-"` for spans >1 second).
+- Call `tracing`. Use pipe duration syntax (e.g., `durations="1000|5000"` for 1–5s spans); do not use dash-range syntax.
+- Use `functionName` only when the exact server-side function name is known.
 
 ### 4. Find Failing Endpoints Only If No Trace Was Supplied
 - Call `tracing` with `span_attributes_http_status_code` (e.g., `500`) to filter for HTTP errors.
 
-### 5. Map the Trace
-- Copy the `span_traceId` of the slow/failing request. Call `tracing` again with this specific ID.
-- Analyze the `span_parentId` vs child hierarchy. Pinpoint which exact downstream span was the longest or threw the exception, and explain the topology to the user.
-- If the user already supplied the trace tree, do this analysis directly without
-  an extra discovery query.
+### 5. Triage the Trace
+- Use `tracing` results as collapsed trace-list evidence: slow/failing service, endpoint, status, duration, and `span_traceId`.
+- Do not claim parent/child waterfall analysis from `tracing` alone; `tracing-detail` is not exposed as MCP.
+- If the user supplied the full trace tree/export, analyze `span_parentId` vs child hierarchy directly.
 
 ### 6. Propose Architectural Fixes
-- Once you identify a bottleneck trace, synthesize the parent-child span relationships.
-- Explain if the issue is a slow database query, a synchronous request layer, or network latency.
+- Once you identify a bottleneck trace row or supplied trace tree, explain the strongest supported cause.
+- Only discuss parent-child span relationships when the trace tree was supplied.
 - Propose topological changes like adding Redis caching, parallelizing independent `Promise.all` requests, or using message queues.
 
-### 7. Validate
-- Once the user implements the architectural shift, re-run the tracing analysis post-deployment to confirm spans have reduced in duration.
+### 7. Present a Report
+- Emit the analysis directly in chat as markdown:
+  - `# Tracing Analysis — <service/app/endpoint>`
+  - `## Summary`
+  - `## Evidence`
+  - `## Findings`
+  - `## Recommendations`
+  - `## Validation Plan` when a fix is proposed
+- Ground every claim in supplied trace data or MCP `tracing` output. State when only collapsed trace-list evidence is available.
+
+### 8. Write the Report to Disk
+- Ask the user if they want to save the report to disk.
+- If the user confirms, write the final report as a markdown file (`.md`) under `.nsolid/assets/` — for example `.nsolid/assets/tracing-analysis-<appName-or-endpoint>.md`.
+
+### 9. Validate (only if the user deployed a fix)
+- If the user deployed one of the proposed fixes, re-run `tracing` with the same `durations` filter used in step 3 on the affected endpoint.
+- Compare the post-deployment span duration against the pre-fix baseline you recorded. State the delta explicitly (e.g. "p95 dropped from 1200ms to 80ms").
+- Do not run this step unless the user reports a deployment — it is not a background check.
 
 ## Guardrails
-- NEVER call `global-filter` for service discovery. Use `information-dashboard` only.
-- Do not ignore a user-supplied trace export just to fetch a fresh one.
+- NEVER call `global-filter` for service discovery — it returns ~18,000 tokens and fills the context window. Use `information-dashboard` only.
 - Do not search randomly; always filter using `durations` or status codes first to narrow down the dataset.
-- A slow top-level span is usually caused by a slow child span — respect the topological hierarchy.
+- A slow top-level span may be caused by a slow child span, but only assert that when full trace hierarchy is available.
 - Filter out expected long-polling or WebSocket connections when hunting for latency regressions.

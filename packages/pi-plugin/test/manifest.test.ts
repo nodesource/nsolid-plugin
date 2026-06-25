@@ -33,7 +33,7 @@ describe('Pi plugin', () => {
   it('uses canonical root skills instead of committed package skill copies', () => {
     assert.strictEqual(existsSync(path.resolve('packages/pi-plugin/skills')), false, 'source tree should not keep generated package skill copies')
     assert.strictEqual(existsSync(path.resolve('packages/core/skills')), false, 'source tree should not keep generated core package skill copies')
-    assert.ok(existsSync(path.resolve('skills/ns-analyze-cpu/SKILL.md')), 'canonical root skill must exist')
+    assert.ok(existsSync(path.resolve('skills/ns-analyze-asset/SKILL.md')), 'canonical root skill must exist')
   })
 
   it('index.js exists and has no install/setup side effects', () => {

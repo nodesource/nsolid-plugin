@@ -16,21 +16,9 @@
       "requiresMcp": ["nsolid-console"]
     },
     {
-      "name": "ns-analyze-cpu",
-      "path": "skills/ns-analyze-cpu",
-      "description": "Profile CPU usage of running production processes to identify bottlenecks",
-      "requiresMcp": ["nsolid-console"]
-    },
-    {
       "name": "ns-analyze-event",
       "path": "skills/ns-analyze-event",
       "description": "Analyze event loop delays and identify blocking operations in production",
-      "requiresMcp": ["nsolid-console"]
-    },
-    {
-      "name": "ns-analyze-memory",
-      "path": "skills/ns-analyze-memory",
-      "description": "Take and analyze heap snapshots of running production memory",
       "requiresMcp": ["nsolid-console"]
     },
     {
@@ -58,10 +46,10 @@
       "requiresMcp": ["ns-benchmark"]
     },
     {
-      "name": "ns-benchmark-validate",
-      "path": "skills/ns-benchmark-validate",
-      "description": "Validate benchmark results against established performance baselines",
-      "requiresMcp": ["ns-benchmark"]
+      "name": "ns-cpu-spike-analysis",
+      "path": "skills/ns-cpu-spike-analysis",
+      "description": "Profile CPU usage of running production processes to identify bottlenecks",
+      "requiresMcp": ["nsolid-console"]
     },
     {
       "name": "ns-generate-asset",
@@ -76,10 +64,21 @@
       "requiresMcp": ["ncm"]
     },
     {
+      "name": "ns-memory-spike-analysis",
+      "path": "skills/ns-memory-spike-analysis",
+      "description": "Take and analyze heap snapshots of running production memory",
+      "requiresMcp": ["nsolid-console"]
+    },
+    {
       "name": "ns-node-upgrade",
       "path": "skills/ns-node-upgrade",
       "description": "Plan and execute Node.js version upgrades safely",
       "requiresMcp": ["ncm"]
+    },
+    {
+      "name": "ns-optimize-function",
+      "path": "skills/ns-optimize-function",
+      "description": "Optimize a selected Node.js function: assess impact, benchmark baseline, propose and validate an optimization"
     },
     {
       "name": "ns-replace-package",
@@ -92,6 +91,12 @@
       "path": "skills/ns-upgrade-package",
       "description": "Safely upgrade npm packages with compatibility analysis",
       "requiresMcp": ["ncm"]
+    },
+    {
+      "name": "ns-validate-optimization",
+      "path": "skills/ns-validate-optimization",
+      "description": "Validate benchmark results against established performance baselines",
+      "requiresMcp": ["ns-benchmark"]
     }
   ],
   "mcpServers": [
