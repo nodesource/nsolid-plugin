@@ -119,7 +119,16 @@ function resolveExistingAsset (workspaceRoot, assetId, assetType, appName) {
     }
   }
 
-  const indexRecord = readAssetIndex(workspaceRoot).find(record => record.assetId === assetId)
+  // Lookups are lenient: a malformed/unreadable index.json must not block the
+  // legacy fallback probe below. readAssetIndex() stays strict for the write
+  // path (saveToAssetIndex) so a bad index is never silently clobbered; here
+  // we only need a best-effort match and treat any read failure as "no match".
+  let indexRecord
+  try {
+    indexRecord = readAssetIndex(workspaceRoot).find(record => record.assetId === assetId)
+  } catch {
+    indexRecord = undefined
+  }
   if (indexRecord?.localPath) {
     const indexedPath = path.resolve(assetsDir, indexRecord.localPath)
     if (isPathWithin(assetsDir, indexedPath) && fs.existsSync(indexedPath)) {
