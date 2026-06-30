@@ -18,7 +18,7 @@ function nativeInstallHint (harness: string): string {
     case 'codex':
       return 'codex plugin marketplace add NodeSource/nsolid-plugin && codex plugin add nsolid-plugin@nodesource'
     case 'antigravity':
-      return 'agy plugin install https://github.com/NodeSource/nsolid-plugin'
+      return 'agy plugin install https://github.com/NodeSource/nsolid-plugin.git'
     case 'pi':
       return 'pi install npm:nsolid-pi-plugin'
     default:
@@ -46,6 +46,9 @@ function pluginLine (p: DoctorReport['plugin'], harness: string, color: boolean)
   if (!NATIVE_PLUGIN_HARNESSES.has(harness)) return null
   if (p.status === 'ok') {
     const label = p.label ? ` (${p.label})` : ''
+    if (p.enabled === false) {
+      return line('Plugin', `⚠ disabled${label}`, C.yellow, 'Enable the plugin in your harness', color)
+    }
     return line('Plugin', `✓ installed${label}`, C.green, '', color)
   }
   return line('Plugin', '✗ not installed', C.red, nativeInstallHint(harness), color)

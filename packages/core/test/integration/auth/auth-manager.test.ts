@@ -353,6 +353,31 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     )
   })
 
+  it('throws when validation is unavailable and cached permissions are insufficient', async () => {
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
+
+    const creds: Credentials = {
+      serviceToken: 'existing-token',
+      organizationId: 'org-123',
+      saasToken: 'test-saas-token',
+      consoleUrl: 'https://test.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      permissions: ['nsolid:benchmark:run'],
+    }
+    saveCredentials(creds)
+
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED')
+    }) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    await assert.rejects(
+      ensureAuthenticated(authConfigWithPerms),
+      /Missing required permissions: nsolid:profile:read/
+    )
+  })
+
   it('returns credentials when all required permissions are present', async () => {
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
 

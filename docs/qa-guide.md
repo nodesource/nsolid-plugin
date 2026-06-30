@@ -112,7 +112,7 @@ Expected: no second browser if credentials are still valid; output says credenti
 
 ## 4. CLI doctor / uninstall / logout
 
-Install the opencode mcp and skills firts
+Install the opencode mcp and skills first
 
 ```bash
 $CLI install --harness opencode
@@ -154,12 +154,12 @@ Expected:
 ## 6. Claude Code native install QA
 
 Claude installs from the GitHub plugin root. The local path can be the repo checkout itself, or a clone for closer-to-release coverage.
-We use the branch for now.
+Set `PLUGIN_REF` to the branch or tag under test (e.g., `export PLUGIN_REF=cesar/github-install-test`).
 
 Production accounts:
 
 ```bash
-claude plugin marketplace add NodeSource/nsolid-plugin@cesar/github-install-test
+claude plugin marketplace add NodeSource/nsolid-plugin@$PLUGIN_REF
 claude plugin install nsolid-plugin@nodesource
 $CLI setup --harness claude --yes
 claude plugin list
@@ -169,7 +169,7 @@ claude plugin details nsolid-plugin@nodesource
 Staging accounts (use this one for the initial QA):
 
 ```bash
-claude plugin marketplace add NodeSource/nsolid-plugin@cesar/github-install-test
+claude plugin marketplace add NodeSource/nsolid-plugin@$PLUGIN_REF
 claude plugin install nsolid-plugin@nodesource
 $CLI setup --harness claude --yes --staging
 claude plugin list
@@ -195,12 +195,12 @@ $CLI uninstall --harness claude --keep-credentials || true
 ## 7. Codex native install QA
 
 Codex installs from the GitHub plugin root. The marketplace name is `nodesource`.
-We use the branch for now.
+Set `PLUGIN_REF` to the branch or tag under test.
 
 Production accounts:
 
 ```bash
-codex plugin marketplace add NodeSource/nsolid-plugin@cesar/github-install-test
+codex plugin marketplace add NodeSource/nsolid-plugin@$PLUGIN_REF
 codex plugin add nsolid-plugin@nodesource
 $CLI setup --harness codex --yes
 codex /plugins
@@ -209,7 +209,7 @@ codex /plugins
 Staging accounts (use this one for the initial QA):
 
 ```bash
-codex plugin marketplace add NodeSource/nsolid-plugin@cesar/github-install-test
+codex plugin marketplace add NodeSource/nsolid-plugin@$PLUGIN_REF
 codex plugin add nsolid-plugin@nodesource
 $CLI setup --harness codex --yes --staging
 codex /plugins
@@ -235,12 +235,12 @@ If `codex plugin remove nsolid-plugin@nodesource` is unavailable, remove it thro
 ## 8. Antigravity native install QA
 
 Antigravity installs directly from the GitHub plugin root (a git URL).
-We use the branch for now.
+Set `PLUGIN_REF` to the branch or tag under test.
 
 Production accounts:
 
 ```bash
-agy plugin install https://github.com/nodesource/nsolid-plugin/tree/cesar/github-install-test
+agy plugin install https://github.com/nodesource/nsolid-plugin/tree/$PLUGIN_REF
 agy plugin list
 $CLI setup --harness antigravity --yes
 ```
@@ -249,7 +249,7 @@ Staging accounts (use this one for the initial QA):
 
 ```bash
 
-agy plugin install https://github.com/nodesource/nsolid-plugin/tree/cesar/github-install-test
+agy plugin install https://github.com/nodesource/nsolid-plugin/tree/$PLUGIN_REF
 agy plugin list
 $CLI setup --harness antigravity --yes --staging
 ```

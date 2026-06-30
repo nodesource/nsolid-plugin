@@ -613,7 +613,7 @@ export async function doctor (
   if (isNativeHarness && adapter.detectNativePlugin) {
     const detected = adapter.detectNativePlugin()
     if (detected.installed) {
-      nativeOwned = true
+      nativeOwned = detected.enabled !== false
       report.plugin = {
         status: 'ok',
         installed: true,

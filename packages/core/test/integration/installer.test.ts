@@ -824,8 +824,28 @@ describe('doctor()', () => {
     assert.deepStrictEqual(report.mcpServers.unreachable, [])
   })
 
-  it('detects a native Codex plugin from the cloned marketplace bundle', async () => {
-    // Even without the [plugins.*] enabled flag, the cloned marketplace dir counts.
+  it('keeps a disabled native Codex plugin on the normal tracking path', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    mkdirSync(join(tmpDir, '.codex'), { recursive: true })
+    writeFileSync(join(tmpDir, '.codex', 'config.toml'), [
+      '[plugins."nsolid-plugin@nodesource"]',
+      'enabled = false',
+      '',
+    ].join('\n'))
+
+    const report = await doctor('codex', bundlePath)
+
+    assert.strictEqual(report.plugin.status, 'ok')
+    assert.strictEqual(report.plugin.installed, true)
+    assert.strictEqual(report.plugin.enabled, false)
+    assert.strictEqual(report.skills.status, 'missing')
+    assert.strictEqual(report.mcpServers.status, 'unreachable')
+  })
+
+  it('does not treat a Codex marketplace clone as a plugin install', async () => {
+    // A marketplace clone without [plugins.*] entry should not count as installed.
     const { doctor } = await import('../../src/index.js')
     const bundle = createBundle()
     const bundlePath = writeBundle(bundle)
@@ -834,8 +854,8 @@ describe('doctor()', () => {
 
     const report = await doctor('codex', bundlePath)
 
-    assert.strictEqual(report.plugin.status, 'ok')
-    assert.strictEqual(report.plugin.installed, true)
+    assert.strictEqual(report.plugin.status, 'missing')
+    assert.strictEqual(report.plugin.installed, false)
   })
 
   it('detects a native Claude plugin from installed_plugins.json', async () => {

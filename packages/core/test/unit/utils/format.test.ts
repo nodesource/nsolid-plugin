@@ -74,6 +74,15 @@ describe('formatDoctorReport', () => {
     assert.ok(out.includes('Plugin        ✓ installed (nsolid-plugin@nodesource)'))
   })
 
+  it('shows "⚠ disabled" Plugin line for a disabled native plugin (no color)', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({ plugin: { status: 'ok', installed: true, enabled: false, label: 'nsolid-plugin@nodesource' }, healthy: false })
+    const out = formatDoctorReport(report, 'codex', false)
+
+    assert.ok(out.includes('Plugin        ⚠ disabled (nsolid-plugin@nodesource)'))
+    assert.ok(out.includes('Enable the plugin in your harness'))
+  })
+
   it('shows "✗ not installed" Plugin line with install hint when plugin missing (no color)', async () => {
     const { formatDoctorReport } = await import('../../../src/utils/format.js')
     const report = makeReport({ plugin: { status: 'missing', installed: false }, healthy: false })

@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs'
 import path from 'node:path'
 import type { HarnessAdapter, McpConfig, NativePluginStatus } from './harness-adapter.js'
 import type { HarnessType } from '../types.js'
@@ -7,7 +6,6 @@ import { writeAdapterMcpConfig, readExistingConfig } from '../mcp/mcp-config-wri
 import { readJsonFile } from '../utils/config.js'
 
 const PLUGIN_ID = 'nsolid-plugin@nodesource'
-const MARKETPLACE_NAME = 'nodesource'
 
 export class ClaudeAdapter implements HarnessAdapter {
   readonly name: HarnessType = 'claude'
@@ -39,11 +37,10 @@ export class ClaudeAdapter implements HarnessAdapter {
   /**
    * Claude Code records native plugins in
    * `~/.claude/plugins/installed_plugins.json` and an enable map in
-   * `~/.claude.json` (`enabledPlugins`). The cloned marketplace lives at
-   * `~/.claude/plugins/marketplaces/<name>/`. The installed_plugins schema has
+   * `~/.claude.json` (`enabledPlugins`). The installed_plugins schema has
    * varied across versions (a map or a `{plugins:[...]}` array), so each is
-   * tolerated; an explicit entry or the marketplace clone counts as installed,
-   * and `enabled` is set only when an enabled map explicitly lists the id.
+   * tolerated; an explicit entry counts as installed, and `enabled` is set
+   * only when an enabled map explicitly lists the id.
    */
   detectNativePlugin (): NativePluginStatus {
     const status: NativePluginStatus = { installed: false, label: PLUGIN_ID }
@@ -65,17 +62,13 @@ export class ClaudeAdapter implements HarnessAdapter {
       if (enabledPlugins && typeof enabledPlugins === 'object' && !Array.isArray(enabledPlugins)) {
         const map = enabledPlugins as Record<string, unknown>
         if (map[PLUGIN_ID] === true) {
-          status.installed = true
           status.enabled = true
+        } else if (map[PLUGIN_ID] === false) {
+          status.enabled = false
         }
       }
     } catch {
       // settings.json unreadable — enabled stays undefined.
-    }
-
-    if (!status.installed) {
-      const clone = path.join(this.getPluginsDir(), 'marketplaces', MARKETPLACE_NAME)
-      if (existsSync(clone)) status.installed = true
     }
 
     return status
@@ -84,7 +77,15 @@ export class ClaudeAdapter implements HarnessAdapter {
 
 function extractPluginIds (data: unknown): string[] {
   if (!data || typeof data !== 'object') return []
-  if (Array.isArray(data)) return data.filter((v): v is string => typeof v === 'string')
+  if (Array.isArray(data)) {
+    return data.flatMap((v) => {
+      if (typeof v === 'string') return [v]
+      if (v && typeof v === 'object' && typeof (v as { id?: unknown }).id === 'string') {
+        return [(v as { id: string }).id]
+      }
+      return []
+    })
+  }
 
   const obj = data as Record<string, unknown>
   const arr = obj.plugins

@@ -75,10 +75,15 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
         }
         // API unavailable (unreachable, non-JSON response, timeout): trust the
         // unexpired, origin-matching stored credentials rather than forcing a
-        // re-login on every setup. Mirrors the optimistic-storage path after
+        // re-login on every setup, but only if cached permissions satisfy
+        // required permissions. Mirrors the optimistic-storage path after
         // OAuth. A 401/403 is NOT thrown — validateToken returns { valid: false }
         // for that — so revoked tokens still trigger re-authentication below.
         logger?.warn('auth.credentials.validationUnavailable', { error: (err as Error).message })
+        if (required.length > 0) {
+          const cachedPerms = existing.permissions ?? []
+          checkRequiredPermissions(required, cachedPerms)
+        }
         return existing
       }
     }

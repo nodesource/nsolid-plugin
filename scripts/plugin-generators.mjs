@@ -194,8 +194,8 @@ function readCredentials () {
 function resolveServer (name, credentials) {
   switch (name) {
     case 'nsolid-console': {
-      const derivedUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
-      const url = derivedUrl ?? credentials.mcpUrl
+      const derivedUrl = credentials.mcpUrl ? null : deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
+      const url = credentials.mcpUrl ?? derivedUrl
       if (!url) {
         fail(\`Could not derive NodeSource console MCP URL from stored credentials. Run: \${SETUP_COMMAND}\`)
       }

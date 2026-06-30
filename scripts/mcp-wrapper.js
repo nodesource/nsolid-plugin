@@ -8,7 +8,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
-const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness <claude|codex|antigravity>'
+const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness <claude|codex|antigravity|agents>'
 
 const SERVER_NAMES = new Set(["nsolid-console","ns-benchmark","ncm"])
 const serverName = process.argv[2]
@@ -50,8 +50,8 @@ function readCredentials () {
 function resolveServer (name, credentials) {
   switch (name) {
     case 'nsolid-console': {
-      const derivedUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
-      const url = derivedUrl ?? credentials.mcpUrl
+      const derivedUrl = credentials.mcpUrl ? null : deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
+      const url = credentials.mcpUrl ?? derivedUrl
       if (!url) {
         fail(`Could not derive NodeSource console MCP URL from stored credentials. Run: ${SETUP_COMMAND}`)
       }
