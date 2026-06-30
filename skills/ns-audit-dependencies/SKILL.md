@@ -6,7 +6,7 @@ description: >-
 
 ### 1. Collect Dependencies
 
-**If grounded audit data is already provided in the prompt** (a `## Audit Results` block injected by the host), skip to step 3 and use that data exclusively. Do not re-fetch packages that are already covered.
+**If grounded audit data is already provided in the prompt** (a `## Audit Results` block injected by the host), stop at that data: use it exclusively and skip steps 2 (NCM queries) and 3 (N|Solid live enrichment). Do not re-fetch packages that are already covered, and do not continue into any live enrichment or re-fetch logic — the injected data is the complete source of truth.
 
 **Otherwise (MCP-only / agent mode):**
 - Run the bundled helper to extract all packages (use the absolute path of the directory where you read this SKILL.md):

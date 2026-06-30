@@ -6,10 +6,11 @@ description: >-
 
 ### 1. Use Provided Trace Data First
 - Treat the prompt as primary evidence. Parse any provided trace ID, span list, app name, endpoint name, status code, duration, or error stack before calling tools.
-- If the user supplied a trace tree/export, map that hierarchy directly.
-- If the user supplied only a trace ID, call `tracing` with `span_traceId` for list-level rows only; the MCP tool does not expose full waterfall details.
+- If the user supplied a trace tree/export or any other host-provided trace data, treat it as authoritative: map that hierarchy directly and **do not fall through to live enrichment** (`information-dashboard`, `tracing`). The connected-services discovery (step 2) and live `tracing` queries (steps 3–4) are only for when no sufficient host data is present.
+- If the user supplied only a trace ID (not a full tree), call `tracing` with `span_traceId` for list-level rows only; the MCP tool does not expose full waterfall details.
 
 ### 2. Discover Connected Services Only When Needed
+- **Skip this step entirely if sufficient host-provided trace data is present** (step 1 already authoritatively covered it).
 - Call `information-dashboard` (no parameters) to list all connected agents and their `app` names and `id` values.
 - If the user mentions a specific service or app name, use that directly and skip this step.
 - Use `serverless-functions` instead if the user is asking about a serverless function.

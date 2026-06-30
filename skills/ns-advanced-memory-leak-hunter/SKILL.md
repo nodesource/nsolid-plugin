@@ -14,7 +14,7 @@ description: >-
    ```
    node "<skill-dir>/wait.cjs" 30
    ```
-3. Call `asset-summary` on the returned baseline asset ID. If not ready, wait 10s and retry; use `assets-in-progress` only as a secondary queue clue.
+3. Call `asset-summary` on the returned baseline asset ID. If not ready, run `node "<skill-dir>/wait.cjs" 10` and retry; use `assets-in-progress` only as a secondary queue clue. Cap retries at **12**; if still not ready, report the baseline asset ID and its pending state instead of continuing indefinitely.
 4. From the baseline summary, note the top allocating constructors (e.g., `Object`, `Array`, `system / Map`).
 5. Check `.nsolid/assets/index.json` and `.nsolid/assets/` for the same baseline asset ID. If it is already present locally, skip the download.
 6. If the baseline asset is not present, save it locally:
@@ -34,7 +34,7 @@ description: >-
    ```
    node "<skill-dir>/wait.cjs" 60
    ```
-   Then call `asset-summary` on the peak asset ID. If not ready, wait 10s and retry; use `assets-in-progress` only as a secondary queue clue.
+   Then call `asset-summary` on the peak asset ID. If not ready, run `node "<skill-dir>/wait.cjs" 10` and retry; use `assets-in-progress` only as a secondary queue clue. Cap retries at **12**; if still not ready, report the peak asset ID and its pending state instead of continuing indefinitely.
 4. Analyze the `asset-summary`.
 5. Check `.nsolid/assets/index.json` and `.nsolid/assets/` for the same peak asset ID. If it is already present locally, skip the download.
 6. If the peak asset is not present, save it locally:

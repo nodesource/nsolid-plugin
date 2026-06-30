@@ -56,15 +56,20 @@ function buildAssetFilename (assetType, appName, assetId) {
 function readAssetIndex (workspaceRoot) {
   const indexPath = path.join(getAssetsDir(workspaceRoot), 'index.json')
 
-  try {
-    if (fs.existsSync(indexPath)) {
-      return JSON.parse(fs.readFileSync(indexPath, 'utf-8'))
-    }
-  } catch {
+  // Only treat a genuinely missing index as empty. A file that exists but is
+  // unreadable or malformed must NOT be swallowed into [] — otherwise the next
+  // saveToAssetIndex() upsert would overwrite it and silently drop every
+  // existing entry. Surface that error so the caller can fail loudly.
+  if (!fs.existsSync(indexPath)) {
     return []
   }
 
-  return []
+  const raw = fs.readFileSync(indexPath, 'utf-8')
+  const parsed = JSON.parse(raw)
+  if (!Array.isArray(parsed)) {
+    throw new Error(`index.json is not an array; refusing to overwrite a malformed index at ${indexPath}`)
+  }
+  return parsed
 }
 
 function isPathWithin (parent, candidate) {

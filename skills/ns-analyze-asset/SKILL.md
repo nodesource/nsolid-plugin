@@ -20,7 +20,7 @@ description: >-
 Heap snapshot summarization is asynchronous and may not be ready on the first call. Use this retry loop:
 
 1. Call `asset-summary` with the asset ID.
-2. If the response body contains `"processing"`, `"summarization started"`, or a reference to `"assets-in-progress"`, the snapshot is still being summarized — do NOT analyze it yet.
+2. If the response body contains `"pending"`, `"processing"`, `"summarization started"`, `"async"`, or a reference to `"assets-in-progress"`, the snapshot is still being summarized — do NOT analyze it yet.
 3. Call `assets-in-progress` to check the queue position.
 4. Run the wait script (use the absolute path of the directory where you read this SKILL.md):
    ```
@@ -34,9 +34,9 @@ Heap snapshot summarization is asynchronous and may not be ready on the first ca
 **Never analyze a heap snapshot summary that is still marked as processing.**
 
 #### No asset ID
-- If the user gives a local `.cpuprofile`, `.heapprofile`, or `.heapsnapshot` path instead of an asset ID, resolve the full asset ID from `.nsolid/assets/index.json` or from the filename pattern `.nsolid/assets/<assetType>-<appName>-<assetIdPrefix>.<ext>`, then analyze it with `asset-summary`.
+- If the user gives a local `.cpuprofile`, `.heapprofile`, or `.heapsnapshot` path instead of an asset ID, prefer resolving the full asset ID from `.nsolid/assets/index.json`. The flat filename pattern `.nsolid/assets/<assetType>-<appName>-<assetIdPrefix>.<ext>` produced by `fetch-asset.cjs` carries only an 8-character asset ID **prefix** (not the full ID), so it is not sufficient on its own.
 - **Never read the raw asset file into context** — it is large and token-wasteful. Always go through the token-optimized `asset-summary`.
-- If the asset ID cannot be resolved and MCP is unavailable, state that clearly and stop.
+- If `index.json` is missing and MCP is unavailable, tell the user the full asset ID cannot be recovered (only the filename prefix is known) and stop.
 
 ### 3. Analyze by Asset Type
 

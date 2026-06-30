@@ -37,7 +37,7 @@ Run the bundled wait script (use the absolute path of the directory where you re
 - Heap tracking: `node "<skill-dir>/wait.cjs" 35`.
 
 ### 5. Check Readiness
-- CPU profile and heap sample: call `asset-summary` on the returned asset ID. If not ready, run `node "<skill-dir>/wait.cjs" 5` and retry on the same ID.
+- CPU profile and heap sample: call `asset-summary` on the returned asset ID. If not ready, run `node "<skill-dir>/wait.cjs" 5` and retry on the same ID. Cap retries at **12**. If still not ready, report the asset ID and the pending state — do not invent analysis.
 - Heap snapshot: call `asset-summary` first. If the response says async, processing, pending, or summarization started, call `assets-in-progress`, then run `node "<skill-dir>/wait.cjs" 5`, then retry `asset-summary`. Cap retries at **12**. If still not ready, report the asset ID and the pending state — do not invent analysis.
 - Heap tracking: call `assets-in-progress`. If the returned asset ID is still in progress, run `node "<skill-dir>/wait.cjs" 5` and retry. Cap retries at **12**. Once it is no longer in progress, continue to download.
 - If `asset-summary` returns a tool error (auth, network, MCP failure), report the error and stop. Do not retry as if pending.

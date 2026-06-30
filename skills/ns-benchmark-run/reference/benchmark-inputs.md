@@ -21,12 +21,13 @@ args: []  // function with no parameters
 
 ```
 // Original:    function exampleFn(req, res) { arrExample.push(JSON.parse(resp)); res.end(); }
-// Transformed: function exampleFn(req, res, arrExample) { arrExample.push(JSON.parse(resp)); res.end(); }
-args: ["req", "res", "arrExample"]
+// Transformed: function exampleFn(req, res, arrExample, resp) { arrExample.push(JSON.parse(resp)); res.end(); }
+args: ["req", "res", "arrExample", "resp"]
 argSetupCode:
   const req = { url: '/test' };
   const res = { writeHead: function() {}, write: function() {}, end: function() {} };
   const arrExample = [];
+  const resp = JSON.stringify({ key: 'value' });
 ```
 
 ## Database connection
@@ -59,7 +60,7 @@ argSetupCode:
 ```
 // Original:    function processEvents(data) { eventEmitter.on('data', callback); }
 // Transformed: function processEvents(data, eventEmitter, callback) { eventEmitter.on('data', callback); }
-args: ["[1,2,3]", "eventEmitter", "callback"]
+args: ["data", "eventEmitter", "callback"]
 argSetupCode:
   const data = [1,2,3];
   const callback = function(d) {};
