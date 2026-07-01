@@ -123,7 +123,7 @@ Design impact:
 Key findings:
 
 - Antigravity CLI installs plugins with `agy plugin install /path/to/local/plugin` or remote equivalents.
-- Installed plugins are staged under `~/.gemini/antigravity-cli/plugins/<plugin_name>/`.
+- Installed plugins are staged under `~/.gemini/config/plugins/<plugin_name>/` (the legacy `~/.gemini/antigravity-cli/plugins/` path is not read at runtime).
 - A compliant plugin contains `plugin.json` plus optional `mcp_config.json`, `hooks.json`, `skills/`, `agents/`, and `rules/`.
 - Antigravity hooks use a top-level named-hook map in `hooks.json`, but N|Solid does not ship startup guidance hooks because auth guidance is handled by explicit setup commands and runtime MCP errors.
 - CLI management commands include `agy plugin list`, `agy plugin install`, `agy plugin disable`, `agy plugin enable`, and `agy plugin uninstall`.
@@ -134,7 +134,7 @@ Design impact:
 - Generate `dist/plugins/antigravity/nsolid-plugin/` with `plugin.json`, `mcp_config.json`, `scripts/install.js`, `scripts/mcp-wrapper.js`, and `skills/`.
 - Native Antigravity install should stage artifact-local assets, not resolve skills from `@nodesource/plugin-core` at install time.
 - Native install should not write global skill directories or start auth. It may print `nsolid-plugin setup --harness antigravity` as the next step.
-- Fallback direct install can still write `~/.gemini/antigravity-cli/mcp_config.json` and `~/.gemini/antigravity-cli/skills/` when users cannot use `agy plugin install`.
+- Fallback direct install can still write `~/.gemini/config/mcp_config.json` and `~/.gemini/config/skills/` when users cannot use `agy plugin install`.
 
 ## OpenCode docs and fallback decision
 

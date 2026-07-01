@@ -880,7 +880,7 @@ describe('doctor()', () => {
     const { doctor } = await import('../../src/index.js')
     const bundle = createBundle()
     const bundlePath = writeBundle(bundle)
-    mkdirSync(join(tmpDir, '.gemini', 'antigravity-cli', 'plugins', 'nsolid-plugin'), { recursive: true })
+    mkdirSync(join(tmpDir, '.gemini', 'config', 'plugins', 'nsolid-plugin'), { recursive: true })
 
     const report = await doctor('antigravity', bundlePath)
 

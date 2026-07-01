@@ -59,6 +59,6 @@ describe('getAdapter', () => {
     assert.ok(pi.getMcpConfigPath()?.endsWith(['.pi', 'agent', 'mcp.json'].join(path.sep)))
 
     const antigravity = getAdapter('antigravity')
-    assert.ok(antigravity.getMcpConfigPath()?.endsWith(['.gemini', 'antigravity-cli', 'mcp_config.json'].join(path.sep)))
+    assert.ok(antigravity.getMcpConfigPath()?.endsWith(['.gemini', 'config', 'mcp_config.json'].join(path.sep)))
   })
 })

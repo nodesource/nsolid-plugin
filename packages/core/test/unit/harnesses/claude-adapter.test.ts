@@ -110,4 +110,132 @@ describe('ClaudeAdapter', () => {
 
     assert.strictEqual(adapter.name, 'claude')
   })
+
+  describe('detectNativePlugin', () => {
+    it('detects plugin from v2 map schema {version, plugins:{<id>:[...]}}', async () => {
+      const { ClaudeAdapter } = await import('../../../src/harnesses/claude-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+
+      const installedPath = resolveHome('~/.claude/plugins/installed_plugins.json')
+      mkdirSync(dirname(installedPath), { recursive: true })
+      writeFileSync(installedPath, JSON.stringify({
+        version: 2,
+        plugins: {
+          'nsolid-plugin@nodesource': [
+            { scope: 'user', version: '1.0.0', installedAt: '2026-06-30T20:31:51.571Z' },
+          ],
+        },
+      }, null, 2))
+
+      const adapter = new ClaudeAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.deepStrictEqual(status.installedIds, ['nsolid-plugin@nodesource'])
+      assert.strictEqual(status.label, 'nsolid-plugin@nodesource')
+    })
+
+    it('matches a community-marketplace id like nsolid-plugin@claude-plugins-official', async () => {
+      const { ClaudeAdapter } = await import('../../../src/harnesses/claude-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+
+      const installedPath = resolveHome('~/.claude/plugins/installed_plugins.json')
+      mkdirSync(dirname(installedPath), { recursive: true })
+      writeFileSync(installedPath, JSON.stringify({
+        version: 2,
+        plugins: {
+          'nsolid-plugin@claude-plugins-official': [
+            { scope: 'user', version: '1.0.0' },
+          ],
+        },
+      }, null, 2))
+
+      const adapter = new ClaudeAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.deepStrictEqual(status.installedIds, ['nsolid-plugin@claude-plugins-official'])
+    })
+
+    it('still supports the legacy array plugins schema', async () => {
+      const { ClaudeAdapter } = await import('../../../src/harnesses/claude-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+
+      const installedPath = resolveHome('~/.claude/plugins/installed_plugins.json')
+      mkdirSync(dirname(installedPath), { recursive: true })
+      writeFileSync(installedPath, JSON.stringify({
+        plugins: [{ id: 'nsolid-plugin@nodesource' }, { id: 'other-plugin@somewhere' }],
+      }, null, 2))
+
+      const adapter = new ClaudeAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.deepStrictEqual(status.installedIds, ['nsolid-plugin@nodesource'])
+    })
+
+    it('reports not installed when absent', async () => {
+      const { ClaudeAdapter } = await import('../../../src/harnesses/claude-adapter.js')
+      const adapter = new ClaudeAdapter()
+
+      const status = adapter.detectNativePlugin()
+      assert.strictEqual(status.installed, false)
+    })
+
+    it('reads enabled=true from ~/.claude.json enabledPlugins', async () => {
+      const { ClaudeAdapter } = await import('../../../src/harnesses/claude-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+
+      const installedPath = resolveHome('~/.claude/plugins/installed_plugins.json')
+      mkdirSync(dirname(installedPath), { recursive: true })
+      writeFileSync(installedPath, JSON.stringify({
+        version: 2,
+        plugins: { 'nsolid-plugin@nodesource': [{ scope: 'user' }] },
+      }, null, 2))
+
+      const claudeJsonPath = resolveHome('~/.claude.json')
+      writeFileSync(claudeJsonPath, JSON.stringify({
+        enabledPlugins: { 'nsolid-plugin@nodesource': true, 'other@x': false },
+      }, null, 2))
+
+      const adapter = new ClaudeAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.strictEqual(status.enabled, true)
+    })
+
+    it('respects enabledPlugins=false as disabled', async () => {
+      const { ClaudeAdapter } = await import('../../../src/harnesses/claude-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+
+      const installedPath = resolveHome('~/.claude/plugins/installed_plugins.json')
+      mkdirSync(dirname(installedPath), { recursive: true })
+      writeFileSync(installedPath, JSON.stringify({
+        version: 2,
+        plugins: { 'nsolid-plugin@nodesource': [{ scope: 'user' }] },
+      }, null, 2))
+
+      const claudeJsonPath = resolveHome('~/.claude.json')
+      writeFileSync(claudeJsonPath, JSON.stringify({
+        enabledPlugins: { 'nsolid-plugin@nodesource': false },
+      }, null, 2))
+
+      const adapter = new ClaudeAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.strictEqual(status.enabled, false)
+    })
+  })
 })

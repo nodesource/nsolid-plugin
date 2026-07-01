@@ -20,6 +20,14 @@ export interface NativePluginStatus {
   enabled?: boolean
   /** Human label like `nsolid-plugin@nodesource` shown on the Plugin line. */
   label?: string
+  /**
+   * The concrete plugin identifiers the harness recorded for the nsolid plugin,
+   * e.g. `["nsolid-plugin@nodesource"]` for Claude/Codex (a `<name>@<marketplace>`
+   * id that varies by install source) or `["nsolid-plugin"]` for Antigravity.
+   * Uninstall targets these exact ids; doctor's display uses `label`. Empty when
+   * not installed or when an adapter could not resolve concrete ids.
+   */
+  installedIds?: string[]
 }
 
 export interface HarnessAdapter {

@@ -18,7 +18,7 @@ const HARNESS_LIST = [
   { name: 'claude', configRel: '.claude.json', urlKey: 'url' },
   { name: 'codex', configRel: '.codex/config.toml', urlKey: 'url' },
   { name: 'opencode', configRel: '.config/opencode/opencode.jsonc', urlKey: 'url' },
-  { name: 'antigravity', configRel: '.gemini/antigravity-cli/mcp_config.json', urlKey: 'serverUrl' },
+  { name: 'antigravity', configRel: '.gemini/config/mcp_config.json', urlKey: 'serverUrl' },
   { name: 'pi', configRel: '.pi/agent/mcp.json', urlKey: 'url' },
 ]
 const PLUGIN_OWNED_HARNESSES = new Set(['claude', 'codex', 'antigravity'])

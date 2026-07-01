@@ -32,7 +32,7 @@ function getMcpConfigInfo (harness: HarnessType): ConfigInfo | null {
     case 'opencode':
       return { configPath: resolveHome('~/.config/opencode/opencode.jsonc'), format: 'jsonc', jsonMcpKey: 'mcp' }
     case 'antigravity':
-      return { configPath: resolveHome('~/.gemini/antigravity-cli/mcp_config.json'), format: 'json' }
+      return { configPath: resolveHome('~/.gemini/config/mcp_config.json'), format: 'json' }
     case 'pi':
       return { configPath: resolveHome('~/.pi/agent/mcp.json'), format: 'json' }
   }

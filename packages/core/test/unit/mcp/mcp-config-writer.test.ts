@@ -487,7 +487,7 @@ describe('writeAdapterMcpConfig', () => {
     const { mkdirSync } = await import('node:fs')
     const { dirname } = await import('node:path')
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, '')
 
@@ -508,7 +508,7 @@ describe('writeAdapterMcpConfig', () => {
     const { mkdirSync } = await import('node:fs')
     const { dirname } = await import('node:path')
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify({
       mcpServers: { 'old-server': { url: 'http://old:8080', headers: {} } },
@@ -533,7 +533,7 @@ describe('writeAdapterMcpConfig', () => {
     const { mkdirSync } = await import('node:fs')
     const { dirname } = await import('node:path')
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
 
     await writeMcpConfig('antigravity', [{
@@ -604,7 +604,7 @@ describe('removeMcpConfig', () => {
 
     const result = await removeMcpConfig('antigravity', ['ns-benchmark'])
     assert.strictEqual(result, undefined)
-    assert.strictEqual(existsSync(resolveHome('~/.gemini/antigravity-cli/mcp_config.json')), false)
+    assert.strictEqual(existsSync(resolveHome('~/.gemini/config/mcp_config.json')), false)
   })
 
   it('antigravity round-trip: removing one server keeps survivors as serverUrl', async () => {
@@ -617,7 +617,7 @@ describe('removeMcpConfig', () => {
     ])
     await removeMcpConfig('antigravity', ['ns-benchmark'])
 
-    const content = JSON.parse(readFileSync(resolveHome('~/.gemini/antigravity-cli/mcp_config.json'), 'utf-8'))
+    const content = JSON.parse(readFileSync(resolveHome('~/.gemini/config/mcp_config.json'), 'utf-8'))
     assert.ok(!('ns-benchmark' in content.mcpServers))
     assert.ok('ns-solid' in content.mcpServers)
     // Survivor must be written back in Antigravity's serverUrl schema, not url.
@@ -682,7 +682,7 @@ describe('removeMcpConfig', () => {
 
     await removeMcpConfig('antigravity', ['ns-benchmark'])
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     assert.strictEqual(existsSync(configPath), false)
   })
 })

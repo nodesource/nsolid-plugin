@@ -49,7 +49,7 @@ Each harness has an adapter that provides its config and skills paths:
 | Claude | Plugin-owned `.mcp.json` | Plugin-owned `skills/` | Yes |
 | Codex | Plugin-owned `.mcp.json` | Plugin-owned `skills/` | Yes |
 | OpenCode | `~/.config/opencode/opencode.jsonc` | `~/.config/opencode/skills/` | Yes |
-| Antigravity | Plugin-owned `~/.gemini/antigravity-cli/plugins/nsolid-plugin/mcp_config.json` | Plugin-owned `~/.gemini/antigravity-cli/plugins/nsolid-plugin/skills/` | Yes |
+| Antigravity | Plugin-owned `~/.gemini/config/plugins/nsolid-plugin/mcp_config.json` | Plugin-owned `~/.gemini/config/plugins/nsolid-plugin/skills/` | Yes |
 | Pi | `~/.pi/agent/mcp.json` | Package-owned `nsolid-pi-plugin/skills/` | Yes |
 
 ## CLI

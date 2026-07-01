@@ -36,6 +36,7 @@ import {
 } from './mcp/index.js'
 import { getAdapter } from './harnesses/index.js'
 import type { HarnessAdapter } from './harnesses/index.js'
+import { removeNativePlugin } from './harnesses/native-plugin-uninstaller.js'
 import { findPiPluginSkillRoots } from './harnesses/pi-plugin-detector.js'
 import { readJsonFile } from './utils/config.js'
 import { getSkillsDir, getAuthFilePath } from './utils/path.js'
@@ -453,6 +454,19 @@ export async function uninstall (
       }
     }
 
+    // Remove the harness's native plugin (e.g. `claude plugin install`,
+    // `agy plugin install`) when present. This is distinct from the CLI-tracked
+    // skills/MCP above: native installs are owned by the harness CLI and would
+    // otherwise survive `uninstall`. Best-effort and non-fatal.
+    if (adapter.detectNativePlugin) {
+      try {
+        const nativeResult = await removeNativePlugin(harness, adapter, { logger })
+        errors.push(...nativeResult.warnings)
+      } catch (err) {
+        errors.push(`Native plugin removal failed: ${(err as Error).message}`)
+      }
+    }
+
     // After all per-harness removal, see whether ANY install remains across any harness.
     // removeTrackedSkills/removeTrackedMcps already unlink the tracking file when it empties,
     // so a null read == "nothing NodeSource-installed is left anywhere".
@@ -478,6 +492,17 @@ export async function uninstall (
   } else {
     const warnings = await bestEffortCleanup(harness, adapter, options, logger)
     errors.push(...warnings)
+
+    // Even without a tracking file, a native plugin may still be staged by the
+    // harness CLI; remove it best-effort so `uninstall` is consistent.
+    if (adapter.detectNativePlugin) {
+      try {
+        const nativeResult = await removeNativePlugin(harness, adapter, { logger })
+        errors.push(...nativeResult.warnings)
+      } catch (err) {
+        errors.push(`Native plugin removal failed: ${(err as Error).message}`)
+      }
+    }
 
     // Best-effort cleanup intentionally never purges credentials: without a
     // tracking file we cannot reliably tell whether another harness is still

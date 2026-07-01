@@ -10,7 +10,7 @@ const MATRIX = [
   { harness: 'claude', configRel: '.claude.json', urlKey: 'url' },
   { harness: 'codex', configRel: '.codex/config.toml', urlKey: 'url' },
   { harness: 'opencode', configRel: '.config/opencode/opencode.jsonc', urlKey: 'url' },
-  { harness: 'antigravity', configRel: '.gemini/antigravity-cli/mcp_config.json', urlKey: 'serverUrl' },
+  { harness: 'antigravity', configRel: '.gemini/config/mcp_config.json', urlKey: 'serverUrl' },
   { harness: 'pi', configRel: '.pi/agent/mcp.json', urlKey: 'url' },
 ] as const
 

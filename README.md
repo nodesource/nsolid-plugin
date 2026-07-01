@@ -138,7 +138,7 @@ agy plugin install https://github.com/NodeSource/nsolid-plugin.git
 nsolid-plugin setup --harness antigravity
 ```
 
-Antigravity installs the repository root as a native plugin and stages skills/MCP wrappers under `~/.gemini/antigravity-cli/plugins/nsolid-plugin/`. Install does not start auth.
+Antigravity installs the repository root as a native plugin and stages skills/MCP wrappers under `~/.gemini/config/plugins/nsolid-plugin/`. Install does not start auth.
 
 ### Pi Agent
 

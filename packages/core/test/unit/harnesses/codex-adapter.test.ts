@@ -107,4 +107,59 @@ describe('CodexAdapter', () => {
 
     assert.strictEqual(adapter.name, 'codex')
   })
+
+  describe('detectNativePlugin', () => {
+    it('detects plugin by base name under any marketplace suffix', async () => {
+      const { CodexAdapter } = await import('../../../src/harnesses/codex-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+      const { stringify: stringifyToml } = await import('smol-toml')
+
+      const configPath = resolveHome('~/.codex/config.toml')
+      mkdirSync(dirname(configPath), { recursive: true })
+      writeFileSync(configPath, stringifyToml({
+        plugins: {
+          'nsolid-plugin@claude-plugins-official': { enabled: true },
+          'unrelated@somewhere': { enabled: true },
+        },
+      } as Record<string, unknown>))
+
+      const adapter = new CodexAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.deepStrictEqual(status.installedIds, ['nsolid-plugin@claude-plugins-official'])
+      assert.strictEqual(status.enabled, true)
+      assert.strictEqual(status.label, 'nsolid-plugin@claude-plugins-official')
+    })
+
+    it('detects the @nodesource marketplace id', async () => {
+      const { CodexAdapter } = await import('../../../src/harnesses/codex-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+      const { mkdirSync } = await import('node:fs')
+      const { dirname } = await import('node:path')
+      const { stringify: stringifyToml } = await import('smol-toml')
+
+      const configPath = resolveHome('~/.codex/config.toml')
+      mkdirSync(dirname(configPath), { recursive: true })
+      writeFileSync(configPath, stringifyToml({
+        plugins: { 'nsolid-plugin@nodesource': { enabled: true } },
+      } as Record<string, unknown>))
+
+      const adapter = new CodexAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.deepStrictEqual(status.installedIds, ['nsolid-plugin@nodesource'])
+    })
+
+    it('reports not installed when absent', async () => {
+      const { CodexAdapter } = await import('../../../src/harnesses/codex-adapter.js')
+      const adapter = new CodexAdapter()
+
+      const status = adapter.detectNativePlugin()
+      assert.strictEqual(status.installed, false)
+    })
+  })
 })

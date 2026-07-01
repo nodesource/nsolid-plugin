@@ -31,21 +31,29 @@ describe('AntigravityAdapter', () => {
     }
   })
 
-  it('returns correct MCP config path', async () => {
+  it('returns correct MCP config path under ~/.gemini/config', async () => {
     const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
     const adapter = new AntigravityAdapter()
 
     const configPath = adapter.getMcpConfigPath()
-    assert.ok(configPath.endsWith(['.gemini', 'antigravity-cli', 'mcp_config.json'].join(sep)))
+    assert.ok(configPath.endsWith(['.gemini', 'config', 'mcp_config.json'].join(sep)))
     assert.ok(configPath.startsWith(tmpDir))
   })
 
-  it('returns correct skills path', async () => {
+  it('returns correct skills path under ~/.gemini/config/skills', async () => {
     const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
     const adapter = new AntigravityAdapter()
 
     const skillsPath = adapter.getSkillsPath()
-    assert.ok(skillsPath.includes(['.gemini', 'antigravity-cli', 'skills'].join(sep)), `unexpected skills path: ${skillsPath}`)
+    assert.ok(skillsPath.includes(['.gemini', 'config', 'skills'].join(sep)), `unexpected skills path: ${skillsPath}`)
+  })
+
+  it('returns plugins path under ~/.gemini/config/plugins', async () => {
+    const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
+    const adapter = new AntigravityAdapter()
+
+    const pluginsPath = adapter.getPluginsPath()
+    assert.ok(pluginsPath.endsWith(['.gemini', 'config', 'plugins'].join(sep)), `unexpected plugins path: ${pluginsPath}`)
   })
 
   it('supports MCP', async () => {
@@ -67,7 +75,7 @@ describe('AntigravityAdapter', () => {
     const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     mkdirSync(dirname(configPath), { recursive: true })
     writeFileSync(configPath, JSON.stringify({
       mcpServers: {
@@ -96,7 +104,7 @@ describe('AntigravityAdapter', () => {
       },
     })
 
-    const configPath = resolveHome('~/.gemini/antigravity-cli/mcp_config.json')
+    const configPath = resolveHome('~/.gemini/config/mcp_config.json')
     assert.ok(existsSync(configPath))
 
     const content = JSON.parse(readFileSync(configPath, 'utf-8'))
@@ -136,5 +144,64 @@ describe('AntigravityAdapter', () => {
     assert.strictEqual(read.mcpServers['ns-benchmark'].headers.Authorization, 'Bearer abc')
     assert.strictEqual(read.mcpServers['ns-monitor'].url, 'https://monitor.mcp.saas.nodesource.io/mcp')
     assert.strictEqual(read.mcpServers['ns-monitor'].headers.Authorization, 'Bearer xyz')
+  })
+
+  describe('detectNativePlugin', () => {
+    it('detects plugin from the staged plugins dir under ~/.gemini/config', async () => {
+      const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+
+      const pluginDir = resolveHome('~/.gemini/config/plugins/nsolid-plugin')
+      mkdirSync(pluginDir, { recursive: true })
+
+      const adapter = new AntigravityAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.strictEqual(status.enabled, true)
+      assert.deepStrictEqual(status.installedIds, ['nsolid-plugin'])
+    })
+
+    it('detects plugin from import_manifest.json when the dir is gone', async () => {
+      const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+
+      const manifestPath = resolveHome('~/.gemini/config/import_manifest.json')
+      mkdirSync(dirname(manifestPath), { recursive: true })
+      writeFileSync(manifestPath, JSON.stringify({
+        imports: [{ name: 'nsolid-plugin', source: 'antigravity', importedAt: '2026-06-30T20:34:22Z' }],
+      }, null, 2))
+
+      const adapter = new AntigravityAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, true)
+      assert.deepStrictEqual(status.installedIds, ['nsolid-plugin'])
+    })
+
+    it('reports not installed when neither dir nor manifest entry exist', async () => {
+      const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
+      const adapter = new AntigravityAdapter()
+
+      const status = adapter.detectNativePlugin()
+      assert.strictEqual(status.installed, false)
+      assert.strictEqual(status.installedIds, undefined)
+    })
+
+    it('ignores unrelated manifest imports', async () => {
+      const { AntigravityAdapter } = await import('../../../src/harnesses/antigravity-adapter.js')
+      const { resolveHome } = await import('../../../src/utils/path.js')
+
+      const manifestPath = resolveHome('~/.gemini/config/import_manifest.json')
+      mkdirSync(dirname(manifestPath), { recursive: true })
+      writeFileSync(manifestPath, JSON.stringify({
+        imports: [{ name: 'some-other-plugin', source: 'antigravity' }],
+      }, null, 2))
+
+      const adapter = new AntigravityAdapter()
+      const status = adapter.detectNativePlugin()
+
+      assert.strictEqual(status.installed, false)
+    })
   })
 })
