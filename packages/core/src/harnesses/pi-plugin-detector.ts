@@ -1,6 +1,5 @@
 import os from 'node:os'
 import path from 'node:path'
-import { existsSync } from 'node:fs'
 import { readJsonFile } from '../utils/config.js'
 
 /**
@@ -107,7 +106,8 @@ export function findPiPluginSkillRoots (): string[] {
 export function piPluginInstalled (): boolean {
   return findPiPluginPackageRoots().some((root) => {
     try {
-      return existsSync(path.join(root, 'package.json'))
+      const pkg = readJsonFile<{ name?: string }>(path.join(root, 'package.json'))
+      return pkg?.name === PI_PLUGIN_PACKAGE_NAME
     } catch {
       return false
     }
