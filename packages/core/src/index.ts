@@ -556,9 +556,15 @@ async function bestEffortCleanup (
       }
     }
     if (!usedBundle) {
-      warnings.push(
-        'No tracking file and no bundle provided — using hardcoded MCP server list; user-added MCP servers may be left in the config'
-      )
+      // For plugin-owned harnesses (claude/codex/antigravity) the MCP servers
+      // are owned by the native plugin, not the harness-level MCP config.
+      // removeNativePlugin() handles the real cleanup, so the hardcoded
+      // fallback here is redundant and the warning would only be noise.
+      if (!PLUGIN_OWNED_HARNESSES.has(harness)) {
+        warnings.push(
+          'No tracking file and no bundle provided — using hardcoded MCP server list; user-added MCP servers may be left in the config'
+        )
+      }
     }
     try {
       const mcpConfigPath = adapter.getMcpConfigPath()

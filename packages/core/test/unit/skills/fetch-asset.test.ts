@@ -1,7 +1,9 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { promises as dns } from 'node:dns'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
+import type { TestContext } from 'node:test'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fetchAssetPath = join(__dirname, '../../../../../skill-assets/fetch-asset.cjs')
@@ -30,6 +32,15 @@ async function loadFetchAsset () {
     resolveHostnameIps: (hostname: string) => Promise<string[]>
     validateConsoleUrl: (consoleUrl: string) => Promise<void>
   }
+}
+
+function mockDnsLookup (t: TestContext, addresses: string[]) {
+  t.mock.method(dns, 'lookup', async () => {
+    return addresses.map((address) => ({
+      address,
+      family: address.includes(':') ? 6 : 4,
+    }))
+  })
 }
 
 describe('isPrivateOrLocalIp', () => {
@@ -207,11 +218,12 @@ describe('validateConsoleUrl', () => {
     )
   })
 
-  it('rejects hostnames that resolve to loopback', async () => {
+  it('rejects hostnames that resolve to loopback', async (t) => {
+    mockDnsLookup(t, ['127.0.0.2'])
     const { validateConsoleUrl } = await loadFetchAsset()
     await assert.rejects(
-      () => validateConsoleUrl('https://localhost'),
-      /consoleUrl cannot be localhost/
+      () => validateConsoleUrl('https://loopback.example.test'),
+      /private or local address/
     )
   })
 
@@ -221,7 +233,8 @@ describe('validateConsoleUrl', () => {
     await assert.doesNotReject(() => validateConsoleUrl('https://8.8.8.8'))
   })
 
-  it('allows public hostnames', async () => {
+  it('allows public hostnames', async (t) => {
+    mockDnsLookup(t, ['93.184.216.34'])
     const { validateConsoleUrl } = await loadFetchAsset()
     await assert.doesNotReject(() => validateConsoleUrl('https://example.com'))
   })

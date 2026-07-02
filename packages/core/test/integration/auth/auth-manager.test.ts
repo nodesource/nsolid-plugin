@@ -100,7 +100,9 @@ afterEach(() => {
 })
 
 describe('ensureAuthenticated', () => {
-  it('returns existing valid credentials (fast path)', async () => {
+  it('returns existing unexpired credentials without re-validating (fast path)', async () => {
+    // setup is auth-only and must be idempotent: repeated runs trust stored
+    // credentials and never call the validation API or re-check permissions.
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
 
     const creds: Credentials = {
@@ -114,17 +116,57 @@ describe('ensureAuthenticated', () => {
     }
     saveCredentials(creds)
 
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: ['nsolid:benchmark:run'] }),
-    })) as unknown as typeof fetch
+    let fetchCalls = 0
+    globalThis.fetch = (async () => {
+      fetchCalls++
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ permissions: ['nsolid:benchmark:run'] }),
+      }
+    }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
     const result = await ensureAuthenticated(authConfig)
 
     assert.deepStrictEqual(result, creds)
+    assert.strictEqual(fetchCalls, 0, 'fast path must not call the validation API')
+    assert.strictEqual(execFileCalls.length, 0)
+  })
+
+  it('returns stored credentials unchanged on the fast path (no permissions mutation)', async () => {
+    // Even when the stored permissions array differs from any API response,
+    // repeated setup returns the credentials verbatim — no validation, no merge.
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
+
+    const creds: Credentials = {
+      serviceToken: 'existing-token',
+      organizationId: 'org-123',
+      saasToken: 'test-saas-token',
+      consoleUrl: 'https://test.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      permissions: ['nsolid:benchmark:run'],
+    }
+    saveCredentials(creds)
+
+    let fetchCalls = 0
+    globalThis.fetch = (async () => {
+      fetchCalls++
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ permissions: ['completely-different:perm'] }),
+      }
+    }) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const result = await ensureAuthenticated(authConfig)
+
+    assert.deepStrictEqual(result, creds)
+    assert.strictEqual(fetchCalls, 0, 'stored credentials must be trusted verbatim')
     assert.strictEqual(execFileCalls.length, 0)
   })
 
@@ -222,36 +264,29 @@ describe('ensureAuthenticated', () => {
     }
     saveCredentials(creds)
 
-    // The validation API is unreachable (ECONNREFUSED) or returns a non-JSON
-    // payload (e.g. an SPA shell). In both cases validateToken THROWS, and the
-    // fast path must trust the unexpired, origin-matching stored credentials
-    // instead of forcing a re-login on every setup.
-    globalThis.fetch = mock.fn(async () => {
+    // The fast path no longer calls the validation API at all, so an
+    // unreachable API cannot interfere with repeated setup. Credentials are
+    // trusted verbatim.
+    let fetchCalls = 0
+    globalThis.fetch = (async () => {
+      fetchCalls++
       throw new Error('ECONNREFUSED')
     }) as unknown as typeof fetch
 
-    const warnings: string[] = []
-    const logger = {
-      debug: () => {},
-      info: () => {},
-      warn: (msg: string) => { warnings.push(String(msg)) },
-      error: () => {},
-    }
-
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfig, logger)
+    const result = await ensureAuthenticated(authConfig)
 
-    // Stored credentials returned verbatim — no OAuth re-authentication.
     assert.strictEqual(result.serviceToken, 'valid-token')
     assert.strictEqual(result.organizationId, 'org-123')
+    assert.strictEqual(fetchCalls, 0, 'fast path must not call validation API')
     assert.strictEqual(execFileCalls.length, 0, 'browser must not open when API is unavailable')
-    assert.ok(
-      warnings.some((w) => w.includes('auth.credentials.validationUnavailable')),
-      'expected a validationUnavailable warning when validation API is unavailable'
-    )
   })
 
-  it('re-authenticates when validation API returns 401/403 during fast path', async () => {
+  it('trusts stored credentials on the fast path even when the API would reject them', async () => {
+    // Repeated setup must be idempotent: it does not re-validate stored
+    // credentials, so a token the API has since revoked is still trusted until
+    // the user runs `logout` or the credentials expire. Revocation surfaces at
+    // MCP runtime instead.
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const creds: Credentials = {
       serviceToken: 'revoked-token',
@@ -263,11 +298,9 @@ describe('ensureAuthenticated', () => {
     }
     saveCredentials(creds)
 
-    // A revoked token gets 401/403 from the API — validateToken returns
-    // { valid: false } (does NOT throw), so the fast path must fall through to
-    // re-authenticate. This preserves revocation detection. The fresh OAuth
-    // token from the callback then validates OK.
-    globalThis.fetch = mock.fn(async (input: RequestInfo | URL) => {
+    let fetchCalls = 0
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchCalls++
       const target = typeof input === 'string' ? input : input.toString()
       const revoked = target.includes('tokenId=revoked-token')
       return revoked
@@ -276,21 +309,18 @@ describe('ensureAuthenticated', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig)
+    const result = await ensureAuthenticated(authConfig)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    const state = getStateFromExecFileCall()
-    await sendCallback(8767, state)
-    const result = await promise
-
-    assert.strictEqual(result.serviceToken, 'oauth-token')
-    assert.strictEqual(result.organizationId, 'org-456')
+    assert.strictEqual(result.serviceToken, 'revoked-token')
+    assert.strictEqual(result.organizationId, 'org-123')
+    assert.strictEqual(fetchCalls, 0, 'fast path must not re-validate stored credentials')
+    assert.strictEqual(execFileCalls.length, 0, 'browser must not open on the fast path')
   })
 
   it('trusts stored credentials when validation API returns an HTML shell (200 text/html)', async () => {
-    // Regression: the accounts API serves its SPA index.html (HTTP 200,
-    // content-type text/html) for server-side callers, which made validateToken
-    // throw "unexpected content type" on every setup and forced a re-login.
+    // The accounts API serves its SPA index.html (HTTP 200, content-type
+    // text/html) for server-side callers. Because the fast path no longer calls
+    // the API at all, this can no longer force a re-login during repeated setup.
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const creds: Credentials = {
       serviceToken: 'valid-token',
@@ -303,18 +333,23 @@ describe('ensureAuthenticated', () => {
     }
     saveCredentials(creds)
 
-    globalThis.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'text/html' }),
-      text: async () => '<!DOCTYPE html><html>...</html>',
-    })) as unknown as typeof fetch
+    let fetchCalls = 0
+    globalThis.fetch = (async () => {
+      fetchCalls++
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'text/html' }),
+        text: async () => '<!DOCTYPE html><html>...</html>',
+      }
+    }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
     const result = await ensureAuthenticated(authConfig)
 
     assert.strictEqual(result.serviceToken, 'valid-token')
     assert.strictEqual(result.organizationId, 'org-123')
+    assert.strictEqual(fetchCalls, 0, 'fast path must not call validation API')
     assert.strictEqual(execFileCalls.length, 0, 'browser must not open when API returns an HTML shell')
   })
 })
@@ -325,7 +360,10 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     requiredPermissions: ['nsolid:benchmark:run', 'nsolid:profile:read'],
   }
 
-  it('throws when required permissions are missing (fast path)', { timeout: 10000 }, async () => {
+  it('trusts stored credentials on the fast path regardless of cached permissions', async () => {
+    // Repeated setup must not re-check requiredPermissions against stored
+    // credentials. Even when cached perms are a strict subset of required, the
+    // fast path returns them verbatim without calling the API.
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
 
     const creds: Credentials = {
@@ -339,43 +377,23 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     }
     saveCredentials(creds)
 
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: ['nsolid:benchmark:run'] }),
-    })) as unknown as typeof fetch
-
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    await assert.rejects(
-      ensureAuthenticated(authConfigWithPerms),
-      /Missing required permissions: nsolid:profile:read/
-    )
-  })
-
-  it('throws when validation is unavailable and cached permissions are insufficient', async () => {
-    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
-
-    const creds: Credentials = {
-      serviceToken: 'existing-token',
-      organizationId: 'org-123',
-      saasToken: 'test-saas-token',
-      consoleUrl: 'https://test.saas.nodesource.io',
-      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
-      expiresAt: new Date(Date.now() + 86400000).toISOString(),
-      permissions: ['nsolid:benchmark:run'],
-    }
-    saveCredentials(creds)
-
+    let fetchCalls = 0
     globalThis.fetch = (async () => {
-      throw new Error('ECONNREFUSED')
+      fetchCalls++
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ permissions: ['nsolid:benchmark:run'] }),
+      }
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    await assert.rejects(
-      ensureAuthenticated(authConfigWithPerms),
-      /Missing required permissions: nsolid:profile:read/
-    )
+    const result = await ensureAuthenticated(authConfigWithPerms)
+
+    assert.strictEqual(result.serviceToken, 'existing-token')
+    assert.strictEqual(fetchCalls, 0, 'fast path must not call the API even with requiredPermissions set')
+    assert.strictEqual(execFileCalls.length, 0)
   })
 
   it('returns credentials when all required permissions are present', async () => {
@@ -392,17 +410,22 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     }
     saveCredentials(creds)
 
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: ['nsolid:benchmark:run', 'nsolid:profile:read'] }),
-    })) as unknown as typeof fetch
+    let fetchCalls = 0
+    globalThis.fetch = (async () => {
+      fetchCalls++
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ permissions: ['nsolid:benchmark:run', 'nsolid:profile:read'] }),
+      }
+    }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
     const result = await ensureAuthenticated(authConfigWithPerms)
 
     assert.deepStrictEqual(result.permissions, ['nsolid:benchmark:run', 'nsolid:profile:read'])
+    assert.strictEqual(fetchCalls, 0)
   })
 })
 

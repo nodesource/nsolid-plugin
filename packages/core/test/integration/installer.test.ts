@@ -627,6 +627,34 @@ describe('uninstall()', () => {
 
     await assert.doesNotReject(() => uninstall('claude'))
   })
+
+  it('suppresses the hardcoded-MCP-list warning for plugin-owned harnesses', async () => {
+    // For plugin-owned harnesses (claude/codex/antigravity) the MCP servers are
+    // owned by the native plugin, so best-effort MCP cleanup is redundant and its
+    // warning is noise. The warning must not surface without a tracking file.
+    const { uninstall } = await import('../../src/index.js')
+
+    for (const harness of ['claude', 'codex', 'antigravity'] as const) {
+      const result = await uninstall(harness)
+      assert.ok(
+        !result.errors.some((e) => e.includes('No tracking file and no bundle provided')),
+        `${harness} must not emit the hardcoded-MCP-list warning`
+      )
+    }
+  })
+
+  it('emits the hardcoded-MCP-list warning for non-plugin-owned harnesses', async () => {
+    // For CLI-owned harnesses (opencode) the warning is still useful, since the
+    // harness-level MCP config is the source of truth and a hardcoded fallback
+    // genuinely may leave user-added servers behind.
+    const { uninstall } = await import('../../src/index.js')
+
+    const result = await uninstall('opencode')
+    assert.ok(
+      result.errors.some((e) => e.includes('No tracking file and no bundle provided')),
+      'opencode should still emit the hardcoded-MCP-list warning'
+    )
+  })
 })
 
 describe('doctor()', () => {

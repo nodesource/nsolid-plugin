@@ -58,34 +58,15 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     if (existing.accountsUrl && existing.accountsUrl !== authConfig.accountsUrl) {
       logger?.info('auth.credentials.originMismatch', { stored: existing.accountsUrl, current: authConfig.accountsUrl })
     } else {
-      try {
-        const validationAccountsUrl = existing.accountsUrl ?? authConfig.accountsUrl
-        const result = await validateToken(existing.serviceToken, existing.organizationId, validationAccountsUrl, logger)
-        if (result.valid) {
-          if (required.length > 0) {
-            checkRequiredPermissions(required, result.permissions)
-          }
-          logger?.debug('auth.credentials.valid', { orgId: existing.organizationId })
-          return { ...existing, permissions: result.permissions }
-        }
-      } catch (err) {
-        // Re-throw permission errors (not API unavailability)
-        if (err instanceof PermissionError) {
-          throw err
-        }
-        // API unavailable (unreachable, non-JSON response, timeout): trust the
-        // unexpired, origin-matching stored credentials rather than forcing a
-        // re-login on every setup, but only if cached permissions satisfy
-        // required permissions. Mirrors the optimistic-storage path after
-        // OAuth. A 401/403 is NOT thrown — validateToken returns { valid: false }
-        // for that — so revoked tokens still trigger re-authentication below.
-        logger?.warn('auth.credentials.validationUnavailable', { error: (err as Error).message })
-        if (required.length > 0) {
-          const cachedPerms = existing.permissions ?? []
-          checkRequiredPermissions(required, cachedPerms)
-        }
-        return existing
-      }
+      // Repeated setup trusts stored credentials: no re-validation against the
+      // accounts API and no requiredPermissions check. Those run only on a
+      // fresh login (logout, credential deletion, or expiry). This keeps
+      // `setup` idempotent and avoids spurious failures when the validation
+      // API is intermittently unavailable or the account lacks optional
+      // benchmark access. A server-side revocation surfaces at MCP runtime
+      // instead; the user can `logout` to force a fresh login.
+      logger?.debug('auth.credentials.reused', { orgId: existing.organizationId })
+      return existing
     }
   }
 
