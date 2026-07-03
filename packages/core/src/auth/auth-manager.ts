@@ -37,6 +37,25 @@ function checkRequiredPermissions (
   }
 }
 
+function checkCachedPermissionsIfKnown (
+  required: string[],
+  existing: Credentials,
+  logger?: Logger
+): void {
+  if (required.length === 0) return
+  if (existing.permissions === undefined) {
+    logger?.debug('auth.credentials.cachedPermissionsUnknown', { orgId: existing.organizationId })
+    return
+  }
+  checkRequiredPermissions(required, existing.permissions)
+}
+
+function samePermissions (left: string[] | undefined, right: string[]): boolean {
+  if (left === undefined || left.length !== right.length) return false
+  const known = new Set(left)
+  return right.every((permission) => known.has(permission))
+}
+
 export interface EnsureAuthenticatedOptions {
   harness?: HarnessType;
   confirmAuth?: AuthConfirmation;
@@ -58,15 +77,33 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     if (existing.accountsUrl && existing.accountsUrl !== authConfig.accountsUrl) {
       logger?.info('auth.credentials.originMismatch', { stored: existing.accountsUrl, current: authConfig.accountsUrl })
     } else {
-      // Repeated setup trusts stored credentials: no re-validation against the
-      // accounts API and no requiredPermissions check. Those run only on a
-      // fresh login (logout, credential deletion, or expiry). This keeps
-      // `setup` idempotent and avoids spurious failures when the validation
-      // API is intermittently unavailable or the account lacks optional
-      // benchmark access. A server-side revocation surfaces at MCP runtime
-      // instead; the user can `logout` to force a fresh login.
-      logger?.debug('auth.credentials.reused', { orgId: existing.organizationId })
-      return existing
+      try {
+        const validationAccountsUrl = existing.accountsUrl ?? authConfig.accountsUrl
+        const result = await validateToken(existing.serviceToken, existing.organizationId, validationAccountsUrl, logger)
+        if (result.valid) {
+          if (required.length > 0) {
+            checkRequiredPermissions(required, result.permissions)
+          }
+          logger?.debug('auth.credentials.valid', { orgId: existing.organizationId })
+          const refreshed = { ...existing, permissions: result.permissions }
+          if (!samePermissions(existing.permissions, result.permissions)) {
+            saveCredentials(refreshed)
+          }
+          return refreshed
+        }
+        logger?.info('auth.credentials.invalid', { orgId: existing.organizationId })
+      } catch (err) {
+        if (err instanceof PermissionError) {
+          throw err
+        }
+        // API unavailable, timed out, or served a non-JSON fallback: keep setup
+        // idempotent by trusting the unexpired, origin-matching credentials. If
+        // this credentials file already has a permission cache, still enforce
+        // requiredPermissions against that known local state.
+        logger?.warn('auth.credentials.validationUnavailable', { error: (err as Error).message })
+        checkCachedPermissionsIfKnown(required, existing, logger)
+        return existing
+      }
     }
   }
 
@@ -139,7 +176,7 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     logger?.info('auth.credentials.saved', { orgId: creds.organizationId })
     return creds
   } catch (err) {
-    if (err instanceof InvalidCredentialsError) {
+    if (err instanceof InvalidCredentialsError || err instanceof PermissionError) {
       throw err
     }
     // API unavailable - store optimistically

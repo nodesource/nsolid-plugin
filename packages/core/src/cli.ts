@@ -97,10 +97,11 @@ async function promptForHarnesses (command: string, multiple: boolean): Promise<
   const stdin = process.stdin
   const wasRaw = stdin.isRaw
   const choices = promptHarnessChoices()
-  const selected = new Set<HarnessType>([choices[0]])
+  const selected = new Set<HarnessType>()
   const action = promptActionLabel(command)
   let cursor = 0
   let renderedLines = 0
+  let message = ''
 
   const render = () => {
     if (renderedLines > 0) {
@@ -116,18 +117,17 @@ async function promptForHarnesses (command: string, multiple: boolean): Promise<
       '',
       ...choices.map((value, index) => {
         const pointer = index === cursor ? '❯' : ' '
-        const marker = multiple
-          ? selected.has(value) ? '●' : '○'
-          : index === cursor ? '●' : '○'
+        const marker = selected.has(value) ? '●' : '○'
         return `  ${pointer} ${marker} ${harnessPromptLabel(value, command)}`
       }),
       ...(command === 'install'
         ? ['', 'Pi is package-owned: use `pi install ...` for skills; this installer only writes MCP config.']
         : []),
+      ...(message ? ['', message] : []),
       '',
       multiple
         ? '↑/↓ move   Space toggle   a select all   Enter continue   q cancel'
-        : '↑/↓ move   Enter select   q cancel',
+        : '↑/↓ move   Space select   Enter continue   q cancel',
     ]
     renderedLines = lines.length
     process.stderr.write(`${lines.join('\n')}\n`)
@@ -155,18 +155,26 @@ async function promptForHarnesses (command: string, multiple: boolean): Promise<
         }
         if (key === '\x1B[A' || key === 'k') {
           cursor = (cursor - 1 + choices.length) % choices.length
+          message = ''
           render()
           return
         }
         if (key === '\x1B[B' || key === 'j') {
           cursor = (cursor + 1) % choices.length
+          message = ''
           render()
           return
         }
-        if (multiple && key === ' ') {
+        if (key === ' ') {
           const value = choices[cursor]
-          if (selected.has(value)) selected.delete(value)
-          else selected.add(value)
+          if (multiple) {
+            if (selected.has(value)) selected.delete(value)
+            else selected.add(value)
+          } else {
+            selected.clear()
+            selected.add(value)
+          }
+          message = ''
           render()
           return
         }
@@ -177,10 +185,15 @@ async function promptForHarnesses (command: string, multiple: boolean): Promise<
           return
         }
         if (key === '\r' || key === '\n') {
+          if (selected.size === 0) {
+            message = multiple
+              ? 'Select at least one harness with Space before continuing.'
+              : 'Select a harness with Space before continuing.'
+            render()
+            return
+          }
           finish()
-          const result = multiple
-            ? selected.size > 0 ? choices.filter((value) => selected.has(value)) : [choices[cursor]]
-            : [choices[cursor]]
+          const result = choices.filter((value) => selected.has(value))
           process.stderr.write(`\nSelected: ${result.map((value) => HARNESS_LABELS[value]).join(', ')}\n\n`)
           resolve(result)
         }

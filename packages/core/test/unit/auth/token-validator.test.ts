@@ -13,6 +13,45 @@ afterEach(() => {
 })
 
 describe('validateToken', () => {
+  it('derives the API origin from production and staging accounts origins', async () => {
+    const { deriveAccountsApiUrl } = await import('../../../src/auth/token-validator.js')
+
+    assert.strictEqual(
+      deriveAccountsApiUrl('https://accounts.nodesource.com'),
+      'https://api.nodesource.com'
+    )
+    assert.strictEqual(
+      deriveAccountsApiUrl('https://staging.accounts.nodesource.com'),
+      'https://staging.api.nodesource.com'
+    )
+    assert.strictEqual(
+      deriveAccountsApiUrl('https://accounts.example.com'),
+      'https://accounts.example.com'
+    )
+  })
+
+  it('calls the API origin for NodeSource accounts token validation', async () => {
+    let requestedUrl = ''
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requestedUrl = input.toString()
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ permissions: [] }),
+      }
+    }) as unknown as typeof fetch
+
+    const { validateToken } = await import('../../../src/auth/token-validator.js')
+    await validateToken('test-token', 'org-123', 'https://accounts.nodesource.com')
+
+    const url = new URL(requestedUrl)
+    assert.strictEqual(url.origin, 'https://api.nodesource.com')
+    assert.strictEqual(url.pathname, '/accounts/org/access-token')
+    assert.strictEqual(url.searchParams.get('tokenId'), 'test-token')
+    assert.strictEqual(url.searchParams.get('orgId'), 'org-123')
+  })
+
   it('returns valid with permissions on 200', async () => {
     globalThis.fetch = (async () => ({
       ok: true,
@@ -38,6 +77,21 @@ describe('validateToken', () => {
 
     const { validateToken } = await import('../../../src/auth/token-validator.js')
     const result = await validateToken('bad-token', 'org-123', 'https://accounts.example.com')
+
+    assert.deepStrictEqual(result, {
+      valid: false,
+      reason: 'Invalid credentials',
+    } satisfies ValidationResult)
+  })
+
+  it('returns invalid on 404 from the access-token endpoint', async () => {
+    globalThis.fetch = (async () => ({
+      ok: false,
+      status: 404,
+    })) as unknown as typeof fetch
+
+    const { validateToken } = await import('../../../src/auth/token-validator.js')
+    const result = await validateToken('missing-token', 'org-123', 'https://accounts.nodesource.com')
 
     assert.deepStrictEqual(result, {
       valid: false,

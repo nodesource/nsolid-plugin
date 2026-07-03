@@ -145,6 +145,35 @@ describe('removeNativePlugin', () => {
     assert.ok('other@x' in data.plugins)
   })
 
+  it('codex cli: delegates using plugin remove', async () => {
+    const { getAdapter } = await import('../../../src/harnesses/index.js')
+    const { removeNativePlugin } = await import('../../../src/harnesses/native-plugin-uninstaller.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { stringify: stringifyToml } = await import('smol-toml')
+
+    const configPath = resolveHome('~/.codex/config.toml')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, stringifyToml({
+      plugins: {
+        'nsolid-plugin@nodesource': { enabled: true },
+      },
+    } as Record<string, unknown>))
+
+    const calls: Array<{ cmd: string; args: string[] }> = []
+    const runCli = async (cmd: string, args: string[]): Promise<number> => {
+      calls.push({ cmd, args })
+      return 0
+    }
+
+    const adapter = getAdapter('codex')
+    const result = await removeNativePlugin('codex', adapter, { runCli })
+
+    assert.strictEqual(result.removed, true)
+    assert.deepStrictEqual(calls, [
+      { cmd: 'codex', args: ['plugin', 'remove', 'nsolid-plugin@nodesource'] },
+    ])
+  })
+
   it('is a no-op when the plugin is not installed', async () => {
     const { getAdapter } = await import('../../../src/harnesses/index.js')
     const { removeNativePlugin } = await import('../../../src/harnesses/native-plugin-uninstaller.js')

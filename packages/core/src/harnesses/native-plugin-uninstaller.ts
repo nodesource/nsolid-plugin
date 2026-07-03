@@ -129,7 +129,7 @@ function cliCommand (harness: string, id: string): string[] {
     case 'claude':
       return ['claude', 'plugin', 'uninstall', id]
     case 'codex':
-      return ['codex', 'plugin', 'uninstall', id]
+      return ['codex', 'plugin', 'remove', id]
     case 'antigravity':
       return ['agy', 'plugin', 'uninstall', PLUGIN_BASE_NAME]
     default:
@@ -143,7 +143,7 @@ function manualHint (harness: string, ids: string[]): string {
     case 'claude':
       return `claude plugin uninstall ${id}`
     case 'codex':
-      return `codex plugin uninstall ${id}`
+      return `codex plugin remove ${id}`
     case 'antigravity':
       return `agy plugin uninstall ${PLUGIN_BASE_NAME}`
     default:

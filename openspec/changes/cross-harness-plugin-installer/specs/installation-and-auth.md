@@ -101,7 +101,7 @@
 **Then** a browser opens to `https://accounts.nodesource.com/sign-in?extension=nsolid-plugin&port=<callback-port>&state=<uuid>`
 **And** a local HTTP callback server starts on port 8765
 **And** after user completes OAuth in browser, the callback receives the service token
-**And** the token is validated via `/accounts/org/access-token?tokenId=<token>&orgId=<orgId>`
+**And** the token is validated via `https://api.nodesource.com/accounts/org/access-token?tokenId=<token>&orgId=<orgId>`
 **And** credentials are stored at `~/.agents/.nodesource-auth.json` with structure:
 ```json
 {
@@ -134,15 +134,15 @@
 ## Scenario: Token validation failure
 
 **Given** OAuth completed and a token was received
-**When** token validation fails (401/403 from Accounts API)
+**When** token validation fails (401/403/404 from NodeSource API)
 **Then** an error message indicates invalid credentials
 **And** no credentials are stored
 **And** the user is prompted to retry with correct account
 
-## Scenario: Accounts API unavailable
+## Scenario: NodeSource API unavailable
 
 **Given** OAuth completed and a token was received
-**When** the Accounts API is unreachable (network error, 5xx)
+**When** the NodeSource API is unreachable (network error, 5xx)
 **Then** credentials are stored anyway (optimistic)
 **And** a warning indicates validation failed but installation continues
 **And** MCP servers will validate on first use

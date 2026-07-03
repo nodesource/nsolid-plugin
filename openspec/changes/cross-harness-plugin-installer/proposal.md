@@ -46,7 +46,7 @@ Adapt the nsentinel-vscode-extension OAuth flow:
 - Store service token, org ID, console URL, SaaS token, MCP URL, and expiry in `~/.agents/.nodesource-auth.json`.
 - MCP wrappers read credentials from this file at runtime.
 - Runtime unauthenticated failures tell the user to run `nsolid-plugin setup`.
-- Token validation via `/accounts/org/access-token` endpoint where available.
+- Token validation via the API `/accounts/org/access-token` endpoint where available.
 
 ### Installation and Setup Flow
 1. Root manifests are kept in sync with `bundle.json` via `pnpm plugin:root` (committed, not a release-time generation step). `pnpm plugin:root:check` (also run by `pnpm plugin:check`) fails CI if the committed manifests drift.

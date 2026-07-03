@@ -77,7 +77,7 @@
 - **Spec reference**: Credentials Storage in design.md
 
 ### Task 6: Implement token validator module ✓
-- [x] **Description**: Create token-validator.ts to validate service tokens with Accounts API at `/accounts/org/access-token`. Handle network errors, 401/403 responses, and timeouts. Return validation result with permissions list.
+- [x] **Description**: Create token-validator.ts to validate service tokens with API at `/accounts/org/access-token`. Handle network errors, 401/403/404 responses, and timeouts. Return validation result with permissions list.
 - **Depends on**: Task 5
 - **Files**:
   - `packages/core/src/auth/token-validator.ts`
@@ -93,7 +93,7 @@
 - **Spec reference**: OAuth timeout and port conflict scenarios in specs/installation-and-auth.md
 
 ### Task 8: Implement auth manager orchestrator ✓
-- [x] **Description**: Create auth-manager.ts with `ensureAuthenticated()` function. Check for existing valid credentials first. If missing/expired, initiate OAuth flow (open browser, start callback server). Parse callback parameters: token, consoleId, NSOLID_SAAS, url. Derive MCP URL from consoleId. Validate token with Accounts API. Store credentials including saasToken, consoleUrl, and mcpUrl. Return Credentials object.
+- [x] **Description**: Create auth-manager.ts with `ensureAuthenticated()` function. Check for existing valid credentials first. If missing/expired, initiate OAuth flow (open browser, start callback server). Parse callback parameters: token, consoleId, NSOLID_SAAS, url. Derive MCP URL from consoleId. Validate token with NodeSource API. Store credentials including saasToken, consoleUrl, and mcpUrl. Return Credentials object.
 - **Note**: Credentials now include `saasToken`, `consoleUrl`, and `mcpUrl` in addition to `serviceToken`, `organizationId`, and `expiresAt` per real accounts service behavior observed in nsentinel-vscode-extension.
 - **Depends on**: Tasks 5, 6, 7
 - **Files**:
