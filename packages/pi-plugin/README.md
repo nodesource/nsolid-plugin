@@ -15,7 +15,7 @@ Or for local development from the repository root:
 ```bash
 pnpm plugin:materialize
 pi install ./packages/pi-plugin --no-approve
-nsolid-plugin setup --harness pi --staging
+nsolid-plugin setup --harness pi
 pi install npm:pi-mcp-adapter
 /reload
 ```
@@ -30,7 +30,7 @@ pi list
 
 ## What's Included
 
-- 15 package-owned AI skills for Node.js performance and security analysis
+- 16 package-owned AI skills for Node.js performance and security analysis
 - Side-effect-free package activation: no browser auth, no user-level skill copy, no MCP config mutation
 - MCP configuration written to `~/.pi/agent/mcp.json` only by explicit `nsolid-plugin setup --harness pi`
 

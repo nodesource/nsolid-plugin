@@ -9,8 +9,6 @@ export function deriveAccountsApiUrl (accountsUrl: string): string {
   const url = new URL(accountsUrl)
   if (url.hostname === 'accounts.nodesource.com') {
     url.hostname = 'api.nodesource.com'
-  } else if (url.hostname === 'staging.accounts.nodesource.com') {
-    url.hostname = 'staging.api.nodesource.com'
   }
   return url.origin
 }

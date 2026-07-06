@@ -9,9 +9,7 @@ export function deriveMcpUrlFromConsoleUrl (consoleUrl: string): string | null {
   const host = parsed.hostname
   let mcpHost: string | null = null
 
-  if (host.endsWith('.staging.saas.nodesource.io')) {
-    mcpHost = host.replace(/\.staging\.saas\.nodesource\.io$/, '.mcp.staging.saas.nodesource.io')
-  } else if (host.endsWith('.saas.nodesource.io')) {
+  if (host.endsWith('.saas.nodesource.io')) {
     mcpHost = host.replace(/\.saas\.nodesource\.io$/, '.mcp.saas.nodesource.io')
   }
 

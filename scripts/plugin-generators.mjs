@@ -152,7 +152,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
-const SETUP_COMMAND = 'npx -y @nodesource/nsolid-plugin setup --harness ${harness}'
+const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness ${harness}'
 
 const SERVER_NAMES = new Set(${JSON.stringify(serverNames)})
 const serverName = process.argv[2]
@@ -237,9 +237,7 @@ function deriveMcpUrlFromConsoleUrl (consoleUrl) {
   const host = parsed.hostname
   let mcpHost = null
 
-  if (host.endsWith('.staging.saas.nodesource.io')) {
-    mcpHost = host.replace(/\\.staging\\.saas\\.nodesource\\.io$/, '.mcp.staging.saas.nodesource.io')
-  } else if (host.endsWith('.saas.nodesource.io')) {
+  if (host.endsWith('.saas.nodesource.io')) {
     mcpHost = host.replace(/\\.saas\\.nodesource\\.io$/, '.mcp.saas.nodesource.io')
   }
 

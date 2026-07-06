@@ -13,16 +13,12 @@ afterEach(() => {
 })
 
 describe('validateToken', () => {
-  it('derives the API origin from production and staging accounts origins', async () => {
+  it('derives the API origin from production accounts origin', async () => {
     const { deriveAccountsApiUrl } = await import('../../../src/auth/token-validator.js')
 
     assert.strictEqual(
       deriveAccountsApiUrl('https://accounts.nodesource.com'),
       'https://api.nodesource.com'
-    )
-    assert.strictEqual(
-      deriveAccountsApiUrl('https://staging.accounts.nodesource.com'),
-      'https://staging.api.nodesource.com'
     )
     assert.strictEqual(
       deriveAccountsApiUrl('https://accounts.example.com'),

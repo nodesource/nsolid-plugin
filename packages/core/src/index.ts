@@ -46,7 +46,6 @@ import { restoreConfigBackup, type BackupEntry } from './utils/backup.js'
 import { toPluginError } from './errors.js'
 
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
-const STAGING_ACCOUNTS_URL = 'https://staging.accounts.nodesource.com'
 const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
 /**
  * Harnesses that install the nsolid plugin/package natively (owning skills and
@@ -106,10 +105,8 @@ async function resolveInstallProgress (
 
 export function resolveAccountsUrl (defaultUrl: string, logger?: Logger): string {
   const explicit = process.env.NSOLID_ACCOUNTS_URL
-  const staging = process.env.NSOLID_STAGING
   let url = defaultUrl
-  if (staging === '1' || staging === 'true') url = STAGING_ACCOUNTS_URL
-  if (explicit) url = explicit // explicit wins over the staging shortcut
+  if (explicit) url = explicit
 
   if (url === defaultUrl) return url
 

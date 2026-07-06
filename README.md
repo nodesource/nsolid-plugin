@@ -1,6 +1,6 @@
 # nsolid-plugin
 
-Cross-harness plugin distribution for NodeSource AI skills and MCP servers. The repo keeps one canonical skill source, a shared core CLI/setup package, a real Pi package, and generated native plugin artifacts for Claude, Codex, and Antigravity. OpenCode remains CLI-only until its plugin distribution model is clearer.
+N|Solid Plugin installs NodeSource AI skills and MCP servers into Claude Code, Codex CLI, OpenCode, Antigravity CLI, and Pi Agent. The repo keeps one canonical skill source, a shared core CLI/setup package, a real Pi package, and generated native plugin artifacts for Claude, Codex, and Antigravity. OpenCode remains CLI-only until its plugin distribution model is clearer.
 
 ## Supported harnesses
 
@@ -8,11 +8,17 @@ Cross-harness plugin distribution for NodeSource AI skills and MCP servers. The 
 |---|---|---|
 | **Claude Code** | Root GitHub marketplace/plugin + `.claude-plugin/plugin.json` | Native plugin install, then explicit setup |
 | **Codex CLI** | Root GitHub marketplace/plugin + `.codex-plugin/plugin.json` | Native plugin install, then explicit setup |
-| **OpenCode** | CLI-only (user-level skills + MCP config) | `nsolid-plugin setup --harness opencode` (auth + direct install) |
+| **OpenCode** | CLI direct install (user-level skills + MCP config) | `nsolid-plugin setup --harness opencode`, then `nsolid-plugin install --harness opencode` |
 | **Antigravity CLI** | Root GitHub plugin + `plugin.json` | `agy plugin install <repo-url>`, then explicit setup |
 | **Pi Agent** | npm package + `pi.skills` | `pi install npm:nsolid-pi-plugin`, `nsolid-plugin setup --harness pi`, then `pi install npm:pi-mcp-adapter` |
 
 No harness relies on npm `postinstall` hooks. See `openspec/changes/cross-harness-plugin-installer/design.md` and `openspec/changes/cross-harness-plugin-installer/specs/installation-and-auth.md` for the full design rationale.
+
+## What it includes
+
+- 16 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, saved N|Solid assets, vulnerability analysis, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, and optimization validation.
+- Three MCP servers: `nsolid-console`, `ns-benchmark`, and `ncm`.
+- Explicit OAuth setup against NodeSource accounts. You need a NodeSource account with access to the target N|Solid organization.
 
 ## Structure
 
@@ -41,25 +47,8 @@ Skills are canonical in the repository-root `skills/` directory. The repo root i
 | **Codex** | Root plugin | Native marketplace/plugin install; `setup` for auth |
 | **Antigravity** | Root plugin | `agy plugin install <repo-url>`; `setup` for auth |
 | **Pi** | Pi npm package (`pi.skills`) | Pi package owns skills; `setup` writes auth/MCP config |
-| **OpenCode** | CLI-only harness copy | `setup` authenticates and copies skills/MCP config locally; `install` is no-browser fallback |
+| **OpenCode** | CLI direct install | `setup` authenticates; `install` copies skills and writes MCP config |
 
-
-## Quick start
-
-```bash
-pnpm install
-pnpm build
-pnpm test
-pnpm lint
-```
-
-If `nsolid-plugin` is not installed on your `PATH` from a release package, use the source CLI after building:
-
-```bash
-node packages/core/dist/src/cli.js --help
-```
-
-Replace `nsolid-plugin` with `node packages/core/dist/src/cli.js` in the examples below when running directly from this checkout.
 
 ## Authentication
 
@@ -77,7 +66,7 @@ On setup:
 4. An `mcpUrl` is derived from the callback's `consoleId` (or via string transform from `consoleUrl`).
 5. Credentials are stored at `~/.agents/.nodesource-auth.json` with mode `0600`.
 
-**What is stored:** `serviceToken`, `organizationId`, `saasToken`, `consoleUrl`, `mcpUrl`, `expiresAt`, `permissions`, and the `accountsUrl` auth origin used to mint/validate the token (useful for staging QA).
+**What is stored:** `serviceToken`, `organizationId`, `saasToken`, `consoleUrl`, `mcpUrl`, `expiresAt`, `permissions`, and the `accountsUrl` auth origin used to mint/validate the token.
 
 **Token lifecycle:** Expired credentials trigger re-authentication during explicit setup/login. Runtime MCP wrappers fail with an actionable `Run: nsolid-plugin setup --harness <harness>` message if credentials are missing or expired. Credentials are shared across harnesses.
 
@@ -87,17 +76,35 @@ On setup:
 
 ## Per-harness install
 
-The GitHub marketplace flow installs from the repository root.
+Requirements: Node.js `>=22.3.0`, the target harness CLI, and a NodeSource account with access to your N|Solid organization.
 
-The setup step requires the `nsolid-plugin` CLI on your PATH:
+Install the stable CLI once:
 
 ```bash
-npm i -g nsolid-plugin          # stable release
-# during pre-release:
-npm i -g nsolid-plugin@next
+npm i -g nsolid-plugin
 ```
 
-Or invoke it once-off with `npx -y nsolid-plugin setup --harness <harness>` (`npx -y nsolid-plugin@next ...` during pre-release).
+Or invoke commands without a global install:
+
+```bash
+npx -y nsolid-plugin setup --harness <harness>
+npx -y nsolid-plugin install --harness <harness>
+```
+
+The setup step requires a NodeSource account and writes shared credentials to `~/.agents/.nodesource-auth.json`. The install step is needed only for direct CLI installs such as OpenCode or fallback/repair installs.
+
+### Direct CLI install
+
+`nsolid-plugin install --harness <harness>` is not a native harness plugin install. It directly adds N|Solid skills and MCP server config to the selected harness. Run `setup` first so MCP server credentials are available:
+
+```bash
+nsolid-plugin setup --harness <harness>
+nsolid-plugin install --harness <harness>
+```
+
+Without a global install, use `npx -y nsolid-plugin setup --harness <harness>` and `npx -y nsolid-plugin install --harness <harness>`.
+
+Use direct CLI install as the primary install path for OpenCode. For Claude Code, Codex CLI, and Antigravity CLI, prefer the native plugin commands below and keep `nsolid-plugin install` for fallback or repair. For Pi Agent, skills come from `nsolid-pi-plugin`; the CLI writes Pi MCP config only.
 
 ### Claude Code
 
@@ -108,8 +115,6 @@ nsolid-plugin setup --harness claude
 ```
 
 Claude installs plugins through marketplaces. The repository root includes `.claude-plugin/marketplace.json`, so GitHub install works directly. If marketplace/local plugin install is unavailable, `nsolid-plugin install --harness claude` is the fallback direct installer and does not open a browser.
-
-> `nsolid-plugin` must be available on your PATH. Once published, install it globally (`npm i -g nsolid-plugin`) or invoke it via npx (`npx -y nsolid-plugin setup --harness claude`). During the pre-release window, use the prerelease tag (`npx -y nsolid-plugin@next ...` or `npm i -g nsolid-plugin@next`).
 
 ### Codex CLI
 
@@ -125,11 +130,10 @@ Codex is marketplace-owned. A NodeSource-owned Git/local marketplace can be used
 
 ```bash
 nsolid-plugin setup --harness opencode
+nsolid-plugin install --harness opencode
 ```
 
-OpenCode is CLI-only. `setup` authenticates with NodeSource, copies skills directly to `~/.config/opencode/skills/`, and writes MCP servers to `~/.config/opencode/opencode.jsonc` under the top-level `mcp` key. It does not use shared `~/.agents/skills/`, avoiding cross-harness skill leakage and Pi package-owned skill collisions.
-
-Use `nsolid-plugin install --harness opencode` only as a no-browser fallback/repair command; MCP config is written only when valid credentials already exist.
+OpenCode does not use this repository as a native plugin. `setup` authenticates with NodeSource. `install` copies skills directly to `~/.config/opencode/skills/` and writes MCP servers to `~/.config/opencode/opencode.jsonc` under the top-level `mcp` key. It does not use shared `~/.agents/skills/`, avoiding cross-harness skill leakage and Pi package-owned skill collisions.
 
 ### Antigravity CLI
 
@@ -168,6 +172,14 @@ pnpm plugin:clean
 The package declares its skills via `pi.skills`, so Pi owns/lists them from the package. Package activation is side-effect free: it does not authenticate, copy user-level skills, or write MCP config. `nsolid-plugin setup --harness pi` is the explicit step that writes `~/.pi/agent/mcp.json`. Pi does not natively support MCP, so an adapter extension is required for the MCP-backed skills to have working tools.
 
 > **Using `@0xkobold/pi-mcp` instead?** It is an alternative adapter, but it reads `~/.0xkobold/mcp.json` in a different (`servers[]`) format and does **not** pick up the config this plugin writes (`~/.pi/agent/mcp.json`). You would need to create and maintain a separate `~/.0xkobold/mcp.json` manually. Prefer `pi-mcp-adapter` for automatic setup.
+
+## Verify install
+
+```bash
+nsolid-plugin doctor --harness <harness>
+```
+
+In Claude Code, Codex CLI, OpenCode, and Antigravity CLI, check the harness UI for N|Solid entries with `/skills` and `/mcp`. In Pi Agent, run `pi list` and confirm `nsolid-pi-plugin` and `pi-mcp-adapter` are installed.
 
 ## Development
 
@@ -262,7 +274,7 @@ nsolid-plugin restore --harness <harness> --backup ~/.agents/.config-backup/<har
 
 ### Install vs setup
 
-`nsolid-plugin install --harness <harness>` is a no-browser fallback/direct installer. Claude, Codex, and Antigravity should normally use native GitHub plugin install from the repository root. OpenCode uses `nsolid-plugin setup --harness opencode` as its primary onboarding command because it authenticates and then performs the direct install; `install --harness opencode` is for repair/offline staging. Pi is package-owned: `pi install npm:nsolid-pi-plugin` installs skills, while `nsolid-plugin install/setup --harness pi` only writes Pi MCP config.
+`nsolid-plugin setup --harness <harness>` authenticates with NodeSource and may open a browser. `nsolid-plugin install --harness <harness>` never opens a browser; it directly writes N|Solid skills and MCP config for a harness. Claude, Codex, and Antigravity should normally use native GitHub plugin install from the repository root. OpenCode uses the explicit two-step CLI path: `setup`, then `install`. Pi is package-owned: `pi install npm:nsolid-pi-plugin` installs skills, while `nsolid-plugin install/setup --harness pi` only writes Pi MCP config.
 
 ### Verbose logging
 

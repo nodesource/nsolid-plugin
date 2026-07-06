@@ -278,7 +278,7 @@ describe('install()', () => {
     const bundlePath = writeBundle(bundle)
     const skillsSource = createSkillSource('ns-test-skill')
     seedCredentials({
-      consoleUrl: 'https://test-org.staging.saas.nodesource.io',
+      consoleUrl: 'https://test-org.saas.nodesource.io',
       mcpUrl: 'https://custom-mcp.example.com/entry',
     })
 
@@ -292,7 +292,7 @@ describe('install()', () => {
     assert.strictEqual(servers['nsolid-console'].url, 'https://custom-mcp.example.com/entry')
   })
 
-  it('derives staging console MCP URL without appending /mcp when no explicit MCP URL is stored', async () => {
+  it('derives console MCP URL without appending /mcp when no explicit MCP URL is stored', async () => {
     const { install } = await import('../../src/index.js')
     const { readJsonFile } = await import('../../src/utils/config.js')
     const bundle = createBundle({
@@ -308,7 +308,7 @@ describe('install()', () => {
     const bundlePath = writeBundle(bundle)
     const skillsSource = createSkillSource('ns-test-skill')
     seedCredentials({
-      consoleUrl: 'https://test-org.staging.saas.nodesource.io',
+      consoleUrl: 'https://test-org.saas.nodesource.io',
       mcpUrl: '',
     })
 
@@ -319,7 +319,7 @@ describe('install()', () => {
     assert.ok(claudeConfig?.mcpServers && typeof claudeConfig.mcpServers === 'object')
     const servers = claudeConfig.mcpServers as Record<string, { type?: string; url?: string }>
     assert.strictEqual(servers['nsolid-console'].type, 'http')
-    assert.strictEqual(servers['nsolid-console'].url, 'https://test-org.mcp.staging.saas.nodesource.io/')
+    assert.strictEqual(servers['nsolid-console'].url, 'https://test-org.mcp.saas.nodesource.io/')
   })
 
   it('writes MCP config for Pi', async () => {

@@ -18,7 +18,6 @@ let tmpDir: string
 let originalHome: string | undefined
 let originalUserProfile: string | undefined
 let originalFetch: typeof globalThis.fetch
-let originalStaging: string | undefined
 let originalAccountsUrl: string | undefined
 
 const authConfig: AuthConfig = {
@@ -79,9 +78,7 @@ beforeEach(() => {
   originalFetch = globalThis.fetch
   execFileCalls.length = 0
 
-  originalStaging = process.env.NSOLID_STAGING
   originalAccountsUrl = process.env.NSOLID_ACCOUNTS_URL
-  delete process.env.NSOLID_STAGING
   delete process.env.NSOLID_ACCOUNTS_URL
 })
 
@@ -93,8 +90,6 @@ afterEach(() => {
   }
   globalThis.fetch = originalFetch
 
-  if (originalStaging !== undefined) process.env.NSOLID_STAGING = originalStaging
-  else delete process.env.NSOLID_STAGING
   if (originalAccountsUrl !== undefined) process.env.NSOLID_ACCOUNTS_URL = originalAccountsUrl
   else delete process.env.NSOLID_ACCOUNTS_URL
 })
@@ -194,27 +189,6 @@ describe('ensureAuthenticated', () => {
     assert.strictEqual(result.serviceToken, 'oauth-token')
     assert.strictEqual(result.organizationId, 'org-456')
     assert.strictEqual(result.saasToken, 'oauth-saas-token')
-  })
-
-  it('derives staging MCP host from OAuth console URL', { timeout: 10000 }, async () => {
-    globalThis.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: [] }),
-    })) as unknown as typeof fetch
-
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig)
-
-    const state = await pollForState(getStateFromExecFileCall)
-    await sendCallback(8767, state, {
-      consoleId: 'org-456',
-      url: 'https://org-456.staging.saas.nodesource.io',
-    })
-    const result = await promise
-
-    assert.strictEqual(result.mcpUrl, 'https://org-456.mcp.staging.saas.nodesource.io/')
   })
 
   it('re-authenticates when credentials are expired', { timeout: 10000 }, async () => {
@@ -621,35 +595,6 @@ describe('ensureAuthenticated - accountsUrl override', () => {
     }
     saveCredentials(expiredCreds)
   }
-
-  it('builds staging /sign-in URL when passed a staging accountsUrl', { timeout: 10000 }, async () => {
-    await seedExpiredCredentials()
-
-    globalThis.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: [] }),
-    })) as unknown as typeof fetch
-
-    const stagingConfig: AuthConfig = {
-      ...authConfig,
-      accountsUrl: 'https://staging.accounts.nodesource.com',
-    }
-
-    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(stagingConfig)
-
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    const signInUrl = getUrlFromExecFileCall()
-    assert.strictEqual(signInUrl.host, 'staging.accounts.nodesource.com')
-    assert.strictEqual(signInUrl.pathname, '/sign-in')
-    assert.strictEqual(signInUrl.searchParams.get('extension'), 'nsolid-plugin')
-    assert.strictEqual(signInUrl.searchParams.get('port'), '8767')
-    const state = getStateFromExecFileCall()
-    await sendCallback(8767, state)
-    await promise
-  })
 
   it('builds explicit /sign-in URL when passed an explicit accountsUrl', { timeout: 10000 }, async () => {
     await seedExpiredCredentials()

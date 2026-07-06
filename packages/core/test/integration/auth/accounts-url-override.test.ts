@@ -2,19 +2,14 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { resolveAccountsUrl } from '../../../src/index.js'
 
-let originalStaging: string | undefined
 let originalAccountsUrl: string | undefined
 
 beforeEach(() => {
-  originalStaging = process.env.NSOLID_STAGING
   originalAccountsUrl = process.env.NSOLID_ACCOUNTS_URL
-  delete process.env.NSOLID_STAGING
   delete process.env.NSOLID_ACCOUNTS_URL
 })
 
 afterEach(() => {
-  if (originalStaging !== undefined) process.env.NSOLID_STAGING = originalStaging
-  else delete process.env.NSOLID_STAGING
   if (originalAccountsUrl !== undefined) process.env.NSOLID_ACCOUNTS_URL = originalAccountsUrl
   else delete process.env.NSOLID_ACCOUNTS_URL
 })
@@ -25,20 +20,7 @@ describe('resolveAccountsUrl', () => {
     assert.strictEqual(result, 'https://accounts.nodesource.com')
   })
 
-  it('overrides to staging when NSOLID_STAGING=1', () => {
-    process.env.NSOLID_STAGING = '1'
-    const result = resolveAccountsUrl('https://accounts.nodesource.com')
-    assert.strictEqual(result, 'https://staging.accounts.nodesource.com')
-  })
-
-  it('overrides to staging when NSOLID_STAGING=true', () => {
-    process.env.NSOLID_STAGING = 'true'
-    const result = resolveAccountsUrl('https://accounts.nodesource.com')
-    assert.strictEqual(result, 'https://staging.accounts.nodesource.com')
-  })
-
-  it('explicit NSOLID_ACCOUNTS_URL wins over NSOLID_STAGING', () => {
-    process.env.NSOLID_STAGING = '1'
+  it('uses explicit NSOLID_ACCOUNTS_URL override', () => {
     process.env.NSOLID_ACCOUNTS_URL = 'https://custom.accounts.example.com'
     const result = resolveAccountsUrl('https://accounts.nodesource.com')
     assert.strictEqual(result, 'https://custom.accounts.example.com')
@@ -84,7 +66,7 @@ describe('resolveAccountsUrl', () => {
       warn: (msg: string, meta?: Record<string, unknown>) => { warnings.push(`${msg} ${JSON.stringify(meta)}`) },
       error: () => {},
     }
-    process.env.NSOLID_STAGING = '1'
+    process.env.NSOLID_ACCOUNTS_URL = 'https://custom.accounts.example.com'
     resolveAccountsUrl('https://accounts.nodesource.com', logger)
     assert.ok(warnings.some((w) => w.includes('auth.accountsUrl.overridden')))
   })

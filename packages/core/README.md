@@ -11,7 +11,7 @@ Install/setup semantics are intentionally split:
 1. `setup()` authenticates with NodeSource and may open a browser.
 2. `install()` is a fallback direct asset installer and never starts auth/browser login.
 3. Runtime MCP wrappers fail with `Run: nsolid-plugin setup --harness <harness>` if credentials are missing or expired.
-4. OpenCode `setup --harness opencode` authenticates, copies skills directly to `~/.config/opencode/skills/`, and writes MCP config; `install --harness opencode` is no-browser fallback/repair.
+4. OpenCode uses the direct CLI path: run `setup --harness opencode` for auth, then `install --harness opencode` to copy skills and write MCP config.
 5. Pi package owns skills, while setup writes Pi MCP config for adapter/runtime compatibility.
 
 ## Public API
@@ -58,13 +58,13 @@ A thin CLI is provided as `nsolid-plugin`:
 
 ```bash
 nsolid-plugin setup --harness claude        # explicit auth/setup; may open browser
-nsolid-plugin setup --harness opencode      # explicit auth/setup + direct OpenCode install
+nsolid-plugin setup --harness opencode      # explicit auth/setup
 nsolid-plugin setup --harness pi            # explicit auth/setup + Pi MCP config
 nsolid-plugin install --harness claude      # fallback direct install; no browser
 nsolid-plugin install --harness antigravity # fallback direct install; no browser
 nsolid-plugin install --harness codex       # fallback direct install; no browser
 nsolid-plugin install --harness pi          # MCP config only; skills come from pi package
-nsolid-plugin install --harness opencode    # OpenCode: no-browser fallback/repair
+nsolid-plugin install --harness opencode    # OpenCode: copy skills + write MCP config
 nsolid-plugin uninstall --harness claude
 nsolid-plugin doctor --harness claude
 nsolid-plugin doctor --harness claude --json
@@ -73,7 +73,7 @@ nsolid-plugin restore --harness claude --list
 nsolid-plugin restore --harness claude --backup ~/.agents/.config-backup/claude/1234567890.json
 ```
 
-Use `--verbose` (or `NSOLID_PLUGIN_VERBOSE=1`) for detailed, timestamped logs written to stderr. Verbose mode redacts tokens and auth headers. For Claude Code, Codex, and Antigravity, prefer native GitHub plugin install from the repository root; `install --harness` is a fallback direct installer only. For Pi, install `nsolid-pi-plugin` for package-owned skills; CLI install/setup only writes MCP config. OpenCode is CLI-only and uses `setup --harness opencode` for primary onboarding because it authenticates and then installs user-level skills plus MCP config.
+Use `--verbose` (or `NSOLID_PLUGIN_VERBOSE=1`) for detailed, timestamped logs written to stderr. Verbose mode redacts tokens and auth headers. For Claude Code, Codex, and Antigravity, prefer native GitHub plugin install from the repository root; `install --harness` is a fallback direct installer only. For Pi, install `nsolid-pi-plugin` for package-owned skills; CLI install/setup only writes MCP config. OpenCode is CLI-only and uses `setup --harness opencode` for auth followed by `install --harness opencode` to copy user-level skills and write MCP config.
 
 ## Config backups
 

@@ -152,8 +152,8 @@ function validateCanonicalSkills () {
 function generateSharedWrapper () {
   return generateClaudeWrapper()
     .replace(
-      "const SETUP_COMMAND = 'npx -y @nodesource/nsolid-plugin setup --harness claude'",
-      "const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness <claude|codex|antigravity|agents>'"
+      "const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness claude'",
+      "const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness <claude|codex|opencode|antigravity|pi>'"
     )
 }
 

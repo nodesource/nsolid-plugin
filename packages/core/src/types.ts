@@ -23,7 +23,7 @@ export interface Credentials {
   mcpUrl: string;
   expiresAt: string;
   permissions?: string[];
-  /** Auth origin used to mint/validate the token (persisted for staging QA). */
+  /** Auth origin used to mint/validate the token. */
   accountsUrl?: string;
 }
 

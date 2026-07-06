@@ -74,14 +74,13 @@ Options:
   --no-color            Disable colored output
   --quiet               Suppress step-by-step progress output (install only)
   --yes                 Skip interactive confirmation prompts
-  --staging             Use staging accounts URL for setup (dev/QA only)
-  --accounts-url <url>  Explicit origin-only accounts URL override for setup (wins over --staging)
+  --accounts-url <url>  Explicit origin-only accounts URL override for setup
   --help                Show this help message
 
 Distribution notes:
   Claude/Codex/Antigravity: install from the GitHub plugin root; setup is auth-only.
   Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
-  OpenCode: use setup --harness opencode for auth + direct install; install is fallback/repair.
+  OpenCode: run setup --harness opencode for auth, then install --harness opencode for skills/MCP config.
   Auth: only setup/login may open a browser.`)
 }
 
@@ -238,7 +237,6 @@ async function main (): Promise<void> {
       verbose: { type: 'boolean' },
       json: { type: 'boolean' },
       'no-color': { type: 'boolean' },
-      staging: { type: 'boolean' },
       'accounts-url': { type: 'string' },
       'keep-credentials': { type: 'boolean' },
       quiet: { type: 'boolean' },
@@ -283,9 +281,6 @@ async function main (): Promise<void> {
 
   switch (command) {
     case 'setup': {
-      if (values.staging === true) {
-        process.env.NSOLID_STAGING = '1'
-      }
       if (values['accounts-url']) {
         process.env.NSOLID_ACCOUNTS_URL = values['accounts-url']
       }

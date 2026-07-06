@@ -1,9 +1,9 @@
-# Antigravity CLI — Plugin Research (Task 38)
+# Antigravity CLI — Plugin Research (Task 38, archival)
 
-> **Amendment (2026-06-24):** The shared core was renamed `@nodesource/plugin-core` → `nsolid-plugin`. The `scripts/install.js` approach described here was superseded — Antigravity now installs directly from the GitHub repository root. See `docs/qa-guide.md` §9.
+> **Amendment (2026-06-24):** The shared core was renamed `@nodesource/plugin-core` → `nsolid-plugin`. The `scripts/install.js` approach described below was superseded — Antigravity now installs directly from the GitHub repository root with `agy plugin install https://github.com/NodeSource/nsolid-plugin.git`, followed by explicit `nsolid-plugin setup --harness antigravity`.
 
 **Status:** Complete (June 2026).  
-**Verdict:** Antigravity has no install-time/session-start hook, so the plugin must ship a one-time `scripts/install.js` that the user runs manually. That script copies the plugin directory for discovery and invokes the shared core installer so auth, MCP config, and skills work consistently with the other harnesses.
+**Verdict at the time:** Antigravity had no install-time/session-start hook, so the plugin design originally used a one-time `scripts/install.js` that the user ran manually. This design is now archival; current installs use the repository root as the native Antigravity plugin.
 
 ---
 
@@ -67,7 +67,9 @@ Antigravity does **not** interpolate environment variables in `mcp_config.json` 
 
 ---
 
-## 5. Chosen design for Task 26
+## 5. Superseded design for Task 26
+
+This section documents the original design only. Do not use it for current installs; use `agy plugin install https://github.com/NodeSource/nsolid-plugin.git` and then `nsolid-plugin setup --harness antigravity`.
 
 - Ship a native `plugin.json`.
 - Ship `scripts/install.js` that the user runs once.
