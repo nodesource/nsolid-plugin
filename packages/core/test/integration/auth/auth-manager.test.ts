@@ -452,7 +452,7 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     assert.strictEqual(execFileCalls.length, 0)
   })
 
-  it('trusts stored credentials with unknown cached permissions when validation is unavailable', async () => {
+  it('rejects stored credentials with unknown cached permissions when validation is unavailable', async () => {
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
 
     const creds: Credentials = {
@@ -472,11 +472,37 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfigWithPerms)
 
-    assert.deepStrictEqual(result, creds)
+    await assert.rejects(
+      ensureAuthenticated(authConfigWithPerms),
+      /Cannot verify required permissions: nsolid:benchmark:run, nsolid:profile:read/
+    )
     assert.strictEqual(fetchCalls, 1)
     assert.strictEqual(execFileCalls.length, 0)
+  })
+
+  it('does not store fresh OAuth credentials when required permissions cannot be verified', { timeout: 10000 }, async () => {
+    const { loadCredentials } = await import('../../../src/auth/token-storage.js')
+
+    let fetchCalls = 0
+    globalThis.fetch = (async () => {
+      fetchCalls++
+      throw new Error('ECONNREFUSED')
+    }) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfigWithPerms)
+    const rejection = assert.rejects(
+      promise,
+      /Cannot verify required permissions: nsolid:benchmark:run, nsolid:profile:read/
+    )
+
+    const state = await pollForState(getStateFromExecFileCall)
+    await sendCallback(8767, state)
+    await rejection
+    assert.strictEqual(fetchCalls, 1)
+    assert.strictEqual(execFileCalls.length, 1)
+    assert.strictEqual(loadCredentials(), null)
   })
 
   it('does not store fresh OAuth credentials when validation reports missing required permissions', { timeout: 10000 }, async () => {

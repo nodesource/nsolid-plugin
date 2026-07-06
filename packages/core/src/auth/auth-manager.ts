@@ -37,15 +37,33 @@ function checkRequiredPermissions (
   }
 }
 
-function checkCachedPermissionsIfKnown (
+function failUnknownRequiredPermissions (
+  required: string[],
+  reason: string,
+  cause?: unknown
+): never {
+  throw new PermissionError(
+    required,
+    `Cannot verify required permissions: ${required.join(', ')}. ` +
+    `${reason} Retry when validation is available or re-authenticate.`,
+    { cause }
+  )
+}
+
+function checkCachedPermissions (
   required: string[],
   existing: Credentials,
-  logger?: Logger
+  logger?: Logger,
+  cause?: unknown
 ): void {
   if (required.length === 0) return
   if (existing.permissions === undefined) {
     logger?.debug('auth.credentials.cachedPermissionsUnknown', { orgId: existing.organizationId })
-    return
+    failUnknownRequiredPermissions(
+      required,
+      'Token validation is unavailable and cached credentials do not include permission evidence.',
+      cause
+    )
   }
   checkRequiredPermissions(required, existing.permissions)
 }
@@ -97,11 +115,11 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
           throw err
         }
         // API unavailable, timed out, or served a non-JSON fallback: keep setup
-        // idempotent by trusting the unexpired, origin-matching credentials. If
-        // this credentials file already has a permission cache, still enforce
-        // requiredPermissions against that known local state.
+        // idempotent by trusting the unexpired, origin-matching credentials
+        // only when no permissions are required, or when cached permissions
+        // locally prove the requested access.
         logger?.warn('auth.credentials.validationUnavailable', { error: (err as Error).message })
-        checkCachedPermissionsIfKnown(required, existing, logger)
+        checkCachedPermissions(required, existing, logger, err)
         return existing
       }
     }
@@ -178,6 +196,13 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
   } catch (err) {
     if (err instanceof InvalidCredentialsError || err instanceof PermissionError) {
       throw err
+    }
+    if (required.length > 0) {
+      failUnknownRequiredPermissions(
+        required,
+        'Token validation is unavailable, so fresh OAuth credentials cannot be authorized locally.',
+        err
+      )
     }
     // API unavailable - store optimistically
     logger?.warn('Could not validate token. Storing credentials optimistically.', { consoleId: callback.consoleId })
