@@ -293,10 +293,6 @@ Tokens and auth headers are redacted automatically.
 nsolid-plugin uninstall --harness <harness>
 ```
 
-```powershell
-nsolid-plugin uninstall --harness <harness>
-```
-
 Credentials are preserved.
 
 ### Pi MCP not working
