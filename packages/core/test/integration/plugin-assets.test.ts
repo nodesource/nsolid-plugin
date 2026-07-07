@@ -104,6 +104,24 @@ describe('plugin source hygiene', () => {
     assert.strictEqual(check.status, 0, outputText(check.stderr))
   })
 
+  it('cleans core package skills materialized by core prepack', () => {
+    writeSkill(root, 'ns-alpha', '# alpha\n')
+    writeBundle(root, ['ns-alpha'], ['ns-one'])
+    mkdirSync(join(root, 'packages', 'core', 'skills', 'ns-alpha'), { recursive: true })
+    writeFileSync(join(root, 'packages', 'core', 'skills', 'ns-alpha', 'SKILL.md'), '# alpha\n')
+
+    const checkWithMaterializedCore = runSync(root, ['--check'])
+    assert.notStrictEqual(checkWithMaterializedCore.status, 0)
+    assert.match(outputText(checkWithMaterializedCore.stderr), /packages\/core\/skills/)
+
+    const clean = runSync(root)
+    assert.strictEqual(clean.status, 0, outputText(clean.stderr))
+    assert.strictEqual(existsSync(join(root, 'packages', 'core', 'skills')), false)
+
+    const check = runSync(root, ['--check'])
+    assert.strictEqual(check.status, 0, outputText(check.stderr))
+  })
+
   it('fails check when a bundle skill is missing from root skills', () => {
     writeBundle(root, ['ns-missing'], ['ns-one'])
 

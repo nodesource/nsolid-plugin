@@ -38,6 +38,7 @@ const CHECK_MODE = process.argv.includes('--check')
 const MATERIALIZE_SKILLS = process.argv.includes('--materialize-skills')
 
 const CORE_SKILLS_DIR = path.join(ROOT, 'skills')
+const CORE_PACKAGE_SKILLS_DIR = path.join(ROOT, 'packages', 'core', 'skills')
 const PI_PLUGIN_DIR = path.join(ROOT, 'packages', 'pi-plugin')
 
 const bundle = loadBundle(ROOT)
@@ -54,6 +55,9 @@ const piSkillDrift = MATERIALIZE_SKILLS
   ? materializePiSkills()
   : cleanPiSkills()
 if (piSkillDrift) driftDetected = true
+
+const corePackageSkillDrift = cleanCorePackageSkills()
+if (corePackageSkillDrift) driftDetected = true
 
 const hygieneDrift = checkSourceHygiene()
 if (hygieneDrift) driftDetected = true
@@ -96,6 +100,19 @@ function cleanPiSkills () {
 
   rmSync(destSkillsDir, { recursive: true, force: true })
   console.log(`Removed materialized skill dir: ${path.relative(ROOT, destSkillsDir)}`)
+  return true
+}
+
+function cleanCorePackageSkills () {
+  if (!existsSync(CORE_PACKAGE_SKILLS_DIR)) return false
+
+  if (CHECK_MODE) {
+    console.error(`Materialized skill dir present in source tree: ${path.relative(ROOT, CORE_PACKAGE_SKILLS_DIR)}`)
+    return true
+  }
+
+  rmSync(CORE_PACKAGE_SKILLS_DIR, { recursive: true, force: true })
+  console.log(`Removed materialized skill dir: ${path.relative(ROOT, CORE_PACKAGE_SKILLS_DIR)}`)
   return true
 }
 
@@ -145,9 +162,6 @@ function materializePiSkills () {
 function checkSourceHygiene () {
   let drift = false
   // Reject any package-local skills dirs in removed/legacy plugin packages.
-  // NOTE: packages/core is intentionally excluded — it legitimately materializes
-  // a skills/ dir during prepack (skills:sync). Its presence is governed by
-  // packages/core/scripts/sync-shared-skill-assets.mjs, not this hygiene check.
   const packageRoots = [
     path.join(ROOT, 'packages', 'claude-plugin'),
     path.join(ROOT, 'packages', 'codex-plugin'),

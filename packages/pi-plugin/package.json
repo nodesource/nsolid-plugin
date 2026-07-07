@@ -1,6 +1,6 @@
 {
   "name": "nsolid-pi-plugin",
-  "version": "1.0.0-next.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "N|Solid Plugin for Pi Agent",
   "keywords": [
