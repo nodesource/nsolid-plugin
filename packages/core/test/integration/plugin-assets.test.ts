@@ -112,7 +112,7 @@ describe('plugin source hygiene', () => {
 
     const checkWithMaterializedCore = runSync(root, ['--check'])
     assert.notStrictEqual(checkWithMaterializedCore.status, 0)
-    assert.match(outputText(checkWithMaterializedCore.stderr), /packages\/core\/skills/)
+    assert.match(outputText(checkWithMaterializedCore.stderr), /packages[\\/]core[\\/]skills/)
 
     const clean = runSync(root)
     assert.strictEqual(clean.status, 0, outputText(clean.stderr))
