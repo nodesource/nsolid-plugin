@@ -141,7 +141,6 @@ function parsePnpm (content, directDeps) {
   let inPackages = false
   let currentName = ''
   let currentVersion = ''
-  let baseIndent = -1
   const seen = new Set()
 
   const flush = () => {
@@ -155,7 +154,6 @@ function parsePnpm (content, directDeps) {
     }
     currentName = ''
     currentVersion = ''
-    baseIndent = -1
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -185,7 +183,6 @@ function parsePnpm (content, directDeps) {
       flush()
       currentName = m[1]
       currentVersion = (m[2] || '').replace(/['"]$/, '')
-      baseIndent = line.search(/\S/)
       continue
     }
 
@@ -227,13 +224,10 @@ function batch (arr, size) {
 // Main
 // ---------------------------------------------------------------------------
 
-;(function main () {
-  const { dir } = parseArgs()
-
+function collectDependencies (dir) {
   const pkgJsonPath = path.join(dir, 'package.json')
   if (!fs.existsSync(pkgJsonPath)) {
-    process.stderr.write(`Error: package.json not found in ${dir}\n`)
-    process.exit(1)
+    throw new Error(`package.json not found in ${dir}`)
   }
 
   const directDeps = getDirectDeps(pkgJsonPath)
@@ -292,12 +286,23 @@ function batch (arr, size) {
   const directCount = unique.filter(d => d.isDirect).length
   const transitiveCount = unique.length - directCount
 
-  const result = {
+  return {
     packageManager,
     direct: directCount,
     transitive: transitiveCount,
     batches: batch(unique, BATCH_SIZE)
   }
+}
 
-  process.stdout.write(JSON.stringify(result, null, 2) + '\n')
-})()
+if (require.main === module) {
+  try {
+    const { dir } = parseArgs()
+    const result = collectDependencies(dir)
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n')
+  } catch (error) {
+    process.stderr.write(`Error: ${error.message}\n`)
+    process.exitCode = 1
+  }
+}
+
+module.exports = { collectDependencies }
