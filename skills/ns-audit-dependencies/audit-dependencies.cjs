@@ -5,6 +5,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { collectDependencies } = require('./collect-dependencies.cjs')
+const { renderAuditReport } = require('./render-audit-report.cjs')
 
 const DEFAULT_API_URL = 'https://api.ncm.nodesource.com'
 const MAX_NCM_STRING_LENGTH = 4096
@@ -48,12 +49,24 @@ const SEVERITY_RANK = {
 function parseArgs () {
   const args = process.argv.slice(2)
   let dir = process.cwd()
+  let format = 'json'
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--dir' && args[i + 1]) dir = path.resolve(args[++i])
+    else if (args[i] === '--format' && args[i + 1]) format = args[++i]
   }
 
-  return { dir }
+  if (!['json', 'markdown'].includes(format)) {
+    throw new Error(`Unsupported format: ${format}. Expected json or markdown.`)
+  }
+  return { dir, format }
+}
+
+function formatCliError (error) {
+  const code = error && typeof error.code === 'string' && error.code.length > 0
+    ? `${error.code}: `
+    : ''
+  return `Error: ${code}${error.message}\n`
 }
 
 function loadToken () {
@@ -399,7 +412,7 @@ async function runAudit (dir, options = {}) {
     truncatedFields: 0,
     truncatedCharacters: 0
   }
-  let unchecked = 0
+  const uncheckedByKey = new Map()
   let failedBatches = 0
 
   const token = requested.length > 0 ? options.token || loadToken() : ''
@@ -419,6 +432,24 @@ async function runAudit (dir, options = {}) {
     const exactKey = packageKey(pkg)
     if (directByKey.has(exactKey)) return directByKey.get(exactKey) === true
     return directByKey.get(`${pkg.name}@latest`) === true
+  }
+
+  function originalRequest (pkg) {
+    const exact = requested.find(item => packageKey(item) === packageKey(pkg))
+    if (exact) return exact
+    return requested.find(item => item.name === pkg.name && item.version === 'latest') || pkg
+  }
+
+  function recordUnchecked (pkg, reason) {
+    const requestedPackage = originalRequest(pkg)
+    const key = packageKey(requestedPackage)
+    if (!uncheckedByKey.has(key)) {
+      uncheckedByKey.set(key, {
+        name: requestedPackage.name,
+        version: pkg && pkg.version && requestedPackage.version === 'latest' ? pkg.version : requestedPackage.version,
+        reason
+      })
+    }
   }
 
   function mergeResults (...groups) {
@@ -499,7 +530,7 @@ async function runAudit (dir, options = {}) {
 
       return {
         results: [],
-        unresolved: packages,
+        unresolved: packages.map(pkg => ({ pkg, reason: classifyBatchFailure(error) })),
         failures: [{ reason: classifyBatchFailure(error) }]
       }
     }
@@ -530,7 +561,7 @@ async function runAudit (dir, options = {}) {
 
     return {
       results,
-      unresolved: missing,
+      unresolved: missing.map(pkg => ({ pkg, reason: 'missing-response' })),
       failures: missing.length > 0 ? [{ reason: 'missing-response' }] : []
     }
   }
@@ -752,7 +783,7 @@ async function runAudit (dir, options = {}) {
       const packages = batch.map(({ name, version }) => ({ name, version }))
       const outcome = await fetchWithRecovery(packages)
       const results = outcome.results
-      unchecked += outcome.unresolved.length
+      for (const unresolved of outcome.unresolved) recordUnchecked(unresolved.pkg, unresolved.reason)
       for (const failure of outcome.failures) {
         failedBatches++
         failureReasons[failure.reason] = (failureReasons[failure.reason] || 0) + 1
@@ -761,12 +792,12 @@ async function runAudit (dir, options = {}) {
       let invalidResponses = 0
       for (const pkg of results) {
         if (pkg.published === false) {
-          unchecked++
+          recordUnchecked(pkg, 'unpublished')
           continue
         }
 
         if (!Array.isArray(pkg.scores)) {
-          unchecked++
+          recordUnchecked(pkg, 'invalid-response')
           invalidResponses++
           continue
         }
@@ -801,7 +832,7 @@ async function runAudit (dir, options = {}) {
       }
     } catch (error) {
       const reason = classifyBatchFailure(error)
-      unchecked += batch.length
+      for (const pkg of batch) recordUnchecked(pkg, reason)
       failedBatches++
       failureReasons[reason] = (failureReasons[reason] || 0) + 1
       process.stderr.write(`Warning: NCM batch failed (${reason}); ${batch.length} package(s) left unchecked\n`)
@@ -840,6 +871,13 @@ async function runAudit (dir, options = {}) {
   }
 
   const byFailureReason = Object.fromEntries(Object.entries(failureReasons).sort(([a], [b]) => a.localeCompare(b)))
+  const uncheckedPackages = Array.from(uncheckedByKey.values())
+    .sort((a, b) => a.reason.localeCompare(b.reason) || a.name.localeCompare(b.name) || a.version.localeCompare(b.version))
+  const uncheckedByReason = {}
+  for (const pkg of uncheckedPackages) {
+    uncheckedByReason[pkg.reason] = (uncheckedByReason[pkg.reason] || 0) + 1
+  }
+  const unchecked = uncheckedPackages.length
   return {
     packageManager: collected.packageManager,
     packages: {
@@ -847,7 +885,8 @@ async function runAudit (dir, options = {}) {
       direct: collected.direct,
       transitive: collected.transitive,
       checked: Math.max(0, requested.length - unchecked),
-      unchecked
+      unchecked,
+      uncheckedByReason: Object.fromEntries(Object.entries(uncheckedByReason).sort(([a], [b]) => a.localeCompare(b)))
     },
     vulnerabilities: {
       total: vulnerabilityCount,
@@ -864,18 +903,27 @@ async function runAudit (dir, options = {}) {
     },
     ncmContentTruncation,
     remediation,
+    uncheckedPackages,
     findings
   }
 }
 
 if (require.main === module) {
-  const { dir } = parseArgs()
-  runAudit(dir, { onProgress: message => process.stderr.write(message) })
-    .then(summary => process.stdout.write(JSON.stringify(summary) + '\n'))
-    .catch(error => {
-      process.stderr.write(`Error: ${error.message}\n`)
-      process.exitCode = 1
-    })
+  let args
+  try {
+    args = parseArgs()
+  } catch (error) {
+    process.stderr.write(formatCliError(error))
+    process.exitCode = 1
+  }
+  if (args) {
+    runAudit(args.dir, { onProgress: message => process.stderr.write(message) })
+      .then(summary => process.stdout.write(args.format === 'markdown' ? `${renderAuditReport(summary)}\n` : `${JSON.stringify(summary)}\n`))
+      .catch(error => {
+        process.stderr.write(formatCliError(error))
+        process.exitCode = 1
+      })
+  }
 }
 
-module.exports = { classifyBatchFailure, compactVulnerability, fetchBatch, runAudit }
+module.exports = { classifyBatchFailure, compactVulnerability, fetchBatch, formatCliError, parseArgs, runAudit }

@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 const require = createRequire(import.meta.url)
-const { classifyBatchFailure, fetchBatch, runAudit } = require('../../../../../skills/ns-audit-dependencies/audit-dependencies.cjs') as {
+const { classifyBatchFailure, fetchBatch, formatCliError, parseArgs, runAudit } = require('../../../../../skills/ns-audit-dependencies/audit-dependencies.cjs') as {
   classifyBatchFailure: (error: unknown) => string
   fetchBatch: (
     apiUrl: string,
@@ -14,8 +14,35 @@ const { classifyBatchFailure, fetchBatch, runAudit } = require('../../../../../s
     packages: Array<{ name: string, version: string }>,
     options?: Record<string, unknown>
   ) => Promise<Array<Record<string, unknown>>>
+  formatCliError: (error: Error & { code?: string }) => string
+  parseArgs: () => { dir: string, format: string }
   runAudit: (dir: string, options: Record<string, unknown>) => Promise<Record<string, unknown>>
 }
+
+test('audit helper preserves integrity error codes in CLI output', () => {
+  const error = Object.assign(new Error('summary totals differ'), {
+    code: 'AUDIT_REPORT_INTEGRITY_ERROR'
+  })
+  assert.equal(
+    formatCliError(error),
+    'Error: AUDIT_REPORT_INTEGRITY_ERROR: summary totals differ\n'
+  )
+  assert.equal(formatCliError(new Error('ordinary failure')), 'Error: ordinary failure\n')
+})
+
+test('audit helper parses output formats and rejects unsupported values', () => {
+  const originalArgv = process.argv
+  try {
+    process.argv = ['node', 'audit-dependencies.cjs']
+    assert.equal(parseArgs().format, 'json')
+    process.argv = ['node', 'audit-dependencies.cjs', '--format', 'markdown']
+    assert.equal(parseArgs().format, 'markdown')
+    process.argv = ['node', 'audit-dependencies.cjs', '--format', 'html']
+    assert.throws(() => parseArgs(), /Unsupported format: html/)
+  } finally {
+    process.argv = originalArgv
+  }
+})
 
 async function createNpmProject (packageCount: number): Promise<string> {
   const projectDir = await mkdtemp(path.join(os.tmpdir(), 'nsolid-audit-'))
@@ -113,7 +140,7 @@ test('audit helper only emits vulnerable dependency data', async () => {
     }
     const output = JSON.stringify(summary)
 
-    assert.deepEqual(summary.packages, { total: 2, direct: 1, transitive: 1, checked: 2, unchecked: 0 })
+    assert.deepEqual(summary.packages, { total: 2, direct: 1, transitive: 1, checked: 2, unchecked: 0, uncheckedByReason: {} })
     assert.equal(summary.vulnerabilities.total, 1)
     assert.equal(summary.vulnerabilities.affectedPackages, 1)
     assert.equal(summary.findings.length, 1)
@@ -186,7 +213,7 @@ test('audit helper matches concrete NCM versions returned for latest dependency 
     }
 
     assert.deepEqual(primaryRequests, [['latest', 'latest', 'latest']])
-    assert.deepEqual(summary.packages, { total: 3, direct: 3, transitive: 0, checked: 3, unchecked: 0 })
+    assert.deepEqual(summary.packages, { total: 3, direct: 3, transitive: 0, checked: 3, unchecked: 0, uncheckedByReason: {} })
     assert.deepEqual(summary.batchFailures, { total: 0, byReason: {} })
     assert.equal(summary.batchRecovery.missingPackageRetries, 0)
     assert.deepEqual(summary.findings.map(({ name, version, direct }) => ({ name, version, direct })), [
@@ -747,6 +774,7 @@ test('audit helper recovers an exhausted batch by splitting it once', async () =
       packages: Record<string, number>
       batchFailures: { total: number, byReason: Record<string, number> }
       batchRecovery: Record<string, number>
+      uncheckedPackages: Array<{ name: string, version: string, reason: string }>
     }
 
     assert.deepEqual(requestSizes, [100, 50, 50])
@@ -783,10 +811,13 @@ test('audit helper leaves only an unrecovered split unchecked', async () => {
       packages: Record<string, number>
       batchFailures: { total: number, byReason: Record<string, number> }
       batchRecovery: Record<string, number>
+      uncheckedPackages: Array<{ name: string, version: string, reason: string }>
     }
 
     assert.equal(summary.packages.checked, 50)
     assert.equal(summary.packages.unchecked, 50)
+    assert.equal(summary.uncheckedPackages.length, 50)
+    assert.ok(summary.uncheckedPackages.every(pkg => pkg.reason === 'server'))
     assert.deepEqual(summary.batchFailures, { total: 1, byReason: { server: 1 } })
     assert.equal(summary.batchRecovery.recoveredPackages, 50)
     assert.doesNotMatch(JSON.stringify(summary), /PRIVATE_RAW_FAILURE/)
@@ -817,6 +848,7 @@ test('audit helper bounds an exhausted batch to seven transport attempts', async
       packages: Record<string, number>
       batchFailures: { total: number, byReason: Record<string, number> }
       batchRecovery: Record<string, number>
+      uncheckedPackages: Array<{ name: string, version: string, reason: string }>
     }
 
     assert.equal(attempts, 7)
@@ -851,11 +883,15 @@ test('audit helper retries omitted responses but not unpublished packages', asyn
       packages: Record<string, number>
       batchFailures: { total: number, byReason: Record<string, number> }
       batchRecovery: Record<string, number>
+      uncheckedPackages: Array<{ name: string, version: string, reason: string }>
     }
 
     assert.deepEqual(requestSizes, [10, 1])
     assert.equal(summary.packages.checked, 9)
     assert.equal(summary.packages.unchecked, 1)
+    assert.deepEqual(summary.uncheckedPackages, [
+      { name: 'package-0', version: '1.0.0', reason: 'unpublished' }
+    ])
     assert.deepEqual(summary.batchFailures, { total: 0, byReason: {} })
     assert.equal(summary.batchRecovery.missingPackageRetries, 1)
     assert.equal(summary.batchRecovery.recoveredPackages, 1)
@@ -880,10 +916,22 @@ test('audit helper leaves packages with missing or non-array scores unchecked', 
     }) as {
       packages: Record<string, number>
       batchFailures: { total: number, byReason: Record<string, number> }
+      uncheckedPackages: Array<{ name: string, version: string, reason: string }>
       findings: unknown[]
     }
 
-    assert.deepEqual(summary.packages, { total: 2, direct: 2, transitive: 0, checked: 0, unchecked: 2 })
+    assert.deepEqual(summary.packages, {
+      total: 2,
+      direct: 2,
+      transitive: 0,
+      checked: 0,
+      unchecked: 2,
+      uncheckedByReason: { 'invalid-response': 2 }
+    })
+    assert.deepEqual(summary.uncheckedPackages, [
+      { name: 'package-0', version: '1.0.0', reason: 'invalid-response' },
+      { name: 'package-1', version: '1.0.1', reason: 'invalid-response' }
+    ])
     assert.deepEqual(summary.batchFailures, { total: 1, byReason: { 'invalid-response': 1 } })
     assert.deepEqual(summary.findings, [])
   } finally {
