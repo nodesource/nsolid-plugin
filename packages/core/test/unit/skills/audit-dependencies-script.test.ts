@@ -144,6 +144,61 @@ test('audit helper only emits vulnerable dependency data', async () => {
   }
 })
 
+test('audit helper matches concrete NCM versions returned for latest dependency requests', async () => {
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'nsolid-audit-'))
+  const primaryRequests: string[][] = []
+
+  try {
+    await writeFile(path.join(projectDir, 'package.json'), JSON.stringify({
+      dependencies: {
+        'star-dep': '*',
+        'tag-dep': 'latest',
+        'workspace-dep': 'workspace:*'
+      }
+    }))
+
+    const summary = await runAudit(projectDir, {
+      token: 'test-token',
+      fetchBatch: async (
+        _apiUrl: string,
+        _token: string,
+        packages: Array<{ name: string, version: string }>,
+        options: { phase?: string }
+      ) => {
+        if (options.phase !== 'remediation') primaryRequests.push(packages.map(pkg => pkg.version))
+        return packages.map((pkg, index) => ({
+          name: pkg.name,
+          version: `${options.phase === 'remediation' ? 2 : 1}.0.${index}`,
+          published: true,
+          scores: [{
+            group: 'security',
+            pass: false,
+            severity: 'HIGH',
+            title: 'Known vulnerability'
+          }]
+        }))
+      }
+    }) as {
+      packages: Record<string, number>
+      batchFailures: { total: number, byReason: Record<string, number> }
+      batchRecovery: { missingPackageRetries: number }
+      findings: Array<{ name: string, version: string, direct: boolean }>
+    }
+
+    assert.deepEqual(primaryRequests, [['latest', 'latest', 'latest']])
+    assert.deepEqual(summary.packages, { total: 3, direct: 3, transitive: 0, checked: 3, unchecked: 0 })
+    assert.deepEqual(summary.batchFailures, { total: 0, byReason: {} })
+    assert.equal(summary.batchRecovery.missingPackageRetries, 0)
+    assert.deepEqual(summary.findings.map(({ name, version, direct }) => ({ name, version, direct })), [
+      { name: 'star-dep', version: '1.0.0', direct: true },
+      { name: 'tag-dep', version: '1.0.1', direct: true },
+      { name: 'workspace-dep', version: '1.0.2', direct: true }
+    ])
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('audit helper verifies a concrete latest fallback when no boundary candidate exists', async () => {
   const projectDir = await createNpmProject(1)
   const requestedVersions: string[] = []
@@ -184,6 +239,103 @@ test('audit helper verifies a concrete latest fallback when no boundary candidat
       version: '2.0.0',
       source: 'latest-fallback',
       changeType: 'major'
+    })
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('audit helper accepts SemVer build metadata in latest remediation versions', async () => {
+  const projectDir = await createNpmProject(1)
+
+  try {
+    for (const concreteVersion of ['2.0.0+build.1', '2.0.0-rc.1+build.1']) {
+      const summary = await runAudit(projectDir, {
+        token: 'test-token',
+        fetchBatch: async (
+          _apiUrl: string,
+          _token: string,
+          packages: Array<{ name: string, version: string }>,
+          options: { phase?: string }
+        ) => {
+          if (options.phase === 'remediation') {
+            return packages.map(pkg => ({ name: pkg.name, version: concreteVersion, published: true, scores: [] }))
+          }
+          return packages.map(pkg => ({
+            ...pkg,
+            published: true,
+            scores: [{
+              group: 'security',
+              pass: false,
+              severity: 'HIGH',
+              title: 'Known vulnerability'
+            }]
+          }))
+        }
+      }) as {
+        remediation: { verified: number, unresolved: number }
+        findings: Array<{ remediation: Record<string, string> }>
+      }
+
+      assert.equal(summary.remediation.verified, 1)
+      assert.equal(summary.remediation.unresolved, 0)
+      assert.deepEqual(summary.findings[0].remediation, {
+        status: 'ncm-verified',
+        version: concreteVersion,
+        source: 'latest-fallback',
+        changeType: 'major'
+      })
+    }
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('audit helper calculates change type when the installed version has build metadata', async () => {
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'nsolid-audit-'))
+
+  try {
+    await writeFile(path.join(projectDir, 'package.json'), JSON.stringify({
+      dependencies: { 'build-dep': '1.0.0+build.1' }
+    }))
+    await writeFile(path.join(projectDir, 'package-lock.json'), JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        '': { dependencies: { 'build-dep': '1.0.0+build.1' } },
+        'node_modules/build-dep': { version: '1.0.0+build.1' }
+      }
+    }))
+
+    const summary = await runAudit(projectDir, {
+      token: 'test-token',
+      fetchBatch: async (
+        _apiUrl: string,
+        _token: string,
+        packages: Array<{ name: string, version: string }>,
+        options: { phase?: string }
+      ) => {
+        if (options.phase === 'remediation') {
+          return packages.map(pkg => ({ ...pkg, published: true, scores: [] }))
+        }
+        return packages.map(pkg => ({
+          ...pkg,
+          published: true,
+          scores: [{
+            group: 'security',
+            pass: false,
+            severity: 'HIGH',
+            title: 'Known vulnerability',
+            data: { patched: ['>= 1.1.0'] }
+          }]
+        }))
+      }
+    }) as { findings: Array<{ remediation: Record<string, string> }> }
+
+    assert.deepEqual(summary.findings[0].remediation, {
+      status: 'ncm-verified',
+      version: '1.1.0',
+      source: 'patched-range-boundary',
+      changeType: 'minor'
     })
   } finally {
     await rm(projectDir, { recursive: true, force: true })
@@ -255,6 +407,53 @@ test('remediation verification failure does not make an audited package unchecke
     assert.equal(summary.batchFailures.total, 0)
     assert.equal(summary.remediation.verificationFailed, 1)
     assert.equal(summary.remediation.failures.total, 2)
+    assert.equal(summary.findings[0].remediation.status, 'verification-failed')
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('invalid remediation scores cannot certify a candidate as clean', async () => {
+  const projectDir = await createNpmProject(1)
+
+  try {
+    const summary = await runAudit(projectDir, {
+      token: 'test-token',
+      fetchBatch: async (
+        _apiUrl: string,
+        _token: string,
+        packages: Array<{ name: string, version: string }>,
+        options: { phase?: string }
+      ) => {
+        if (options.phase === 'remediation') {
+          return packages.map(pkg => ({ ...pkg, published: true }))
+        }
+        return packages.map(pkg => ({
+          ...pkg,
+          published: true,
+          scores: [{
+            group: 'security',
+            pass: false,
+            severity: 'HIGH',
+            title: 'Known vulnerability',
+            data: { vulnerable: ['< 1.0.1'] }
+          }]
+        }))
+      }
+    }) as {
+      packages: Record<string, number>
+      remediation: {
+        verified: number
+        verificationFailed: number
+        failures: { total: number, byReason: Record<string, number> }
+      }
+      findings: Array<{ remediation: { status: string } }>
+    }
+
+    assert.equal(summary.packages.checked, 1)
+    assert.equal(summary.remediation.verified, 0)
+    assert.equal(summary.remediation.verificationFailed, 1)
+    assert.deepEqual(summary.remediation.failures, { total: 2, byReason: { 'invalid-response': 2 } })
     assert.equal(summary.findings[0].remediation.status, 'verification-failed')
   } finally {
     await rm(projectDir, { recursive: true, force: true })
@@ -665,6 +864,33 @@ test('audit helper retries omitted responses but not unpublished packages', asyn
   }
 })
 
+test('audit helper leaves packages with missing or non-array scores unchecked', async () => {
+  const projectDir = await createNpmProject(2)
+
+  try {
+    const summary = await runAudit(projectDir, {
+      token: 'test-token',
+      fetchBatch: async (_apiUrl: string, _token: string, packages: Array<{ name: string, version: string }>) => {
+        return packages.map((pkg, index) => ({
+          ...pkg,
+          published: true,
+          ...(index === 0 ? {} : { scores: {} })
+        }))
+      }
+    }) as {
+      packages: Record<string, number>
+      batchFailures: { total: number, byReason: Record<string, number> }
+      findings: unknown[]
+    }
+
+    assert.deepEqual(summary.packages, { total: 2, direct: 2, transitive: 0, checked: 0, unchecked: 2 })
+    assert.deepEqual(summary.batchFailures, { total: 1, byReason: { 'invalid-response': 1 } })
+    assert.deepEqual(summary.findings, [])
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('audit recovery remains within the two-request concurrency limit', async () => {
   const projectDir = await createNpmProject(205)
   const failedFullBatches = new Set<string>()
@@ -694,7 +920,7 @@ test('audit recovery remains within the two-request concurrency limit', async ()
   }
 })
 
-test('audit helper preserves severity sorting and the 50-finding limit', async () => {
+test('audit helper preserves severity sorting and emits every finding', async () => {
   const projectDir = await createNpmProject(55)
 
   try {
@@ -704,26 +930,132 @@ test('audit helper preserves severity sorting and the 50-finding limit', async (
         return packages.map((pkg, index) => ({
           ...pkg,
           published: true,
-          scores: [{
-            group: 'security',
-            pass: false,
-            severity: index === packages.length - 1 ? 'CRITICAL' : 'LOW',
-            title: index === 0 ? 'Withdrawn advisory' : 'Security issue'
-          }]
+          scores: [
+            {
+              group: 'security',
+              pass: false,
+              severity: index === packages.length - 1 ? 'CRITICAL' : 'LOW',
+              title: index === 0 ? 'Withdrawn advisory' : 'Security issue'
+            },
+            {
+              group: 'security',
+              pass: false,
+              severity: 'LOW',
+              title: 'Second security issue'
+            }
+          ]
         }))
       }
     }) as {
       vulnerabilities: { total: number, affectedPackages: number }
       findings: Array<{ severity: string, vulnerabilities: Array<{ withdrawn?: boolean }> }>
-      truncatedFindings: number
     }
 
-    assert.equal(summary.vulnerabilities.total, 55)
+    assert.equal(summary.vulnerabilities.total, 110)
     assert.equal(summary.vulnerabilities.affectedPackages, 55)
-    assert.equal(summary.findings.length, 50)
+    assert.equal(summary.findings.length, 55)
     assert.equal(summary.findings[0].severity, 'CRITICAL')
     assert.equal(summary.findings.some(finding => finding.vulnerabilities.some(item => item.withdrawn)), true)
-    assert.equal(summary.truncatedFindings, 5)
+    assert.equal('truncatedFindings' in summary, false)
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('audit helper bounds NCM strings without dropping nested finding items', async () => {
+  const projectDir = await createNpmProject(1)
+  const long = 'x'.repeat(5000)
+  const vulnerableRanges = [`< 2.0.0 ${long}`, `< 3.0.0 ${long}`]
+  const patchedRanges = [`>= 4.0.0 ${long}`]
+  const latestVersion = `5.0.0-${long}`
+  const oversizedFields = [
+    long, long, long, long,
+    ...vulnerableRanges,
+    ...patchedRanges,
+    long, long, long, long,
+    long, long, long, long,
+    long,
+    latestVersion
+  ]
+
+  try {
+    const summary = await runAudit(projectDir, {
+      token: 'test-token',
+      fetchBatch: async (
+        _apiUrl: string,
+        _token: string,
+        packages: Array<{ name: string, version: string }>,
+        options: { phase?: string }
+      ) => {
+        if (options.phase === 'remediation') {
+          return packages.map(pkg => pkg.version === 'latest'
+            ? { name: pkg.name, version: latestVersion, published: true, scores: [] }
+            : {
+                ...pkg,
+                published: true,
+                scores: [{ group: 'security', pass: false, severity: 'LOW', title: 'Still vulnerable' }]
+              })
+        }
+        return packages.map(pkg => ({
+          ...pkg,
+          published: true,
+          scores: [
+            {
+              group: 'security',
+              pass: false,
+              severity: long,
+              title: long,
+              data: { cve: long, url: long, vulnerable: vulnerableRanges, patched: patchedRanges }
+            },
+            { group: 'risk', pass: false, severity: long, title: long },
+            { group: 'risk', pass: false, severity: long, title: long },
+            { group: 'quality', pass: false, severity: long, title: long },
+            { group: 'quality', pass: false, severity: long, title: long },
+            { group: 'compliance', name: 'license', pass: true, data: { spdx: long } }
+          ]
+        }))
+      }
+    }) as {
+      ncmContentTruncation: { truncatedFields: number, truncatedCharacters: number }
+      findings: Array<{
+        vulnerabilities: Array<{
+          severity: string
+          title: string
+          id: string
+          url: string
+          vulnerable: string[]
+          patched: string[]
+        }>
+        license: { spdx: string }
+        moduleRisks: Array<{ severity: string, title: string }>
+        codeQuality: Array<{ severity: string, title: string }>
+        remediation: { status: string, version: string }
+      }>
+    }
+
+    const finding = summary.findings[0]
+    assert.equal(finding.vulnerabilities.length, 1)
+    assert.equal(finding.vulnerabilities[0].vulnerable.length, 2)
+    assert.equal(finding.vulnerabilities[0].patched.length, 1)
+    assert.equal(finding.moduleRisks.length, 2)
+    assert.equal(finding.codeQuality.length, 2)
+    assert.equal(finding.remediation.status, 'ncm-verified')
+    for (const value of [
+      finding.vulnerabilities[0].severity,
+      finding.vulnerabilities[0].title,
+      finding.vulnerabilities[0].id,
+      finding.vulnerabilities[0].url,
+      ...finding.vulnerabilities[0].vulnerable,
+      ...finding.vulnerabilities[0].patched,
+      ...finding.moduleRisks.flatMap(item => [item.severity, item.title]),
+      ...finding.codeQuality.flatMap(item => [item.severity, item.title]),
+      finding.license.spdx,
+      finding.remediation.version
+    ]) assert.equal(value.length, 4096)
+    assert.deepEqual(summary.ncmContentTruncation, {
+      truncatedFields: oversizedFields.length,
+      truncatedCharacters: oversizedFields.reduce((total, value) => total + value.length - 4096, 0)
+    })
   } finally {
     await rm(projectDir, { recursive: true, force: true })
   }

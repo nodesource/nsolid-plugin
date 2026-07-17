@@ -10,7 +10,7 @@ description: >-
 
 **Otherwise (agent mode):**
 - Run the bundled audit helper from the project root (use the absolute path of the directory where you read this SKILL.md):
-  ```
+  ```bash
   node "<skill-dir>/audit-dependencies.cjs" --dir "$PWD"
   ```
 - The helper requires outbound HTTPS access to `api.ncm.nodesource.com`. If the current command sandbox is known to block network access, request scoped escalation for this exact helper command before starting it. Let the harness ask the user for approval; never request broad or full-access sandbox permissions.
@@ -26,9 +26,9 @@ Do not add N|Solid live enrichment to this static audit. If the user explicitly 
 ### 2. Present an Audit Report
 Emit the audit directly in chat as markdown with these sections:
 
-**Summary** — total packages checked, total vulnerabilities found (by severity), count of packages that could not be checked, aggregate terminal batch-failure reasons, and recovery counts from `batchRecovery` when any retries, splits, or omitted-response recovery occurred. Summarize `remediation` separately: verified targets, unresolved findings, verification failures, withdrawn-only findings requiring no action, and candidate-recovery/failure counts. A remediation failure does not make the installed package unchecked when its primary vulnerability scan succeeded.
+**Summary** — total packages checked, total vulnerabilities found (by severity), count of packages that could not be checked, aggregate terminal batch-failure reasons, and recovery counts from `batchRecovery` when any retries, splits, or omitted-response recovery occurred. If `ncmContentTruncation.truncatedFields` is greater than zero, report both the number of oversized NCM fields and characters truncated. Summarize `remediation` separately: verified targets, unresolved findings, verification failures, withdrawn-only findings requiring no action, and candidate-recovery/failure counts. A remediation failure does not make the installed package unchecked when its primary vulnerability scan succeeded.
 
-**Prioritized Findings** — sorted critical → high → medium → low. Render one separate finding block for every returned package version; never combine packages or versions into a single bullet. Include direct/transitive status and list every returned vulnerability with its severity, title, ID, URL, `vulnerable` ranges, and `patched` ranges when present. Mark advisories with `withdrawn: true` as withdrawn without silently removing them. Include the package's license, module risks, and code-quality issues from the finding. Render its remediation status exactly: `ncm-verified` with version/source/change type, `unresolved`, `verification-failed`, or `not-required` for withdrawn-only findings. Describe `ncm-verified` as free of active NCM advisories at audit time, not absolutely safe. If `truncatedFindings` is greater than zero, state exactly how many package findings were omitted.
+**Prioritized Findings** — sorted critical → high → medium → low. Render one separate finding block for every returned package version; never combine packages or versions into a single bullet. Include direct/transitive status and list every returned vulnerability with its severity, title, ID, URL, `vulnerable` ranges, and `patched` ranges when present. Mark advisories with `withdrawn: true` as withdrawn without silently removing them. Include the package's license, module risks, and code-quality issues from the finding. Render its remediation status exactly: `ncm-verified` with version/source/change type, `unresolved`, `verification-failed`, or `not-required` for withdrawn-only findings. Describe `ncm-verified` as free of active NCM advisories at audit time, not absolutely safe.
 
 **Remediation Plan** — give package-specific commands for each direct critical/high finding only when `remediation.status` is `ncm-verified`, using its exact `remediation.version` and the detected package manager (npm / yarn / pnpm). Never emit the literal `@latest`. For `unresolved`, report the ranges as upgrade-selection evidence and require candidate verification before pinning. For `verification-failed`, say verification could not complete without weakening the vulnerability finding. For transitive findings, provide the appropriate `why` command and instruct the user to upgrade the introducing parent; use overrides/resolutions only temporarily with an `ncm-verified` version.
 
@@ -44,5 +44,5 @@ Emit the audit directly in chat as markdown with these sections:
 - Never hallucinate CVE IDs, vulnerability titles, or severity levels. Use only what NCM returns. If a package cannot be checked, report it as unchecked rather than safe.
 - Never turn `latest-fallback` into `@latest`; use only the concrete NCM-returned `remediation.version`. Never infer a fixed version from a vulnerable range when remediation is unresolved.
 - When host-provided audit data is in the prompt, analyze only that data — do not re-fetch.
-- Present every finding returned by the helper even when the report is long. The helper enforces the 50-package detail limit; do not compress its returned findings further.
+- Present every finding returned by the helper even when the report is long; do not compress or omit findings.
 - Rollback reminder is mandatory in every audit response.

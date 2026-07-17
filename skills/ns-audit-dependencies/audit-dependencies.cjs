@@ -7,7 +7,7 @@ const path = require('path')
 const { collectDependencies } = require('./collect-dependencies.cjs')
 
 const DEFAULT_API_URL = 'https://api.ncm.nodesource.com'
-const MAX_FINDINGS = 50
+const MAX_NCM_STRING_LENGTH = 4096
 const REQUEST_TIMEOUT_MS = 120000
 const MAX_RETRIES = 2
 const MAX_RECOVERY_RETRIES = 1
@@ -197,16 +197,38 @@ function packageKey (pkg) {
   return `${pkg.name}@${pkg.version}`
 }
 
-function compactStringList (value) {
+function matchingRequestKey (pkg, requestedKeys, requestedLatestNames) {
+  if (!pkg || typeof pkg.name !== 'string' || typeof pkg.version !== 'string') return null
+  const exactKey = packageKey(pkg)
+  if (requestedKeys.has(exactKey)) return exactKey
+  return requestedLatestNames.has(pkg.name) ? `${pkg.name}@latest` : null
+}
+
+function truncateNcmString (value, truncation) {
+  if (value.length <= MAX_NCM_STRING_LENGTH) return value
+
+  let end = MAX_NCM_STRING_LENGTH
+  const finalCodeUnit = value.charCodeAt(end - 1)
+  if (finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF) end--
+  const result = value.slice(0, end)
+  if (truncation) {
+    truncation.truncatedFields++
+    truncation.truncatedCharacters += value.length - result.length
+  }
+  return result
+}
+
+function compactStringList (value, truncation) {
   const values = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
   return Array.from(new Set(values
     .filter(item => typeof item === 'string')
     .map(item => item.trim())
     .filter(Boolean)))
+    .map(item => truncateNcmString(item, truncation))
 }
 
 function parseVersion (value) {
-  const match = String(value || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/)
+  const match = String(value || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/)
   if (!match) return null
   return {
     major: Number(match[1]),
@@ -271,39 +293,40 @@ function activeVulnerabilities (pkg) {
   })
 }
 
-function compactVulnerability (score) {
-  const title = String(score.title || 'Untitled NCM vulnerability')
+function compactVulnerability (score, truncation) {
+  const rawTitle = String(score.title || 'Untitled NCM vulnerability')
+  const title = truncateNcmString(rawTitle, truncation)
   const result = {
-    severity: String(score.severity || 'NONE').toUpperCase(),
+    severity: truncateNcmString(String(score.severity || 'NONE').toUpperCase(), truncation),
     title
   }
   const data = score.data
   if (data && typeof data === 'object') {
     const id = typeof data.cve === 'string' ? data.cve : typeof data.id === 'string' ? data.id : null
-    if (id) result.id = id
-    if (typeof data.url === 'string') result.url = data.url
-    const vulnerable = compactStringList(data.vulnerable)
-    const patched = compactStringList(data.patched)
+    if (id) result.id = truncateNcmString(id, truncation)
+    if (typeof data.url === 'string') result.url = truncateNcmString(data.url, truncation)
+    const vulnerable = compactStringList(data.vulnerable, truncation)
+    const patched = compactStringList(data.patched, truncation)
     if (vulnerable.length > 0) result.vulnerable = vulnerable
     if (patched.length > 0) result.patched = patched
   }
-  if (/\bwithdrawn\b/i.test(title)) result.withdrawn = true
+  if (/\bwithdrawn\b/i.test(rawTitle)) result.withdrawn = true
   return result
 }
 
-function compactAssessment (score, fallbackTitle) {
+function compactAssessment (score, fallbackTitle, truncation) {
   return {
-    severity: String(score.severity || 'NONE').toUpperCase(),
-    title: String(score.title || fallbackTitle)
+    severity: truncateNcmString(String(score.severity || 'NONE').toUpperCase(), truncation),
+    title: truncateNcmString(String(score.title || fallbackTitle), truncation)
   }
 }
 
-function compactLicense (score) {
+function compactLicense (score, truncation) {
   const data = score.data
   return {
     pass: score.pass === true,
     spdx: data && typeof data === 'object' && typeof data.spdx === 'string'
-      ? data.spdx
+      ? truncateNcmString(data.spdx, truncation)
       : null
   }
 }
@@ -372,6 +395,10 @@ async function runAudit (dir, options = {}) {
     missingCandidateRetries: 0
   }
   const remediationFailureReasons = {}
+  const ncmContentTruncation = {
+    truncatedFields: 0,
+    truncatedCharacters: 0
+  }
   let unchecked = 0
   let failedBatches = 0
 
@@ -386,6 +413,12 @@ async function runAudit (dir, options = {}) {
 
   function writeStatus (message) {
     process.stderr.write(message)
+  }
+
+  function isDirectPackage (pkg) {
+    const exactKey = packageKey(pkg)
+    if (directByKey.has(exactKey)) return directByKey.get(exactKey) === true
+    return directByKey.get(`${pkg.name}@latest`) === true
   }
 
   function mergeResults (...groups) {
@@ -411,11 +444,10 @@ async function runAudit (dir, options = {}) {
     })
     if (retried && Array.isArray(response)) {
       const requestedKeys = new Set(packages.map(packageKey))
+      const requestedLatestNames = new Set(packages.filter(pkg => pkg.version === 'latest').map(pkg => pkg.name))
       for (const pkg of response) {
-        if (pkg && typeof pkg.name === 'string' && typeof pkg.version === 'string' &&
-            requestedKeys.has(packageKey(pkg))) {
-          recoveredPackageKeys.add(packageKey(pkg))
-        }
+        const matchedKey = matchingRequestKey(pkg, requestedKeys, requestedLatestNames)
+        if (matchedKey) recoveredPackageKeys.add(matchedKey)
       }
     }
     return response
@@ -429,6 +461,7 @@ async function runAudit (dir, options = {}) {
       ? MAX_RETRIES
       : recoveryOptions.maxRetries
     const requestedKeys = new Set(packages.map(packageKey))
+    const requestedLatestNames = new Set(packages.filter(pkg => pkg.version === 'latest').map(pkg => pkg.name))
     let results
 
     try {
@@ -437,8 +470,7 @@ async function runAudit (dir, options = {}) {
         throw ncmError('NCM API returned an invalid packageVersions response', 'NCM_INVALID_RESPONSE')
       }
       results = mergeResults(response.filter(pkg => {
-        return pkg && typeof pkg.name === 'string' && typeof pkg.version === 'string' &&
-          requestedKeys.has(packageKey(pkg))
+        return matchingRequestKey(pkg, requestedKeys, requestedLatestNames) !== null
       }))
     } catch (error) {
       if (isRetryable(error) && depth < MAX_RECOVERY_DEPTH && packages.length > 1) {
@@ -472,7 +504,9 @@ async function runAudit (dir, options = {}) {
       }
     }
 
-    const returnedKeys = new Set(results.map(packageKey))
+    const returnedKeys = new Set(results
+      .map(pkg => matchingRequestKey(pkg, requestedKeys, requestedLatestNames))
+      .filter(Boolean))
     if (isRecovery) {
       for (const key of returnedKeys) recoveredPackageKeys.add(key)
     }
@@ -548,10 +582,16 @@ async function runAudit (dir, options = {}) {
       }
 
       const requestedKeys = new Set(packages.map(requestKey))
+      const invalidResponseKeys = new Set()
       for (const pkg of response) {
         if (!pkg || typeof pkg.name !== 'string' || typeof pkg.version !== 'string') continue
         const key = mode === 'latest' ? pkg.name : packageKey(pkg)
-        if (requestedKeys.has(key) && !resultByKey.has(key)) resultByKey.set(key, pkg)
+        if (!requestedKeys.has(key) || resultByKey.has(key)) continue
+        if (!Array.isArray(pkg.scores)) {
+          invalidResponseKeys.add(key)
+          continue
+        }
+        resultByKey.set(key, pkg)
       }
 
       const missing = packages.filter(pkg => !resultByKey.has(requestKey(pkg)))
@@ -560,7 +600,10 @@ async function runAudit (dir, options = {}) {
         writeStatus(`Audit remediation recovery: retrying ${missing.length} omitted candidate response(s)\n`)
         await requestChunk(missing, { depth: MAX_RECOVERY_DEPTH, retryMissing: false })
       } else if (missing.length > 0) {
-        recordFailures(missing, 'missing-response')
+        const invalid = missing.filter(pkg => invalidResponseKeys.has(requestKey(pkg)))
+        const omitted = missing.filter(pkg => !invalidResponseKeys.has(requestKey(pkg)))
+        if (invalid.length > 0) recordFailures(invalid, 'invalid-response')
+        if (omitted.length > 0) recordFailures(omitted, 'missing-response')
       }
     }
 
@@ -625,7 +668,10 @@ async function runAudit (dir, options = {}) {
             state.hadResponse = true
             const active = activeVulnerabilities(result)
             if (result.published !== false && active && active.length === 0) {
-              state.selected = { version: result.version, source: candidate.source }
+              state.selected = {
+                version: truncateNcmString(result.version, ncmContentTruncation),
+                source: candidate.source
+              }
               break
             }
           } else if (boundaryResults.failedKeys.has(key)) {
@@ -652,9 +698,13 @@ async function runAudit (dir, options = {}) {
         if (result) {
           state.hadResponse = true
           const active = activeVulnerabilities(result)
-          if (result.published !== false && parseVersion(result.version) && active && active.length === 0 &&
-              compareVersions(result.version, state.finding.version) > 0) {
-            state.selected = { version: result.version, source: 'latest-fallback' }
+          const resultVersion = truncateNcmString(result.version)
+          if (result.published !== false && parseVersion(resultVersion) && active && active.length === 0 &&
+              compareVersions(resultVersion, state.finding.version) > 0) {
+            state.selected = {
+              version: truncateNcmString(result.version, ncmContentTruncation),
+              source: 'latest-fallback'
+            }
           }
         } else if (latestResults.failedKeys.has(state.finding.name)) {
           state.hadFailure = true
@@ -708,36 +758,46 @@ async function runAudit (dir, options = {}) {
         failureReasons[failure.reason] = (failureReasons[failure.reason] || 0) + 1
       }
 
+      let invalidResponses = 0
       for (const pkg of results) {
-        const key = packageKey(pkg)
-
         if (pkg.published === false) {
           unchecked++
           continue
         }
 
-        const scores = Array.isArray(pkg.scores) ? pkg.scores.filter(Boolean) : []
+        if (!Array.isArray(pkg.scores)) {
+          unchecked++
+          invalidResponses++
+          continue
+        }
+
+        const scores = pkg.scores.filter(Boolean)
         const vulnerabilities = scores
           .filter(score => score.group === 'security' && score.pass === false)
-          .map(compactVulnerability)
+          .map(score => compactVulnerability(score, ncmContentTruncation))
 
         if (vulnerabilities.length > 0) {
           const licenseScore = scores.find(score => score.group === 'compliance' && score.name === 'license')
           findings.push({
             name: pkg.name,
             version: pkg.version,
-            direct: directByKey.get(key) === true,
+            direct: isDirectPackage(pkg),
             severity: highestSeverity(vulnerabilities),
             vulnerabilities,
-            license: licenseScore ? compactLicense(licenseScore) : null,
+            license: licenseScore ? compactLicense(licenseScore, ncmContentTruncation) : null,
             moduleRisks: scores
               .filter(score => score.group === 'risk' && score.pass === false)
-              .map(score => compactAssessment(score, 'Untitled NCM module risk')),
+              .map(score => compactAssessment(score, 'Untitled NCM module risk', ncmContentTruncation)),
             codeQuality: scores
               .filter(score => score.group === 'quality' && score.pass === false)
-              .map(score => compactAssessment(score, 'Untitled NCM quality issue'))
+              .map(score => compactAssessment(score, 'Untitled NCM quality issue', ncmContentTruncation))
           })
         }
+      }
+      if (invalidResponses > 0) {
+        failedBatches++
+        failureReasons['invalid-response'] = (failureReasons['invalid-response'] || 0) + 1
+        process.stderr.write(`Warning: NCM returned invalid scores for ${invalidResponses} package(s); left unchecked\n`)
       }
     } catch (error) {
       const reason = classifyBatchFailure(error)
@@ -779,7 +839,6 @@ async function runAudit (dir, options = {}) {
     }
   }
 
-  const visibleFindings = findings.slice(0, MAX_FINDINGS)
   const byFailureReason = Object.fromEntries(Object.entries(failureReasons).sort(([a], [b]) => a.localeCompare(b)))
   return {
     packageManager: collected.packageManager,
@@ -803,9 +862,9 @@ async function runAudit (dir, options = {}) {
       ...batchRecovery,
       recoveredPackages: recoveredPackageKeys.size
     },
+    ncmContentTruncation,
     remediation,
-    findings: visibleFindings,
-    truncatedFindings: findings.length - visibleFindings.length
+    findings
   }
 }
 
