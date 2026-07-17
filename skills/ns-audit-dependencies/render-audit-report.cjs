@@ -1,6 +1,7 @@
 'use strict'
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'unknown']
+const SEVERITY_RANK = { unknown: 0, low: 1, medium: 2, high: 3, critical: 4 }
 const REMEDIATION_KEYS = {
   'ncm-verified': 'verified',
   unresolved: 'unresolved',
@@ -8,10 +9,38 @@ const REMEDIATION_KEYS = {
   'not-required': 'notRequired'
 }
 
+const COVERAGE_GUIDANCE = {
+  authentication: 'NCM authentication failed. Refresh the configured NodeSource credentials before rerunning the audit.',
+  'rate-limit': 'NCM rate limiting remained after recovery. Rerun later; these package versions were not checked.',
+  server: 'NCM server failures remained after recovery. Rerun later; these package versions were not checked.',
+  timeout: 'NCM requests timed out after recovery. Check connectivity and rerun; these package versions were not checked.',
+  network: 'Network failures remained after recovery. Restore NCM connectivity and rerun; these package versions were not checked.',
+  'invalid-response': 'NCM returned an invalid package response. These package versions were not checked and the response contract should be investigated.',
+  'missing-response': 'NCM returned no matching package-version response after omitted-response recovery. Confirm the exact version and NCM coverage; use the organization\'s internal security-review process for private or internal packages without NCM metadata.',
+  unpublished: 'NCM marked these package versions unpublished. Confirm the resolved versions and review their provenance before use.',
+  unknown: 'The audit ended without a classified response. Investigate the audit stderr and rerun after resolving the underlying failure.'
+}
+
 function integrityError (message) {
   const error = new Error(`Audit report integrity check failed: ${message}`)
   error.code = 'AUDIT_REPORT_INTEGRITY_ERROR'
   return error
+}
+
+function emptySeverityCounts () {
+  return Object.fromEntries(SEVERITIES.map(severity => [severity, 0]))
+}
+
+function severityKey (value) {
+  const key = String(value || '').toLowerCase()
+  return SEVERITIES.includes(key) ? key : 'unknown'
+}
+
+function highestSeverity (vulnerabilities) {
+  return vulnerabilities.reduce((highest, vulnerability) => {
+    const severity = severityKey(vulnerability.severity)
+    return SEVERITY_RANK[severity] > SEVERITY_RANK[highest] ? severity : highest
+  }, 'unknown')
 }
 
 function stableCounts (values) {
@@ -27,31 +56,88 @@ function assertCounts (actual, expected, label) {
   for (const key of keys) assertEqual(actual[key] || 0, expected[key] || 0, `${label}.${key}`)
 }
 
+function compareFindings (left, right) {
+  return SEVERITY_RANK[right.renderedSeverity] - SEVERITY_RANK[left.renderedSeverity] ||
+    String(left.finding.name).localeCompare(String(right.finding.name)) ||
+    String(left.finding.version).localeCompare(String(right.finding.version))
+}
+
+function analyzeFindings (findings) {
+  const rawBySeverity = emptySeverityCounts()
+  const activeBySeverity = emptySeverityCounts()
+  const withdrawnBySeverity = emptySeverityCounts()
+  const remediationCounts = { verified: 0, unresolved: 0, verificationFailed: 0, notRequired: 0 }
+  const activeFindings = []
+  const withdrawnOnlyFindings = []
+  let rawRecords = 0
+  let activeRecords = 0
+  let withdrawnRecords = 0
+
+  for (const finding of findings) {
+    if (!Array.isArray(finding.vulnerabilities) || finding.vulnerabilities.length === 0) {
+      throw integrityError(`finding has no vulnerability records for ${finding.name || 'unknown package'}`)
+    }
+    const remediationKey = REMEDIATION_KEYS[finding.remediation && finding.remediation.status]
+    if (!remediationKey) throw integrityError(`unknown remediation status for ${finding.name || 'unknown package'}`)
+    remediationCounts[remediationKey]++
+
+    const active = []
+    for (const vulnerability of finding.vulnerabilities) {
+      const severity = severityKey(vulnerability.severity)
+      rawBySeverity[severity]++
+      rawRecords++
+      if (vulnerability.withdrawn === true) {
+        withdrawnBySeverity[severity]++
+        withdrawnRecords++
+      } else {
+        active.push(vulnerability)
+        activeBySeverity[severity]++
+        activeRecords++
+      }
+    }
+
+    if (active.length > 0) {
+      if (finding.remediation.status === 'not-required') {
+        throw integrityError(`active finding is marked not-required for ${finding.name}`)
+      }
+      activeFindings.push({ finding, renderedSeverity: highestSeverity(active) })
+    } else {
+      if (finding.remediation.status !== 'not-required') {
+        throw integrityError(`withdrawn-only finding requires not-required remediation for ${finding.name}`)
+      }
+      withdrawnOnlyFindings.push({ finding, renderedSeverity: highestSeverity(finding.vulnerabilities) })
+    }
+  }
+
+  activeFindings.sort(compareFindings)
+  withdrawnOnlyFindings.sort(compareFindings)
+  return {
+    rawBySeverity,
+    activeBySeverity,
+    withdrawnBySeverity,
+    remediationCounts,
+    activeFindings,
+    withdrawnOnlyFindings,
+    rawRecords,
+    activeRecords,
+    withdrawnRecords
+  }
+}
+
 function validateAuditSummary (summary) {
   if (!summary || !Array.isArray(summary.findings) || !Array.isArray(summary.uncheckedPackages)) {
     throw integrityError('missing findings or uncheckedPackages collection')
   }
 
-  const vulnerabilityCounts = Object.fromEntries(SEVERITIES.map(severity => [severity, 0]))
-  const remediationCounts = { verified: 0, unresolved: 0, verificationFailed: 0, notRequired: 0 }
-  let vulnerabilityTotal = 0
-
-  for (const finding of summary.findings) {
-    if (!Array.isArray(finding.vulnerabilities)) throw integrityError('finding has no vulnerability collection')
-    const key = REMEDIATION_KEYS[finding.remediation && finding.remediation.status]
-    if (!key) throw integrityError(`unknown remediation status for ${finding.name || 'unknown package'}`)
-    remediationCounts[key]++
-    for (const vulnerability of finding.vulnerabilities) {
-      const severity = String(vulnerability.severity || '').toLowerCase()
-      vulnerabilityCounts[SEVERITIES.includes(severity) ? severity : 'unknown']++
-      vulnerabilityTotal++
-    }
-  }
-
+  const analysis = analyzeFindings(summary.findings)
   assertEqual(summary.findings.length, summary.vulnerabilities.affectedPackages, 'affected package versions')
-  assertEqual(vulnerabilityTotal, summary.vulnerabilities.total, 'vulnerability records')
-  assertCounts(vulnerabilityCounts, summary.vulnerabilities.bySeverity, 'severity')
-  assertCounts(remediationCounts, {
+  assertEqual(analysis.rawRecords, summary.vulnerabilities.total, 'vulnerability records')
+  assertEqual(analysis.activeRecords + analysis.withdrawnRecords, analysis.rawRecords, 'record partition')
+  assertEqual(analysis.activeFindings.length + analysis.withdrawnOnlyFindings.length, summary.findings.length, 'finding partition')
+  assertCounts(analysis.rawBySeverity, summary.vulnerabilities.bySeverity, 'severity')
+  assertEqual(Object.values(analysis.activeBySeverity).reduce((total, count) => total + count, 0), analysis.activeRecords, 'active severity total')
+  assertEqual(Object.values(analysis.withdrawnBySeverity).reduce((total, count) => total + count, 0), analysis.withdrawnRecords, 'withdrawn severity total')
+  assertCounts(analysis.remediationCounts, {
     verified: summary.remediation.verified,
     unresolved: summary.remediation.unresolved,
     verificationFailed: summary.remediation.verificationFailed,
@@ -67,8 +153,9 @@ function validateAuditSummary (summary) {
   assertCounts(stableCounts(uncheckedCounts), summary.packages.uncheckedByReason, 'unchecked reason')
 
   return {
+    ...analysis,
     findings: summary.findings.length,
-    vulnerabilities: vulnerabilityTotal,
+    vulnerabilities: analysis.rawRecords,
     unchecked: summary.uncheckedPackages.length
   }
 }
@@ -103,20 +190,42 @@ function countsText (counts) {
   return entries.length > 0 ? entries.map(([key, count]) => `${count} ${escapeMarkdown(key)}`).join(', ') : 'none'
 }
 
-function renderFinding (finding, index, findingTotal, recordState, recordTotal) {
+function severityText (counts) {
+  return `${counts.critical} critical, ${counts.high} high, ${counts.medium} medium, ${counts.low} low, ${counts.unknown} unknown`
+}
+
+function noun (count, singular, plural = `${singular}s`) {
+  return count === 1 ? singular : plural
+}
+
+function dependencyScope (finding, short = false) {
+  if (finding.direct) {
+    return short
+      ? 'root-name match; ownership unresolved'
+      : 'root declaration name match; resolved ownership unproven'
+  }
+  return short
+    ? 'no root-name match; workspace/transitive unresolved'
+    : 'no root declaration name match; may be transitive or workspace-owned'
+}
+
+function renderFinding (item, index, findingTotal, renderState, recordTotal) {
+  const { finding, renderedSeverity } = item
   const lines = [
     `### Finding ${index + 1}/${findingTotal}: ${escapeMarkdown(finding.name)}@${escapeMarkdown(finding.version)}`,
     '',
-    `- Severity: ${escapeMarkdown(finding.severity)}`,
-    `- Dependency: ${finding.direct ? 'direct' : 'transitive'}`,
+    `- Severity: ${escapeMarkdown(renderedSeverity.toUpperCase())}`,
+    `- Dependency scope: ${dependencyScope(finding)}`,
     `- License: ${finding.license && finding.license.spdx ? escapeMarkdown(finding.license.spdx) : 'not returned'}`,
     '- Vulnerability records:'
   ]
 
   for (const vulnerability of finding.vulnerabilities) {
-    recordState.count++
+    renderState.records++
+    if (vulnerability.withdrawn) renderState.withdrawnRecords++
+    else renderState.activeRecords++
     const withdrawn = vulnerability.withdrawn ? ' — withdrawn' : ''
-    lines.push(`  - Record ${recordState.count}/${recordTotal} — ${escapeMarkdown(vulnerability.severity)} — ${valueOrNotReturned(vulnerability.id)} — ${escapeMarkdown(vulnerability.title)}${withdrawn}`)
+    lines.push(`  - Record ${renderState.records}/${recordTotal} — ${escapeMarkdown(vulnerability.severity)} — ${valueOrNotReturned(vulnerability.id)} — ${escapeMarkdown(vulnerability.title)}${withdrawn}`)
     lines.push(`    - Withdrawn: ${vulnerability.withdrawn ? 'yes' : 'no'}`)
     lines.push(`    - URL: ${valueOrNotReturned(vulnerability.url)}`)
     lines.push(`    - Vulnerable ranges: ${listOrNotReturned(vulnerability.vulnerable)}`)
@@ -141,33 +250,102 @@ function renderFinding (finding, index, findingTotal, recordState, recordTotal) 
   return lines.join('\n')
 }
 
-function renderRemediationPlan (summary) {
+function whyCommand (packageManager, name) {
+  return `${packageManager} why ${name}`
+}
+
+function renderRemediationPlan (summary, analysis) {
   const lines = ['## Remediation Plan', '']
-  const verified = summary.findings.filter(finding => finding.remediation.status === 'ncm-verified')
+  const verified = analysis.activeFindings.filter(item => item.finding.remediation.status === 'ncm-verified')
   if (verified.length === 0) {
     lines.push('No NCM-verified upgrade targets were found.')
   } else {
-    for (const finding of verified) {
-      lines.push(`- ${escapeMarkdown(finding.name)}@${escapeMarkdown(finding.version)} → verified target ${escapeMarkdown(finding.name)}@${escapeMarkdown(finding.remediation.version)}.`)
-      lines.push('  Command withheld because the owning manifest and resolved direct version are not proven unambiguous; locate the declaration before upgrading.')
-      if (!finding.direct) lines.push(`  Locate the introducing parent with \`${escapeMarkdown(summary.packageManager)} why ${escapeMarkdown(finding.name)}\`.`)
+    lines.push('| Severity | Installed | Verified target | Scope | Change | Verification | Next step |')
+    lines.push('| --- | --- | --- | --- | --- | --- | --- |')
+    for (const { finding, renderedSeverity } of verified) {
+      lines.push(`| ${escapeMarkdown(renderedSeverity.toUpperCase())} | ${escapeMarkdown(`${finding.name}@${finding.version}`)} | ${escapeMarkdown(finding.remediation.version)} | ${escapeMarkdown(dependencyScope(finding, true))} | ${escapeMarkdown(finding.remediation.changeType)} | ${escapeMarkdown(finding.remediation.source)} | ${escapeMarkdown(whyCommand(summary.packageManager, finding.name))} |`)
     }
+    lines.push('', 'Command withheld because exact manifest ownership is not proven. These versions are NCM-verified targets, not instructions to edit an arbitrary root manifest.')
   }
-  const unresolved = summary.findings.filter(finding => finding.remediation.status === 'unresolved').length
-  const failed = summary.findings.filter(finding => finding.remediation.status === 'verification-failed').length
+  const unresolved = analysis.activeFindings.filter(item => item.finding.remediation.status === 'unresolved').length
+  const failed = analysis.activeFindings.filter(item => item.finding.remediation.status === 'verification-failed').length
   if (unresolved > 0) lines.push(`- ${unresolved} finding(s) remain unresolved; use reported ranges as evidence, but verify a candidate with NCM before pinning.`)
   if (failed > 0) lines.push(`- ${failed} finding(s) could not complete remediation verification; this does not weaken the vulnerability finding.`)
+  return { markdown: lines.join('\n'), rows: verified.length }
+}
+
+function renderBreakingChangeNotes (analysis) {
+  const lines = ['## Breaking Change Notes', '']
+  const majors = analysis.activeFindings.filter(item => {
+    return item.finding.remediation.status === 'ncm-verified' && item.finding.remediation.changeType === 'major'
+  })
+  if (majors.length === 0) {
+    lines.push('No NCM-verified major-version remediation targets were found.')
+    return { markdown: lines.join('\n'), sourceFindings: 0, renderedInstalledVersions: 0 }
+  }
+
+  const groups = new Map()
+  for (const { finding } of majors) {
+    const key = `${finding.name}\u0000${finding.remediation.version}`
+    if (!groups.has(key)) groups.set(key, { name: finding.name, target: finding.remediation.version, installed: new Set() })
+    groups.get(key).installed.add(finding.version)
+  }
+  const ordered = Array.from(groups.values()).sort((a, b) => {
+    return a.name.localeCompare(b.name) || a.target.localeCompare(b.target)
+  })
+  let renderedInstalledVersions = 0
+  for (const group of ordered) {
+    const installed = Array.from(group.installed).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    renderedInstalledVersions += installed.length
+    const sources = installed.map(version => `${escapeMarkdown(group.name)}@${escapeMarkdown(version)}`).join(' and ')
+    lines.push(`- ${sources} → ${escapeMarkdown(group.target)}`)
+  }
+  lines.push('', 'Review official changelogs and test build, development tooling, and runtime behavior before merging major upgrades.')
+  return { markdown: lines.join('\n'), sourceFindings: majors.length, renderedInstalledVersions }
+}
+
+function renderCoverageGaps (summary) {
+  if (summary.uncheckedPackages.length === 0) return ''
+  const lines = ['## Coverage Gaps', '']
+  const packages = [...summary.uncheckedPackages].sort((a, b) => {
+    return a.reason.localeCompare(b.reason) || a.name.localeCompare(b.name) || a.version.localeCompare(b.version)
+  })
+  for (const pkg of packages) {
+    lines.push(`- ${escapeMarkdown(pkg.name)}@${escapeMarkdown(pkg.version)} — ${escapeMarkdown(pkg.reason)}`)
+  }
+  lines.push('', 'Unchecked package versions were not proven safe.')
+  const reasons = Array.from(new Set(packages.map(pkg => pkg.reason))).sort()
+  for (const reason of reasons) {
+    const guidance = COVERAGE_GUIDANCE[reason] || COVERAGE_GUIDANCE.unknown
+    lines.push(`- ${escapeMarkdown(reason)}: ${guidance}`)
+  }
+  return lines.join('\n')
+}
+
+function renderFindingSection (title, items, startIndex, totalFindings, renderState, recordTotal, partition) {
+  const lines = [`## ${title}`, '']
+  if (items.length === 0) {
+    lines.push(title === 'Active Findings'
+      ? 'No active vulnerable package versions were returned.'
+      : 'No withdrawn-only package versions were returned.')
+    return lines.join('\n')
+  }
+  items.forEach((item, itemIndex) => {
+    if (itemIndex > 0) lines.push('')
+    renderState[partition]++
+    lines.push(renderFinding(item, startIndex + itemIndex, totalFindings, renderState, recordTotal))
+  })
   return lines.join('\n')
 }
 
 function renderAuditReport (summary) {
-  const counts = validateAuditSummary(summary)
-  const severity = summary.vulnerabilities.bySeverity
+  const analysis = validateAuditSummary(summary)
   const lines = [
     '## Summary',
     '',
     `- ${summary.packages.checked} of ${summary.packages.total} package versions checked; ${summary.packages.unchecked} unchecked.`,
-    `- ${summary.vulnerabilities.total} vulnerability records across ${summary.vulnerabilities.affectedPackages} affected package versions: ${severity.critical} critical, ${severity.high} high, ${severity.medium} medium, ${severity.low} low, ${severity.unknown} unknown.`,
+    `- ${analysis.activeRecords} active vulnerability ${noun(analysis.activeRecords, 'record')} across ${analysis.activeFindings.length} actively affected package ${noun(analysis.activeFindings.length, 'version')}: ${severityText(analysis.activeBySeverity)}.`,
+    `- The complete NCM response contained ${analysis.rawRecords} vulnerability ${noun(analysis.rawRecords, 'record')} across ${summary.vulnerabilities.affectedPackages} affected package ${noun(summary.vulnerabilities.affectedPackages, 'version')}, including ${analysis.withdrawnRecords} withdrawn ${noun(analysis.withdrawnRecords, 'record')} and ${analysis.withdrawnOnlyFindings.length} withdrawn-only package ${noun(analysis.withdrawnOnlyFindings.length, 'version')}.`,
     `- Terminal batch failures: ${summary.batchFailures.total} (${countsText(summary.batchFailures.byReason)}). Recovery: ${summary.batchRecovery.transportRetries} transport retries, ${summary.batchRecovery.splitBatches} batch splits, ${summary.batchRecovery.missingPackageRetries} omitted-response retries, ${summary.batchRecovery.recoveredPackages} recovered package versions.`,
     `- Remediation: ${summary.remediation.verified} NCM-verified, ${summary.remediation.unresolved} unresolved, ${summary.remediation.verificationFailed} verification failures, ${summary.remediation.notRequired} not required. Candidate failures: ${summary.remediation.failures.total} (${countsText(summary.remediation.failures.byReason)}).`,
     `- Remediation recovery: ${summary.remediation.recovery.transportRetries} transport retries, ${summary.remediation.recovery.splitBatches} batch splits, ${summary.remediation.recovery.missingCandidateRetries} omitted-candidate retries.`
@@ -177,34 +355,41 @@ function renderAuditReport (summary) {
   } else {
     lines.push('- No NCM field truncation occurred.')
   }
+  lines.push('', 'Vulnerability records are package-version occurrences; the same advisory may appear for multiple installed versions or more than once in the NCM response.')
+  lines.push('', 'Root declaration matches are based on package names. The audit does not yet prove which manifest or workspace owns each resolved version.')
   lines.push('', '“NCM-verified” means free of active NCM advisories at audit time—not absolutely safe.')
   lines.push('', 'This is a static dependency audit; it does not establish runtime loading, reachability, or exploitability.')
 
-  if (summary.uncheckedPackages.length > 0) {
-    lines.push('', '## Coverage Gaps', '')
-    for (const pkg of summary.uncheckedPackages) {
-      lines.push(`- ${escapeMarkdown(pkg.name)}@${escapeMarkdown(pkg.version)} — ${escapeMarkdown(pkg.reason)}`)
-    }
+  const coverage = renderCoverageGaps(summary)
+  if (coverage) lines.push('', coverage)
+
+  const renderState = {
+    records: 0,
+    activeRecords: 0,
+    withdrawnRecords: 0,
+    activeFindings: 0,
+    withdrawnOnlyFindings: 0
   }
+  lines.push('', renderFindingSection('Active Findings', analysis.activeFindings, 0, analysis.findings, renderState, analysis.vulnerabilities, 'activeFindings'))
+  lines.push('', renderFindingSection('Withdrawn-Only Findings', analysis.withdrawnOnlyFindings, analysis.activeFindings.length, analysis.findings, renderState, analysis.vulnerabilities, 'withdrawnOnlyFindings'))
+  assertEqual(renderState.activeFindings, analysis.activeFindings.length, 'rendered active findings')
+  assertEqual(renderState.withdrawnOnlyFindings, analysis.withdrawnOnlyFindings.length, 'rendered withdrawn-only findings')
+  assertEqual(renderState.records, analysis.vulnerabilities, 'rendered vulnerability records')
+  assertEqual(renderState.activeRecords, analysis.activeRecords, 'rendered active records')
+  assertEqual(renderState.withdrawnRecords, analysis.withdrawnRecords, 'rendered withdrawn records')
 
-  lines.push('', '## Prioritized Findings', '')
-  if (summary.findings.length === 0) lines.push('No vulnerable package versions were returned.')
-  const recordState = { count: 0 }
-  summary.findings.forEach((finding, index) => {
-    if (index > 0) lines.push('')
-    lines.push(renderFinding(finding, index, counts.findings, recordState, counts.vulnerabilities))
-  })
-
-  lines.push('', renderRemediationPlan(summary), '', '## Breaking Change Notes', '')
-  const majors = summary.findings.filter(finding => finding.remediation.status === 'ncm-verified' && finding.remediation.changeType === 'major')
-  if (majors.length === 0) lines.push('No NCM-verified major-version remediation targets were found.')
-  else lines.push(`Major upgrades require changelog and compatibility review: ${majors.map(finding => `${escapeMarkdown(finding.name)} → ${escapeMarkdown(finding.remediation.version)}`).join(', ')}.`)
+  const remediation = renderRemediationPlan(summary, analysis)
+  assertEqual(remediation.rows, analysis.remediationCounts.verified, 'remediation table rows')
+  const breaking = renderBreakingChangeNotes(analysis)
+  assertEqual(breaking.sourceFindings, breaking.renderedInstalledVersions, 'breaking-change installed versions')
+  lines.push('', remediation.markdown, '', breaking.markdown)
 
   lines.push('', '## Rollback Guidance', '')
   lines.push('The N|Solid upgrade workflow backs up `package.json` and the lockfile under `.nsolid/backup/`. For manually executed package-manager commands, rely on version control or create a separate backup first.')
   lines.push('', '## Report Integrity', '')
-  lines.push(`Rendered ${counts.findings}/${summary.vulnerabilities.affectedPackages} package-version findings, ${recordState.count}/${summary.vulnerabilities.total} vulnerability records, and ${counts.unchecked}/${summary.packages.unchecked} unchecked package versions.`)
+  lines.push(`Rendered ${renderState.activeFindings + renderState.withdrawnOnlyFindings}/${summary.vulnerabilities.affectedPackages} package-version findings, ${renderState.records}/${summary.vulnerabilities.total} vulnerability records, and ${analysis.unchecked}/${summary.packages.unchecked} unchecked package versions.`)
+  lines.push(`Finding partition: ${renderState.activeFindings}/${analysis.activeFindings.length} active and ${renderState.withdrawnOnlyFindings}/${analysis.withdrawnOnlyFindings.length} withdrawn-only. Record partition: ${renderState.activeRecords}/${analysis.activeRecords} active and ${renderState.withdrawnRecords}/${analysis.withdrawnRecords} withdrawn.`)
   return lines.join('\n')
 }
 
-module.exports = { escapeMarkdown, renderAuditReport, validateAuditSummary }
+module.exports = { analyzeFindings, escapeMarkdown, renderAuditReport, validateAuditSummary }

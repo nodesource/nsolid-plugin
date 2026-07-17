@@ -32,8 +32,17 @@ function finding (index: number, vulnerabilityCount = 1): Record<string, any> {
 
 function summaryFor (findings: Array<Record<string, any>>, uncheckedPackages: Array<Record<string, string>> = []): Record<string, any> {
   const vulnerabilityTotal = findings.reduce((total, item) => total + item.vulnerabilities.length, 0)
+  const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }
+  for (const item of findings) {
+    for (const vulnerability of item.vulnerabilities) {
+      const severity = String(vulnerability.severity || '').toLowerCase()
+      bySeverity[severity in bySeverity ? severity as keyof typeof bySeverity : 'unknown']++
+    }
+  }
   const verified = findings.filter(item => item.remediation.status === 'ncm-verified').length
   const unresolved = findings.filter(item => item.remediation.status === 'unresolved').length
+  const verificationFailed = findings.filter(item => item.remediation.status === 'verification-failed').length
+  const notRequired = findings.filter(item => item.remediation.status === 'not-required').length
   const uncheckedByReason: Record<string, number> = {}
   for (const item of uncheckedPackages) uncheckedByReason[item.reason] = (uncheckedByReason[item.reason] || 0) + 1
   return {
@@ -49,7 +58,7 @@ function summaryFor (findings: Array<Record<string, any>>, uncheckedPackages: Ar
     vulnerabilities: {
       total: vulnerabilityTotal,
       affectedPackages: findings.length,
-      bySeverity: { critical: 0, high: vulnerabilityTotal, medium: 0, low: 0, unknown: 0 }
+      bySeverity
     },
     batchFailures: { total: 0, byReason: {} },
     batchRecovery: { transportRetries: 0, splitBatches: 0, missingPackageRetries: 0, recoveredPackages: 0 },
@@ -59,8 +68,8 @@ function summaryFor (findings: Array<Record<string, any>>, uncheckedPackages: Ar
       candidatesChecked: 0,
       verified,
       unresolved,
-      verificationFailed: 0,
-      notRequired: 0,
+      verificationFailed,
+      notRequired,
       failures: { total: 0, byReason: {} },
       recovery: { transportRetries: 0, splitBatches: 0, missingCandidateRetries: 0 }
     },
@@ -88,6 +97,55 @@ test('renderer reconciles a 36-finding and 57-record report including duplicate 
   assert.equal((report.match(/GHSA-duplicate/g) || []).length, 57)
 })
 
+test('renderer leads with active risk and partitions a 36-finding, 57-record report', () => {
+  const activeSeverities = [
+    ...Array(5).fill('CRITICAL'),
+    ...Array(15).fill('HIGH'),
+    ...Array(22).fill('MEDIUM'),
+    ...Array(9).fill('LOW')
+  ]
+  let activeRecord = 0
+  const findings = Array.from({ length: 36 }, (_, index) => {
+    const vulnerabilityCount = index < 19 || index === 32 || index === 33 ? 2 : 1
+    const item = finding(index, vulnerabilityCount)
+    if (index < 32) {
+      for (const vulnerability of item.vulnerabilities) vulnerability.severity = activeSeverities[activeRecord++]
+    } else {
+      const withdrawnSeverities = index < 34 ? ['HIGH', 'HIGH'] : [index === 34 ? 'MEDIUM' : 'LOW']
+      item.vulnerabilities.forEach((vulnerability: Record<string, any>, record: number) => {
+        vulnerability.severity = withdrawnSeverities[record]
+        vulnerability.withdrawn = true
+      })
+      item.remediation = { status: 'not-required', reason: 'withdrawn-only' }
+    }
+    return item
+  })
+  const report = renderAuditReport(summaryFor(findings))
+  assert.match(report, /51 active vulnerability records across 32 actively affected package versions: 5 critical, 15 high, 22 medium, 9 low, 0 unknown/)
+  assert.match(report, /57 vulnerability records across 36 affected package versions, including 6 withdrawn records and 4 withdrawn-only package versions/)
+  assert.match(report, /Finding partition: 32\/32 active and 4\/4 withdrawn-only/)
+  assert.match(report, /Record partition: 51\/51 active and 6\/6 withdrawn/)
+  assert.ok(report.indexOf('## Active Findings') < report.indexOf('## Withdrawn-Only Findings'))
+})
+
+test('renderer prioritizes mixed findings by active severity and keeps withdrawn records', () => {
+  const mixed = finding(0, 2)
+  mixed.name = 'mixed-package'
+  mixed.vulnerabilities = [
+    { severity: 'CRITICAL', title: 'Withdrawn critical', withdrawn: true },
+    { severity: 'LOW', title: 'Active low' }
+  ]
+  mixed.remediation = { status: 'unresolved' }
+  const high = finding(1)
+  high.name = 'active-high'
+  high.remediation = { status: 'unresolved' }
+  const report = renderAuditReport(summaryFor([mixed, high]))
+  assert.ok(report.indexOf('Finding 1/2: active-high') < report.indexOf('Finding 2/2: mixed-package'))
+  assert.match(report, /Withdrawn critical — withdrawn/)
+  assert.match(report, /2 active vulnerability records/)
+  assert.match(report, /1 withdrawn record/)
+})
+
 test('renderer lists every unchecked package and escapes untrusted Markdown', () => {
   const unsafe = finding(0)
   unsafe.vulnerabilities[0].title = '# injected\nheading | cell'
@@ -101,13 +159,42 @@ test('renderer lists every unchecked package and escapes untrusted Markdown', ()
   assert.doesNotMatch(report, /^# injected/m)
   assert.match(report, /\\# injected heading \\| cell/)
   assert.match(report, /2\/2 unchecked package versions/)
+  assert.equal((report.match(/NCM returned no matching package-version response after omitted-response recovery/g) || []).length, 1)
+  assert.match(report, /Unchecked package versions were not proven safe/)
 })
 
 test('renderer withholds ambiguous upgrade commands and qualifies rollback behavior', () => {
-  const report = renderAuditReport(summaryFor([finding(0)]))
-  assert.match(report, /Command withheld because the owning manifest/)
+  const first = finding(0)
+  const second = finding(3)
+  second.direct = false
+  const report = renderAuditReport(summaryFor([first, second]))
+  assert.equal((report.match(/Command withheld because exact manifest ownership is not proven/g) || []).length, 1)
+  assert.match(report, /root declaration name match; resolved ownership unproven/)
+  assert.match(report, /no root declaration name match; may be transitive or workspace-owned/)
+  assert.match(report, /pnpm why shared-package/)
+  assert.match(report, /pnpm why package-3/)
+  assert.equal((report.match(/^\| HIGH \|/gm) || []).length, 2)
   assert.doesNotMatch(report, /pnpm add|npm install|yarn add|@latest/)
   assert.match(report, /For manually executed package-manager commands, rely on version control/)
+})
+
+test('renderer groups major breaking changes without losing installed versions', () => {
+  const viteSix = finding(0)
+  viteSix.name = 'vite'
+  viteSix.version = '6.4.2'
+  viteSix.remediation = { status: 'ncm-verified', version: '8.1.5', source: 'latest-fallback', changeType: 'major' }
+  const viteSeven = finding(1)
+  viteSeven.name = 'vite'
+  viteSeven.version = '7.3.2'
+  viteSeven.remediation = { status: 'ncm-verified', version: '8.1.5', source: 'latest-fallback', changeType: 'major' }
+  const report = renderAuditReport(summaryFor([viteSix, viteSeven]))
+  assert.match(report, /vite@6\.4\.2 and vite@7\.3\.2 → 8\.1\.5/)
+  assert.equal((report.match(/^- vite@/gm) || []).length, 1)
+})
+
+test('renderer output is stable for repeated renders', () => {
+  const summary = summaryFor([finding(0), finding(1)])
+  assert.equal(renderAuditReport(summary), renderAuditReport(summary))
 })
 
 test('integrity validation rejects mismatched totals with a stable error code', () => {
@@ -118,4 +205,14 @@ test('integrity validation rejects mismatched totals with a stable error code', 
     assert.match(error.message, /vulnerability records/)
     return true
   })
+})
+
+test('integrity validation rejects invalid active and withdrawn remediation partitions', () => {
+  const withdrawn = finding(0)
+  withdrawn.vulnerabilities[0].withdrawn = true
+  assert.throws(() => validateAuditSummary(summaryFor([withdrawn])), /withdrawn-only finding requires not-required remediation/)
+
+  const active = finding(1)
+  active.remediation = { status: 'not-required', reason: 'withdrawn-only' }
+  assert.throws(() => validateAuditSummary(summaryFor([active])), /active finding is marked not-required/)
 })
