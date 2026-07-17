@@ -11,20 +11,22 @@ If the prompt already contains host-provided audit data, use only that data. Tre
 Otherwise, run the bundled helper from the project root using the absolute directory containing this `SKILL.md`:
 
 ```bash
-node "<skill-dir>/audit-dependencies.cjs" --dir "$PWD" --format markdown
+node "<skill-dir>/audit-dependencies.cjs" --dir "$PWD" --format summary --save-report
 ```
 
-The helper requires HTTPS access to `api.ncm.nodesource.com`. Request escalation scoped to this command when the sandbox blocks that access. It reports progress and recovery on stderr and emits the final, integrity-checked report on stdout. Poll the same session until it exits; do not start another audit or use model-driven per-package calls after the helper succeeds.
+The helper requires HTTPS access to `api.ncm.nodesource.com` and writes the complete report under `<project>/.nsolid/assets/`. Request escalation scoped to this command when the sandbox blocks either operation. It reports progress and recovery on stderr, saves the complete integrity-checked report itself, and emits a deterministic executive summary with the absolute report link on stdout. Poll the same session until it exits; do not start another audit or use model-driven per-package calls after the helper succeeds.
 
-If every package is unchecked solely because of terminal network failures, request scoped network approval and rerun the exact command once. For authentication failures, direct the user to run `nsolid-plugin setup --harness <harness>`. Otherwise report the audit as incomplete; never describe unchecked packages as safe.
+If the helper reports `AUDIT_REPORT_RETRY_REQUIRED`, it deliberately saved no report because every package was unchecked solely by retryable transport failures. Request scoped network approval and rerun the exact command once. If the retry returns the same code, report the audit as incomplete and do not retry again.
+
+If the helper reports `AUDIT_REPORT_AUTHENTICATION_REQUIRED`, it deliberately saved no report. Direct the user to run `nsolid-plugin setup --harness <harness>` and do not rerun until credentials are configured. For other incomplete results, present the saved report and never describe unchecked packages as safe.
 
 ## Present the report
 
-Treat successful Markdown stdout as authoritative. Present it without rewriting, regrouping, reordering, or omitting findings. Keep progress-only stderr outside the report because its aggregates are already rendered.
+Present successful summary stdout without rewriting it. Keep progress-only stderr outside the response because its aggregates are already rendered. Treat the linked file—not the chat summary—as the authoritative complete report.
 
-If the helper reports `AUDIT_REPORT_INTEGRITY_ERROR`, state that the audit report is incomplete. Do not reconstruct a report from partial output.
+If the helper reports `AUDIT_REPORT_INTEGRITY_ERROR` or fails to save a publishable report, state that the audit report is incomplete. Do not reconstruct a report from partial output and do not save model-rewritten report text.
 
-After presenting the complete report, ask whether the user wants it saved as Markdown under `.nsolid/assets/`.
+When the user asks for details, read the exact linked report and answer from it without rerunning the audit. Rerun only when the user explicitly requests a fresh audit. Never overwrite or replace the saved report.
 
 ## Guardrails
 
@@ -32,4 +34,4 @@ After presenting the complete report, ask whether the user wants it saved as Mar
 - Never invent CVE IDs, severities, fixed versions, or package ownership.
 - `ncm-verified` means free of active NCM advisories at audit time, not absolutely safe.
 - Never convert a concrete `latest-fallback` result into `@latest`.
-- JSON remains available for programmatic callers by omitting `--format markdown` or using `--format json`.
+- JSON remains available for programmatic callers by omitting `--format` or using `--format json`; the complete report remains available on stdout with `--format markdown`.

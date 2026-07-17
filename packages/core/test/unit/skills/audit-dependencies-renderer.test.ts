@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
+import path from 'node:path'
 import test from 'node:test'
 
 const require = createRequire(import.meta.url)
-const { renderAuditReport, validateAuditSummary } = require('../../../../../skills/ns-audit-dependencies/render-audit-report.cjs') as {
+const { renderAuditReport, renderAuditSummary, reportLink, validateAuditSummary } = require('../../../../../skills/ns-audit-dependencies/render-audit-report.cjs') as {
   renderAuditReport: (summary: Record<string, any>) => string
+  renderAuditSummary: (summary: Record<string, any>, reportPath: string) => string
+  reportLink: (reportPath: string, pathApi?: typeof path) => string
   validateAuditSummary: (summary: Record<string, any>) => Record<string, number>
 }
 
@@ -95,6 +98,55 @@ test('renderer reconciles a 36-finding and 57-record report including duplicate 
   assert.match(report, /Record 57\/57/)
   assert.match(report, /Rendered 36\/36 package-version findings, 57\/57 vulnerability records/)
   assert.equal((report.match(/GHSA-duplicate/g) || []).length, 57)
+})
+
+test('executive summary links the complete 36-finding and 57-record report without claiming chat rendered it', () => {
+  const findings = Array.from({ length: 36 }, (_, index) => finding(index, index < 21 ? 2 : 1))
+  findings[1].vulnerabilities.forEach((vulnerability: Record<string, any>) => { vulnerability.severity = 'CRITICAL' })
+  const summary = summaryFor(findings)
+  const reportPath = path.resolve('project with spaces', '.nsolid', 'assets', 'dependency-audit.md')
+  const executiveSummary = renderAuditSummary(summary, reportPath)
+  const linkedPath = reportPath.split(path.sep).join('/').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+  assert.match(executiveSummary, /^## Executive Summary/m)
+  assert.match(executiveSummary, new RegExp(`\\[Open the complete dependency audit report\\]\\(<${linkedPath}>\\)`))
+  assert.match(executiveSummary, /The underlying complete report reconciles 36\/36 package-version findings, 57\/57 vulnerability records/)
+  assert.match(executiveSummary, /package-1@1\.0\.1/)
+  assert.doesNotMatch(executiveSummary, /^ {2}- Record /m)
+  assert.doesNotMatch(executiveSummary, /Vulnerable ranges:/)
+  assert.doesNotMatch(executiveSummary, /Rendered 36\/36/)
+})
+
+test('executive summary groups verified targets and lists every unresolved and withdrawn-only package version', () => {
+  const first = finding(0)
+  first.vulnerabilities[0].severity = 'CRITICAL'
+  const second = finding(2)
+  second.vulnerabilities[0].severity = 'CRITICAL'
+  second.remediation = { ...first.remediation }
+  const unresolved = finding(1)
+  const withdrawn = finding(4)
+  withdrawn.vulnerabilities[0].withdrawn = true
+  withdrawn.remediation = { status: 'not-required', reason: 'withdrawn-only' }
+  const summary = summaryFor([first, second, unresolved, withdrawn], [
+    { name: 'internal-one', version: '1.0.0', reason: 'missing-response' },
+    { name: 'internal-two', version: '2.0.0', reason: 'missing-response' }
+  ])
+  const reportPath = path.resolve('dependency-audit.md')
+  const executiveSummary = renderAuditSummary(summary, reportPath)
+
+  assert.match(executiveSummary, /2 verified package-version findings are represented by 1 grouped upgrade action/)
+  assert.match(executiveSummary, /shared-package@1\.0\.0, shared-package@1\.0\.2/)
+  assert.match(executiveSummary, /Unresolved \(1\): package-1@1\.0\.1/)
+  assert.match(executiveSummary, /shared-package@1\.0\.4/)
+  assert.match(executiveSummary, /2 unchecked package versions were not proven safe: 2 missing-response/)
+  assert.equal(renderAuditSummary(summary, reportPath), executiveSummary)
+})
+
+test('report links normalize Windows paths and encode Markdown-significant filename characters', () => {
+  assert.equal(
+    reportLink('C:\\Users\\Example User\\project\\.nsolid\\assets\\audit#1?.md', path.win32),
+    '[Open the complete dependency audit report](<C:/Users/Example User/project/.nsolid/assets/audit%231%3F.md>)'
+  )
 })
 
 test('renderer leads with active risk and partitions a 36-finding, 57-record report', () => {

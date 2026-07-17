@@ -15,7 +15,7 @@ const { classifyBatchFailure, fetchBatch, formatCliError, parseArgs, runAudit } 
     options?: Record<string, unknown>
   ) => Promise<Array<Record<string, unknown>>>
   formatCliError: (error: Error & { code?: string }) => string
-  parseArgs: () => { dir: string, format: string }
+  parseArgs: () => { dir: string, format: string, saveReport: boolean }
   runAudit: (dir: string, options: Record<string, unknown>) => Promise<Record<string, unknown>>
 }
 
@@ -27,6 +27,14 @@ test('audit helper preserves integrity error codes in CLI output', () => {
     formatCliError(error),
     'Error: AUDIT_REPORT_INTEGRITY_ERROR: summary totals differ\n'
   )
+  assert.equal(
+    formatCliError(Object.assign(new Error('retry with network access'), { code: 'AUDIT_REPORT_RETRY_REQUIRED' })),
+    'Error: AUDIT_REPORT_RETRY_REQUIRED: retry with network access\n'
+  )
+  assert.equal(
+    formatCliError(Object.assign(new Error('configure credentials'), { code: 'AUDIT_REPORT_AUTHENTICATION_REQUIRED' })),
+    'Error: AUDIT_REPORT_AUTHENTICATION_REQUIRED: configure credentials\n'
+  )
   assert.equal(formatCliError(new Error('ordinary failure')), 'Error: ordinary failure\n')
 })
 
@@ -37,6 +45,12 @@ test('audit helper parses output formats and rejects unsupported values', () => 
     assert.equal(parseArgs().format, 'json')
     process.argv = ['node', 'audit-dependencies.cjs', '--format', 'markdown']
     assert.equal(parseArgs().format, 'markdown')
+    process.argv = ['node', 'audit-dependencies.cjs', '--format', 'summary', '--save-report']
+    assert.deepEqual(parseArgs(), { dir: process.cwd(), format: 'summary', saveReport: true })
+    process.argv = ['node', 'audit-dependencies.cjs', '--format', 'summary']
+    assert.throws(() => parseArgs(), /Summary format requires --save-report/)
+    process.argv = ['node', 'audit-dependencies.cjs', '--format', 'markdown', '--save-report']
+    assert.throws(() => parseArgs(), /--save-report is only supported with --format summary/)
     process.argv = ['node', 'audit-dependencies.cjs', '--format', 'html']
     assert.throws(() => parseArgs(), /Unsupported format: html/)
   } finally {

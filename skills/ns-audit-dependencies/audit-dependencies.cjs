@@ -4,6 +4,7 @@
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const { createSavedAuditOutput } = require('./audit-report-output.cjs')
 const { collectDependencies } = require('./collect-dependencies.cjs')
 const { renderAuditReport } = require('./render-audit-report.cjs')
 
@@ -50,16 +51,24 @@ function parseArgs () {
   const args = process.argv.slice(2)
   let dir = process.cwd()
   let format = 'json'
+  let saveReport = false
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--dir' && args[i + 1]) dir = path.resolve(args[++i])
     else if (args[i] === '--format' && args[i + 1]) format = args[++i]
+    else if (args[i] === '--save-report') saveReport = true
   }
 
-  if (!['json', 'markdown'].includes(format)) {
-    throw new Error(`Unsupported format: ${format}. Expected json or markdown.`)
+  if (!['json', 'markdown', 'summary'].includes(format)) {
+    throw new Error(`Unsupported format: ${format}. Expected json, markdown, or summary.`)
   }
-  return { dir, format }
+  if (format === 'summary' && !saveReport) {
+    throw new Error('Summary format requires --save-report so its complete evidence is persisted.')
+  }
+  if (saveReport && format !== 'summary') {
+    throw new Error('--save-report is only supported with --format summary.')
+  }
+  return { dir, format, saveReport }
 }
 
 function formatCliError (error) {
@@ -918,7 +927,16 @@ if (require.main === module) {
   }
   if (args) {
     runAudit(args.dir, { onProgress: message => process.stderr.write(message) })
-      .then(summary => process.stdout.write(args.format === 'markdown' ? `${renderAuditReport(summary)}\n` : `${JSON.stringify(summary)}\n`))
+      .then(async summary => {
+        if (args.format === 'summary') {
+          const output = await createSavedAuditOutput(summary, args.dir)
+          process.stdout.write(output.executiveSummary)
+        } else if (args.format === 'markdown') {
+          process.stdout.write(`${renderAuditReport(summary)}\n`)
+        } else {
+          process.stdout.write(`${JSON.stringify(summary)}\n`)
+        }
+      })
       .catch(error => {
         process.stderr.write(formatCliError(error))
         process.exitCode = 1
