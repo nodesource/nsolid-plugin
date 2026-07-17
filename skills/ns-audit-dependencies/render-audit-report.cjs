@@ -49,6 +49,10 @@ function stableCounts (values) {
   return Object.fromEntries(Object.entries(values).sort(([a], [b]) => a.localeCompare(b)))
 }
 
+function sumCounts (values) {
+  return Object.values(values || {}).reduce((total, count) => total + count, 0)
+}
+
 function assertEqual (actual, expected, label) {
   if (actual !== expected) throw integrityError(`${label}: expected ${expected}, received ${actual}`)
 }
@@ -145,6 +149,8 @@ function validateAuditSummary (summary) {
     verificationFailed: summary.remediation.verificationFailed,
     notRequired: summary.remediation.notRequired
   }, 'remediation')
+  assertEqual(sumCounts(summary.batchFailures.byReason), summary.batchFailures.total, 'batch failures')
+  assertEqual(sumCounts(summary.remediation.failures.byReason), summary.remediation.failures.total, 'remediation failures')
 
   const uncheckedCounts = {}
   for (const pkg of summary.uncheckedPackages) {

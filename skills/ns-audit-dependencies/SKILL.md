@@ -22,7 +22,19 @@ If the helper reports `AUDIT_REPORT_AUTHENTICATION_REQUIRED`, it deliberately sa
 
 ## Present the report
 
-Present successful summary stdout without rewriting it. Keep progress-only stderr outside the response because its aggregates are already rendered. Treat the linked file—not the chat summary—as the authoritative complete report.
+Treat successful summary stdout as the complete final chat response. Return it verbatim, preserving its wording, heading order, line breaks, lists, tables, counts, and report link; only the final trailing newline may be omitted. Do not add a preface, conclusion, interpretation, save question, or follow-up offer. Keep progress-only stderr outside the response because its aggregates are already rendered. Treat the linked file—not the chat summary—as the authoritative complete report.
+
+The deterministic summary always uses this section order:
+
+1. `## Executive Summary`
+2. `## Critical Findings`
+3. `## Verified Upgrade Actions`
+4. `## Findings Requiring Follow-up`
+5. `## Withdrawn-Only Findings`
+6. `## Coverage Gaps`
+7. `## Complete Report`
+
+Do not recreate this structure from the saved report or use a model-authored summary template. If successful stdout does not follow this contract, report an output-integrity failure instead of repairing it.
 
 If the helper reports `AUDIT_REPORT_INTEGRITY_ERROR` or fails to save a publishable report, state that the audit report is incomplete. Do not reconstruct a report from partial output and do not save model-rewritten report text.
 

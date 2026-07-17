@@ -142,6 +142,19 @@ test('executive summary groups verified targets and lists every unresolved and w
   assert.equal(renderAuditSummary(summary, reportPath), executiveSummary)
 })
 
+test('executive summary always emits the fixed section contract in order', () => {
+  const executiveSummary = renderAuditSummary(summaryFor([]), path.resolve('dependency-audit.md'))
+  assert.deepEqual(executiveSummary.match(/^## .+$/gm), [
+    '## Executive Summary',
+    '## Critical Findings',
+    '## Verified Upgrade Actions',
+    '## Findings Requiring Follow-up',
+    '## Withdrawn-Only Findings',
+    '## Coverage Gaps',
+    '## Complete Report'
+  ])
+})
+
 test('report links normalize Windows paths and encode Markdown-significant filename characters', () => {
   assert.equal(
     reportLink('C:\\Users\\Example User\\project\\.nsolid\\assets\\audit#1?.md', path.win32),
@@ -257,6 +270,22 @@ test('integrity validation rejects mismatched totals with a stable error code', 
     assert.match(error.message, /vulnerability records/)
     return true
   })
+})
+
+test('integrity validation rejects contradictory failure totals and reason counts', () => {
+  const batchMismatch = summaryFor([])
+  batchMismatch.batchFailures = { total: 1, byReason: {} }
+  assert.throws(
+    () => validateAuditSummary(batchMismatch),
+    /batch failures: expected 1, received 0/
+  )
+
+  const remediationMismatch = summaryFor([])
+  remediationMismatch.remediation.failures = { total: 2, byReason: { server: 1 } }
+  assert.throws(
+    () => validateAuditSummary(remediationMismatch),
+    /remediation failures: expected 2, received 1/
+  )
 })
 
 test('integrity validation rejects invalid active and withdrawn remediation partitions', () => {
