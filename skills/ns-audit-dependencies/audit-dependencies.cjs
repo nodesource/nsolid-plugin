@@ -292,8 +292,9 @@ function remediationCandidates (finding) {
 
   for (const vulnerability of finding.vulnerabilities.filter(item => !item.withdrawn)) {
     for (const range of vulnerability.patched || []) {
-      const match = range.match(/(?:^|[\s|,(])>=?\s*v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)
-      if (match) add(match[1], 'patched-range-boundary')
+      const pattern = /(?:^|[\s|,(])>=?\s*v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g
+      let match
+      while ((match = pattern.exec(range)) !== null) add(match[1], 'patched-range-boundary')
     }
     for (const range of vulnerability.vulnerable || []) {
       const pattern = /(?:^|[\s|,(])<(?![=])\s*v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g
@@ -452,10 +453,13 @@ async function runAudit (dir, options = {}) {
   function recordUnchecked (pkg, reason) {
     const requestedPackage = originalRequest(pkg)
     const key = packageKey(requestedPackage)
+    const concreteResponseVersion = pkg && pkg.version && pkg.version !== 'latest' ? pkg.version : null
     if (!uncheckedByKey.has(key)) {
       uncheckedByKey.set(key, {
         name: requestedPackage.name,
-        version: pkg && pkg.version && requestedPackage.version === 'latest' ? pkg.version : requestedPackage.version,
+        version: requestedPackage.version === 'latest'
+          ? concreteResponseVersion || requestedPackage.installedVersion || requestedPackage.version
+          : requestedPackage.version,
         reason
       })
     }

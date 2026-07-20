@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -240,6 +240,39 @@ test('audit helper matches concrete NCM versions returned for latest dependency 
   }
 })
 
+test('audit helper reports the installed version when a latest dependency request fails', async () => {
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'nsolid-audit-'))
+  const requestedVersions: string[] = []
+
+  try {
+    await writeFile(path.join(projectDir, 'package.json'), JSON.stringify({
+      dependencies: { 'tag-dep': 'latest' }
+    }))
+    await mkdir(path.join(projectDir, 'node_modules', 'tag-dep'), { recursive: true })
+    await writeFile(path.join(projectDir, 'node_modules', 'tag-dep', 'package.json'), JSON.stringify({
+      name: 'tag-dep',
+      version: '4.5.6'
+    }))
+
+    const summary = await runAudit(projectDir, {
+      token: 'test-token',
+      fetchBatch: async (_apiUrl: string, _token: string, packages: Array<{ name: string, version: string }>) => {
+        requestedVersions.push(...packages.map(pkg => pkg.version))
+        throw Object.assign(new Error('authentication failed'), { status: 401 })
+      }
+    }) as {
+      uncheckedPackages: Array<{ name: string, version: string, reason: string }>
+    }
+
+    assert.deepEqual(requestedVersions, ['latest'])
+    assert.deepEqual(summary.uncheckedPackages, [
+      { name: 'tag-dep', version: '4.5.6', reason: 'authentication' }
+    ])
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
 test('audit helper verifies a concrete latest fallback when no boundary candidate exists', async () => {
   const projectDir = await createNpmProject(1)
   const requestedVersions: string[] = []
@@ -279,6 +312,61 @@ test('audit helper verifies a concrete latest fallback when no boundary candidat
       status: 'ncm-verified',
       version: '2.0.0',
       source: 'latest-fallback',
+      changeType: 'major'
+    })
+  } finally {
+    await rm(projectDir, { recursive: true, force: true })
+  }
+})
+
+test('audit helper checks every boundary in a compound patched range', async () => {
+  const projectDir = await createNpmProject(1)
+  const remediationRequests: string[][] = []
+
+  try {
+    const summary = await runAudit(projectDir, {
+      token: 'test-token',
+      fetchBatch: async (
+        _apiUrl: string,
+        _token: string,
+        packages: Array<{ name: string, version: string }>,
+        options: { phase?: string }
+      ) => {
+        if (options.phase === 'remediation') {
+          remediationRequests.push(packages.map(pkg => pkg.version))
+          return packages.map(pkg => ({
+            ...pkg,
+            version: pkg.version === 'latest' ? '4.0.0' : pkg.version,
+            published: true,
+            scores: pkg.version === '2.0.0'
+              ? [{ group: 'security', pass: false, severity: 'HIGH', title: 'Still vulnerable' }]
+              : []
+          }))
+        }
+        return packages.map(pkg => ({
+          ...pkg,
+          published: true,
+          scores: [{
+            group: 'security',
+            pass: false,
+            severity: 'HIGH',
+            title: 'Known vulnerability',
+            data: { patched: ['>= 2.0.0 < 3.0.0 || >= 3.1.0'] }
+          }]
+        }))
+      }
+    }) as {
+      remediation: { candidateRequests: number, verified: number }
+      findings: Array<{ remediation: Record<string, string> }>
+    }
+
+    assert.deepEqual(remediationRequests, [['2.0.0', '3.1.0']])
+    assert.equal(summary.remediation.candidateRequests, 2)
+    assert.equal(summary.remediation.verified, 1)
+    assert.deepEqual(summary.findings[0].remediation, {
+      status: 'ncm-verified',
+      version: '3.1.0',
+      source: 'patched-range-boundary',
       changeType: 'major'
     })
   } finally {

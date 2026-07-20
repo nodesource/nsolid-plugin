@@ -16,7 +16,7 @@
  *     "packageManager": "npm|yarn|pnpm",
  *     "direct": <count>,
  *     "transitive": <count>,
- *     "batches": [[{name, version, isDirect}, ...], ...]
+ *     "batches": [[{name, version, isDirect, installedVersion?}, ...], ...]
  *   }
  *
  * Errors go to stderr; exit code 1 on unrecoverable failures.
@@ -52,6 +52,21 @@ function getDirectDeps (pkgJsonPath) {
     return deps
   } catch {
     return new Set()
+  }
+}
+
+function getInstalledVersion (dir, name) {
+  if (typeof name !== 'string' || !/^(?:@[^/\\]+\/)?[^@/\\][^/\\]*$/.test(name)) return null
+  const segments = name.split('/')
+  if (segments.some(segment => segment === '.' || segment === '..')) return null
+
+  try {
+    const json = JSON.parse(fs.readFileSync(path.join(dir, 'node_modules', ...segments, 'package.json'), 'utf8'))
+    return typeof json.version === 'string' && json.version.trim() && json.version !== 'latest'
+      ? json.version
+      : null
+  } catch {
+    return null
   }
 }
 
@@ -275,7 +290,13 @@ function collectDependencies (dir) {
         if (block && typeof block === 'object') {
           for (const [name, range] of Object.entries(block)) {
             const version = String(range).replace(/^[^0-9]*/, '') || 'latest'
-            deps.push({ name, version, isDirect: true })
+            const installedVersion = version === 'latest' ? getInstalledVersion(dir, name) : null
+            deps.push({
+              name,
+              version,
+              isDirect: true,
+              ...(installedVersion ? { installedVersion } : {})
+            })
           }
         }
       }
