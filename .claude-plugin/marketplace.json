@@ -9,7 +9,7 @@
       "name": "nsolid-plugin",
       "source": "./",
       "displayName": "N|Solid Plugin",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "N|Solid performance & security skills + MCP servers",
       "author": {
         "name": "NodeSource"
