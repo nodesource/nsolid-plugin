@@ -37,11 +37,21 @@ The updater SHALL compare installed and latest versions without invoking any mut
 **And** `--json` returns the current version, latest version, status, and target identifier
 **And** exits successfully, including when the status is `update-available`
 
+#### Scenario: Do not downgrade a CLI newer than the registry
+
+**Given** the running CLI semantic version is greater than the registry `latest`
+**When** the user runs `nsolid-plugin update`
+**Then** the command reports `newer-than-registry`
+**And** displays the current and registry versions
+**And** does not invoke a package manager or modify the installation
+**And** exits successfully
+**And** does not provide an implicit downgrade path
+
 #### Scenario: Check every detected target
 
 **Given** multiple N|Solid installations are detectable
 **When** the user runs `nsolid-plugin update --all --check`
-**Then** every target is inspected without invoking install, update, uninstall, package-manager, tracking, or configuration mutations
+**Then** every detected installation is inspected without invoking install, update, uninstall, package-manager, tracking, or configuration mutations
 **And** targets whose installed version cannot be determined report `unknown`
 **And** the command distinguishes `unknown` from `current`
 
@@ -103,6 +113,8 @@ The default `nsolid-plugin update` scope SHALL update only a positively identifi
 **Then** the command does not guess a package manager or modify the installation
 **And** reports the latest version when it can be resolved
 **And** prints safe manual commands for npm, pnpm, and `npx -y nsolid-plugin@latest`
+**And** the result status is `unsupported`
+**And** a mutating update exits non-zero while a read-only check exits successfully
 
 ### Requirement: Harness-owned update strategies
 
@@ -118,34 +130,52 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **And** no OAuth browser or callback server starts
 **And** the result includes versions when discoverable, status, and restart guidance
 
+#### Scenario: Preserve each detected native source identity
+
+**Given** Claude or Codex records `nsolid-plugin@<marketplace>` under a marketplace other than `nodesource`
+**When** the corresponding native update strategy runs
+**Then** Claude uses the detected complete plugin ID
+**And** Codex upgrades the detected marketplace
+**And** the strategy never substitutes `nodesource`
+**And** an unqualified, malformed, or ambiguous ID returns `unsupported` without mutation
+
 #### Scenario: Update Claude native plugin
 
-**Given** `nsolid-plugin@nodesource` is installed natively in Claude
+**Given** `nsolid-plugin@<marketplace>` is installed natively in Claude
 **And** the `claude` executable is available
 **When** the Claude update strategy runs
-**Then** it invokes `claude plugin update nsolid-plugin@nodesource` with a fixed executable and argument array
+**Then** it invokes `claude plugin update nsolid-plugin@<marketplace>` with a fixed executable and argument array
 **And** reports `/reload-plugins` or restart guidance
 **And** does not run the fallback installer
 
 #### Scenario: Update Codex native plugin
 
-**Given** `nsolid-plugin@nodesource` is installed natively in Codex
+**Given** `nsolid-plugin@<marketplace>` is installed natively in Codex
 **And** the `codex` executable is available
 **When** the Codex update strategy runs
-**Then** it invokes `codex plugin marketplace upgrade nodesource`
+**Then** it invokes `codex plugin marketplace upgrade <marketplace>`
 **And** verifies the marketplace refresh succeeded
 **And** reports that a new Codex session is required
 **And** does not remove the installed plugin or configuration
 
 #### Scenario: Update Pi package-owned skills
 
-**Given** `npm:nsolid-pi-plugin` is installed in Pi
+**Given** the canonical `npm:nsolid-pi-plugin` source is installed in Pi
 **And** the `pi` executable is available
 **When** the Pi update strategy runs
 **Then** it invokes `pi update npm:nsolid-pi-plugin`
 **And** does not copy Pi skills into user-level skill directories
 **And** reports `/reload` or restart guidance
 **And** leaves Pi MCP configuration and NodeSource credentials intact
+
+#### Scenario: Reject a non-canonical Pi source
+
+**Given** Pi detects a local, Git, version-pinned, or ambiguous source for `nsolid-pi-plugin`
+**When** the user runs a Pi update
+**Then** the result status is `unsupported`
+**And** no package source is substituted
+**And** no Pi package or configuration is mutated
+**And** the output provides manual guidance
 
 #### Scenario: Update OpenCode or another fallback installation
 
@@ -156,6 +186,15 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **And** reuses existing idempotent skill and MCP merge behavior
 **And** preserves non-NodeSource artifacts and valid credentials
 **And** creates the normal configuration backup before config mutation
+
+#### Scenario: Update coexisting native and fallback installations
+
+**Given** the same harness has both a detected native plugin and tracked fallback artifacts
+**When** the user runs `nsolid-plugin update --harness <harness>` or `nsolid-plugin update --all`
+**Then** the plan contains one installation item for each ownership
+**And** each item has a distinct installation identifier and source evidence
+**And** native and fallback updates execute independently
+**And** a native failure does not switch ownership or hide the fallback result
 
 #### Scenario: Requested harness is not installed
 
@@ -186,7 +225,8 @@ The Antigravity strategy SHALL back up and validate the staged NodeSource plugin
 **Then** it creates a temporary backup of the existing staged NodeSource plugin
 **And** confirms replacement unless `--yes` was supplied
 **And** invokes the supported uninstall/install sequence for `https://github.com/NodeSource/nsolid-plugin.git`
-**And** removes the backup only after the new staged plugin validates
+**And** validates `plugin.json`, `bundle.json`, canonical skill presence, and the N|Solid entry in `~/.gemini/config/import_manifest.json`
+**And** removes the backup only after the new staged plugin and registration validate
 **And** preserves `~/.agents/.nodesource-auth.json`
 
 #### Scenario: Antigravity reinstall fails
@@ -194,6 +234,7 @@ The Antigravity strategy SHALL back up and validate the staged NodeSource plugin
 **Given** the previous Antigravity plugin was backed up
 **When** uninstall succeeds but reinstall or validation fails
 **Then** the updater restores the previous staged plugin atomically where supported
+**And** restores the previous N|Solid import-manifest entry while preserving unrelated imports
 **And** reports whether rollback succeeded
 **And** exits non-zero
 **And** provides a manual reinstall command
@@ -206,11 +247,11 @@ The updater SHALL plan targets before mutation, execute them sequentially in det
 
 **Given** one or more N|Solid CLI or harness installations are detected
 **When** the user runs `nsolid-plugin update --all`
-**Then** the updater displays one ordered plan
+**Then** the updater displays one ordered plan containing every detected installation
 **And** updates the CLI target first when supported
-**And** updates detected harness targets sequentially in deterministic harness order
-**And** records a result for every planned target
-**And** prints counts for updated, current, skipped, not-installed, and failed
+**And** updates detected installation targets sequentially in deterministic harness and ownership order
+**And** records a result for every planned installation
+**And** prints counts for every `UpdateStatus`, including `newer-than-registry`, `unsupported`, and `unknown`
 
 #### Scenario: One target fails during update-all
 
@@ -238,7 +279,7 @@ Update results SHALL support human-readable and machine-readable output without 
 **When** an update or check completes
 **Then** standard output contains exactly one valid JSON document
 **And** progress and diagnostics are written to standard error
-**And** each result contains `target`, `ownership`, `status`, optional versions, `changed`, optional restart guidance, and sanitized errors
+**And** each result contains `installationId`, `target`, `ownership`, `status`, optional `currentVersion` and `latestVersion`, `changed`, optional restart guidance and rollback status, and sanitized errors
 
 ### Requirement: Preserve existing installation behavior
 
@@ -252,4 +293,5 @@ Update operations SHALL retain all existing setup, installation, authentication,
 **And** non-NodeSource skills and MCP entries remain unchanged
 **And** update never invokes setup, login, or OAuth
 **And** native strategy failure never silently switches to fallback ownership
+**And** source identity is preserved for every supported native/package-owned update
 **And** all external commands run without a shell and with fixed argument arrays

@@ -49,9 +49,10 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 
 `packages/core/src/update/inventory.ts`
 
-- Reuses harness adapters and tracking readers to classify each harness as native, fallback, package-owned, or not installed.
+- Reuses harness adapters and tracking readers to return one installation record per detected native, fallback, or package-owned installation; native and fallback records for the same harness are not collapsed.
 - Reads the running CLI/package metadata.
-- Adds optional version discovery without changing existing installation detection contracts.
+- Carries validated source identity (plugin ID/marketplace, package source, or fallback provenance) into each plan item without changing existing installation detection contracts.
+- Treats local, pinned, ambiguous, or otherwise unsupported update sources as `unsupported` instead of substituting a different source.
 
 `packages/core/src/update/version-source.ts`
 
@@ -82,9 +83,9 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 `packages/core/src/update/antigravity-transaction.ts`
 
 - Resolves only known NodeSource staged plugin paths.
-- Creates a temporary backup before replacement.
-- Validates the newly staged root by checking `plugin.json`, `bundle.json`, and canonical skill presence.
-- Restores the backup if reinstall or validation fails.
+- Creates a temporary backup before replacement containing the staged root and the N|Solid entry in `~/.gemini/config/import_manifest.json`.
+- Validates the newly staged root by checking `plugin.json`, `bundle.json`, canonical skill presence, and source registration in the import manifest.
+- Restores both the staged root and the saved manifest entry if reinstall or validation fails, preserving unrelated manifest imports.
 
 ### Existing modules extended
 
@@ -141,6 +142,8 @@ The private root package version remains `0.0.0`.
 ## Interfaces and Contracts
 
 ```typescript
+import type { HarnessType } from '../types.js'
+
 export type UpdateTarget =
   | 'cli'
   | 'claude'
@@ -155,19 +158,44 @@ export type UpdateOwnership =
   | 'package-owned'
   | 'fallback'
 
+export type VersionStatus =
+  | 'current'
+  | 'update-available'
+  | 'newer-than-registry'
+  | 'unknown'
+
 export type UpdateStatus =
   | 'current'
   | 'update-available'
+  | 'newer-than-registry'
   | 'updated'
   | 'skipped'
   | 'not-installed'
+  | 'unsupported'
   | 'unknown'
   | 'failed'
 
 export interface VersionInfo {
   current?: string
   latest?: string
-  status: 'current' | 'update-available' | 'newer-than-registry' | 'unknown'
+  status: VersionStatus
+}
+
+export type UpdateSource =
+  | { kind: 'global-package'; packageManager: 'npm' | 'pnpm'; packageName: 'nsolid-plugin' }
+  | { kind: 'marketplace'; pluginId: string; marketplace: string }
+  | { kind: 'pi-package'; spec: 'npm:nsolid-pi-plugin' }
+  | { kind: 'unsupported'; source: string; reason: 'local' | 'git' | 'pinned' | 'ambiguous' }
+  | { kind: 'antigravity-git'; url: 'https://github.com/NodeSource/nsolid-plugin.git' }
+  | { kind: 'fallback'; bundleVersion?: string }
+
+export interface UpdateInstallation {
+  installationId: string
+  target: UpdateTarget
+  ownership: UpdateOwnership
+  installed: boolean
+  source: UpdateSource
+  version: VersionInfo
 }
 
 export interface UpdateOptions {
@@ -183,9 +211,11 @@ export interface UpdateOptions {
 }
 
 export interface UpdatePlanItem {
+  installationId: string
   target: UpdateTarget
   ownership: UpdateOwnership
   installed: boolean
+  source: UpdateSource
   version: VersionInfo
   executable?: string
   args?: readonly string[]
@@ -193,15 +223,29 @@ export interface UpdatePlanItem {
   restartHint?: string
 }
 
+export interface UpdateConfirmationContext {
+  items: readonly UpdatePlanItem[]
+}
+
+export type UpdateConfirmation = (
+  context: UpdateConfirmationContext
+) => boolean | Promise<boolean>
+
 export interface UpdateResult {
+  installationId: string
   target: UpdateTarget
   ownership: UpdateOwnership
   status: UpdateStatus
   currentVersion?: string
+  latestVersion?: string
   resultingVersion?: string
   changed: boolean
   restartHint?: string
   rollbackCommand?: string
+  rollback?: {
+    attempted: boolean
+    succeeded?: boolean
+  }
   error?: {
     code: string
     message: string
@@ -222,13 +266,27 @@ export interface CommandSpec {
   timeoutMs: number
 }
 
+export interface CommandResult {
+  exitCode: number | null
+  signal?: NodeJS.Signals
+  stdout: string
+  stderr: string
+  timedOut: boolean
+}
+
 export interface CommandRunner {
   run(spec: CommandSpec): Promise<CommandResult>
 }
 
+export interface UpdateContext {
+  options: Readonly<UpdateOptions>
+  commandRunner: CommandRunner
+}
+
 export interface UpdateStrategy {
   readonly target: UpdateTarget
-  plan(context: UpdateContext): Promise<UpdatePlanItem>
+  readonly ownership: UpdateOwnership
+  plan(installation: UpdateInstallation, context: UpdateContext): Promise<UpdatePlanItem>
   execute(item: UpdatePlanItem, context: UpdateContext): Promise<UpdateResult>
 }
 ```
@@ -239,8 +297,11 @@ Rules enforced by these contracts:
 - Command arguments are arrays; a shell command string is not part of the contract.
 - `error.message` is sanitized and suitable for JSON output.
 - An absent version is represented as `unknown`, never coerced to `current`.
+- A detected installation source that cannot be updated safely is represented as `unsupported`, never replaced with a different source.
 - Strategies return data; the CLI formatter owns human-readable output.
-- A completed check whose result is `update-available` is successful and exits zero; lookup, validation, or execution failures remain non-zero.
+- A completed check whose result is `update-available`, `newer-than-registry`, or `unsupported` is informational and exits zero; lookup, validation, or execution failures remain non-zero.
+- A mutating update with `newer-than-registry` performs no downgrade and exits zero; a mutating `unsupported` result exits non-zero with manual guidance.
+- A declined plan produces `skipped` results and exits zero.
 
 ### Fixed harness command plans
 
@@ -248,13 +309,15 @@ Rules enforced by these contracts:
 |---|---|---|
 | CLI npm | `npm install -g nsolid-plugin@<version>` | invoke CLI again |
 | CLI pnpm | `pnpm add -g nsolid-plugin@<version>` | invoke CLI again |
-| Claude | `claude plugin update nsolid-plugin@nodesource` | `/reload-plugins` or restart |
-| Codex | `codex plugin marketplace upgrade nodesource` | start a new session |
+| Claude | `claude plugin update <detected-plugin-id>` | `/reload-plugins` or restart |
+| Codex | `codex plugin marketplace upgrade <detected-marketplace>` | start a new session |
 | Antigravity | `agy plugin uninstall nsolid-plugin`, then install Git URL | restart AGY |
-| Pi | `pi update npm:nsolid-pi-plugin` | `/reload` or restart |
+| Pi | `pi update npm:nsolid-pi-plugin` for the canonical npm source only | `/reload` or restart |
 | Fallback/OpenCode | latest published CLI executes `install --harness <target>` | restart harness if needed |
 
-No user-derived string is interpolated into an executable shell command.
+Marketplace IDs and package sources are passed as separate arguments only after strict validation. A native ID is accepted only when it matches `nsolid-plugin@[A-Za-z0-9][A-Za-z0-9._-]*`; the base name alone, malformed IDs, control characters, whitespace, and ambiguous matches return `unsupported`. The only supported Pi source is the exact `npm:nsolid-pi-plugin`; local, Git, pinned, or ambiguous Pi sources return `unsupported`. No user-derived string is interpolated into an executable shell command.
+
+The planner emits one item per `UpdateInstallation`. If a harness has both native and fallback artifacts, both items remain visible and are updated independently; a native failure never switches to fallback ownership.
 
 The Codex command plan is provisional until Task 6 verifies it against a disposable real installation. Implementing the Codex strategy is blocked on evidence that `marketplace upgrade` refreshes the already-installed plugin, not only marketplace metadata. If it does not, the design and specification must be amended before implementation to use the documented plugin remove/add lifecycle and to cover configuration preservation.
 
@@ -272,8 +335,8 @@ sequenceDiagram
 
     User->>CLI: update [scope] --check
     CLI->>Coordinator: checkUpdates(options)
-    Coordinator->>Inventory: detect targets and local versions
-    Inventory-->>Coordinator: installed targets
+    Coordinator->>Inventory: detect installations, sources, and local versions
+    Inventory-->>Coordinator: installation records
     Coordinator->>Registry: resolve latest versions
     Registry-->>Coordinator: validated versions or unknown/error
     Coordinator-->>CLI: UpdateSummary(checkOnly=true)
@@ -296,7 +359,7 @@ sequenceDiagram
     Coordinator-->>CLI: ordered plan
     CLI-->>User: display plan and request confirmation
     User-->>CLI: confirm or --yes
-    loop each target, sequentially
+    loop each installation, sequentially
         Coordinator->>Strategy: execute(planItem)
         Strategy->>ExternalCLI: spawn executable + fixed args
         ExternalCLI-->>Strategy: exit/status/output
@@ -317,13 +380,13 @@ sequenceDiagram
     participant AGY
 
     Updater->>FS: locate known staged N|Solid root
-    Updater->>FS: copy staged root to temporary backup
+    Updater->>FS: snapshot staged root and N|Solid import entry
     Updater->>AGY: uninstall nsolid-plugin
     Updater->>AGY: install GitHub root
     alt install and validation succeed
-        Updater->>FS: remove temporary backup
+        Updater->>FS: remove temporary backup after root + registration validation
     else install or validation fails
-        Updater->>FS: restore backup to staged root
+        Updater->>FS: restore staged root and import registration
         Updater-->>Updater: return failed + rollback status
     end
 ```
@@ -358,9 +421,10 @@ sequenceDiagram
 - Missing executables use a distinct error code from command failure.
 - Process output is bounded before being retained in results.
 - Existing logger redaction is applied to verbose diagnostics.
-- `--all` catches errors at the target boundary and continues with independent targets.
+- `--all` catches errors at the installation boundary and continues with independent installation records, including native and fallback records for the same harness.
 - Confirmation is mandatory for mutable non-interactive operations unless `--yes` is present.
-- Antigravity backup paths are created with restrictive permissions in an OS temporary directory and always cleaned after success.
+- Marketplace IDs are validated before becoming arguments; local, pinned, and ambiguous Pi sources are never silently replaced.
+- Antigravity backup paths are created with restrictive permissions in an OS temporary directory and always cleaned after success. Rollback validates both the staged root and the saved import-manifest registration.
 - Update does not invoke setup, login, or auth modules.
 - Release scripts snapshot only an explicit allowlist; rollback never performs broad Git or recursive workspace resets.
 
