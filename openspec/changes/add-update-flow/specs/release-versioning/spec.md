@@ -84,11 +84,13 @@ Release checking SHALL compare every controlled version and generated artifact w
 
 ### Requirement: Plugin payload changes require an update-visible version
 
-Release checking SHALL reject payload changes whose explicit bundle version still matches the most recent release tag.
+Release checking SHALL reject payload changes whose explicit bundle or package version still matches the highest eligible semantic release tag reachable from `HEAD`.
 
 Release mode SHALL be activated only by `pnpm release:check --release`. For this comparison, “plugin payload files” is the following explicit allowlist:
 
 - `skills/**`
+- `packages/core/src/**`
+- `packages/pi-plugin/index.js`
 - `bundle.json`
 - `.claude-plugin/marketplace.json`
 - `.claude-plugin/plugin.json`
@@ -102,11 +104,37 @@ Release mode SHALL be activated only by `pnpm release:check --release`. For this
 
 #### Scenario: Skill changes retain the previous release version
 
-**Given** committed plugin payload files differ from the most recent release tag
+**Given** committed, staged, unstaged, or untracked plugin payload files differ from the selected semantic release tag
 **And** `bundle.json.version` still equals the version represented by that tag
 **When** the maintainer runs `pnpm release:check --release`
 **Then** it fails with guidance to prepare a new semantic version
 **And** prevents a release that version-keyed harness caches would treat as unchanged
+
+#### Scenario: Published runtime changes retain the previous release version
+
+**Given** committed, staged, unstaged, or untracked files under `packages/core/src/**` or `packages/pi-plugin/index.js` differ from the selected semantic release tag
+**And** the corresponding package version still equals the version represented by that tag
+**When** the maintainer runs `pnpm release:check --release`
+**Then** it fails with guidance to prepare a new semantic version
+**And** it prevents an attempt to publish different runtime bytes under an immutable npm package version
+
+#### Scenario: Select the semantic release baseline deterministically
+
+**Given** the local repository contains lightweight or annotated tags whose names exactly match `X.Y.Z` or `vX.Y.Z`
+**And** their peeled commits are ancestors of `HEAD`
+**When** release mode selects its baseline
+**Then** it selects the eligible tag with the highest stable semantic version, independent of tag creation date
+**And** treats the optional lowercase `v` as a naming prefix rather than part of the version
+**And** ignores non-semantic tags and semantic tags whose commits are not ancestors of `HEAD`
+**And** fails as ambiguous if both prefixed and unprefixed eligible tags represent the selected version but peel to different commits
+
+#### Scenario: Release baseline is unavailable
+
+**Given** no eligible semantic release tag is available locally, all candidate tags are malformed, or shallow history prevents proving tag ancestry
+**When** the maintainer runs `pnpm release:check --release`
+**Then** it exits non-zero before evaluating the payload diff
+**And** distinguishes missing tags, malformed-only tag state, and incomplete shallow history
+**And** reports that remote tags are not considered until they are fetched into the local repository
 
 ### Requirement: Manual publication remains ordered and external
 

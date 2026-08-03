@@ -57,9 +57,9 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 
 `packages/core/src/update/version-source.ts`
 
-- Reads and validates `latest` metadata from npm for `nsolid-plugin` and `nsolid-pi-plugin`.
-- Resolves Claude/Codex latest-version evidence only from the exact carried marketplace source: a validated Git repository/ref plus relative manifest path, or the detected local marketplace snapshot. It never substitutes the canonical NodeSource GitHub root for an alternate marketplace.
-- Reads the canonical GitHub-root `bundle.json` only for fixed-source native Git targets such as Antigravity.
+- Reads and validates `latest` metadata from the detected npm registry for `nsolid-plugin` and `nsolid-pi-plugin`, retaining the normalized registry origin, exact tarball URL, version, and registry-provided integrity digest as one immutable artifact identity.
+- Resolves every supported Git marketplace ref to a full commit object ID before planning, reads the manifest and content digest from that commit, and carries the repository, commit, relative manifest path, and digest together. A missing revision, mutable ref that cannot be resolved, or source that cannot bind lookup and execution to that commit is `unsupported`.
+- Resolves the canonical GitHub-root Antigravity source to a full commit and reads `bundle.json` from that commit; a moving default branch is never the executable identity.
 - Applies bounded request timeouts and semantic-version validation.
 - Returns `unknown` rather than treating missing, local-stale, ambiguous, or unsupported marketplace version evidence as current; native execution may still use the preserved harness-owned ID when its identity is unambiguous.
 
@@ -67,7 +67,8 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 
 - Detects npm or pnpm only when the real CLI package/entrypoint is contained by that manager's reported global root and the corresponding executable is available; a shim or package-manager environment variable alone is not sufficient evidence.
 - Produces a fixed executable plus argument array.
-- Pins update and rollback package specs to the exact semantic versions resolved during planning.
+- Downloads only the planned tarball from the planned registry, verifies its integrity before execution, and gives npm/pnpm the verified local tarball rather than re-resolving `name@version` through ambient registry configuration.
+- Verifies post-update package identity against the planned name, version, registry provenance, and integrity/content digest rather than accepting version equality alone.
 - Returns unsupported for workspaces, `npx`, local checkouts, Volta/Yarn/Bun ownership, mismatched global roots, and ambiguous launchers.
 
 `packages/core/src/update/command-runner.ts`
@@ -100,11 +101,13 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 
 `packages/core/src/update/fallback-transaction.ts`
 
-- Resolves one available package executor (`npm exec` preferred, otherwise `pnpm dlx`), pins the child package to the exact validated `nsolid-plugin@<version>` selected during planning, and runs it from a restrictive temporary working directory so workspace binaries/configuration cannot shadow the payload.
-- Invokes the exact package's dedicated internal `nsolid-plugin-refresh-owned` binary for only the planned harness; the regular `nsolid-plugin install` command and programmatic `install()` contract are not changed.
-- The exact child snapshots the target's tracked NodeSource-owned skill directories, affected MCP configuration, and complete tracking state before mutation, using its own bundled payload for ownership/collision preflight.
+- Resolves one available package executor (`npm exec` preferred, otherwise `pnpm dlx`), verifies the planned `nsolid-plugin` tarball integrity, and runs that verified local artifact from a restrictive temporary working directory so workspace binaries/configuration cannot shadow the payload.
+- Before launching the child, the parent creates and fsyncs a restrictive durable journal plus complete snapshot of the selected installation's tracked skill directories, affected MCP fields, links, and tracking state. The journal records `prepared`, `mutating`, and `committed` phases and remains recoverable if the package executor or child times out, crashes, or is killed.
+- Invokes the exact package's dedicated internal `nsolid-plugin-refresh-owned` binary with a parent-created transaction manifest. The manifest binds `installationId`, harness, canonical owned paths, tracking-file path and digest, and field-level MCP ownership; the regular `nsolid-plugin install` command and programmatic `install()` contract are not changed.
+- The child validates that the live tracking digest, installation identity, canonical paths, and MCP fields still equal the approved manifest before mutation. It refuses stale, sibling, broadened, or ambiguous identity rather than rediscovering a target from `--harness` alone.
 - Reconciles the installed asset set against the new bundle: complete skill directories are replaced, previously tracked skills absent from the new bundle are removed, and untracked/user-owned paths and unrelated MCP entries are preserved.
-- Updates `bundleVersion` only after the new skills, MCP entries, and tracking data validate; restores the snapshot if execution, reconciliation, or validation fails.
+- Updates `bundleVersion` only after the new skills, MCP entries, and tracking data validate. The parent marks the journal committed and removes it only after post-update validation; otherwise it restores its snapshot independently of child-process availability.
+- On every later update invocation, the parent recovers or reports any non-committed journal before planning new mutation.
 - Treats direct artifacts without sufficient tracking ownership as `unsupported` rather than deleting paths by name or prefix.
 
 ### Existing modules extended
@@ -134,8 +137,8 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 
 `packages/core/src/skills/skill-tracker.ts`
 
-- Fallback tracking adds an optional `bundleVersion` and retains enough per-harness ownership/path evidence to reconcile obsolete assets safely.
-- Readers must accept existing tracking files that omit it.
+- Fallback tracking adds an optional `bundleVersion`, canonical per-installation skill/link paths, and MCP ownership evidence per JSON field/value so shared paths and user-modified fields cannot be claimed by name alone.
+- Readers accept legacy tracking for reporting, but automatic mutation is `unsupported` until the selected installation has complete per-path and field-level ownership evidence; compatibility never authorizes a name-only write or deletion.
 
 ### Release modules
 
@@ -152,7 +155,8 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 - Compares package and generated versions with the root bundle.
 - Calls/reuses existing bundle and root-manifest checks.
 - Activates release mode only when invoked through `pnpm release:check --release`.
-- In release mode, compares the explicit plugin payload allowlist from the Release Versioning specification with the latest semantic-version tag and rejects an unchanged version.
+- In release mode, compares the explicit published-payload allowlist from the Release Versioning specification with the highest eligible local semantic-version tag whose peeled commit is an ancestor of `HEAD`, and rejects an unchanged version.
+- Accepts exactly `X.Y.Z` and `vX.Y.Z` tag names, handles lightweight and annotated tags by peeling to commits, ignores non-semantic and non-ancestor tags, and fails explicitly for missing/malformed-only tags, ambiguous duplicate versions, or shallow history that prevents proving ancestry.
 
 Root package scripts:
 
@@ -219,14 +223,17 @@ export type MarketplaceVersionSource =
   | {
       kind: 'git'
       repository: string
-      revision?: string
+      revision: string
+      commit: string
       manifestPath: string
+      contentDigest: string
     }
   | {
       kind: 'local-snapshot'
       root: string
       manifestPath: string
       freshness: 'verified' | 'stale' | 'unknown'
+      contentDigest: string
     }
   | {
       kind: 'unknown'
@@ -239,6 +246,45 @@ export type PiPackageLocation =
   | { scopes: readonly ['user', 'project']; projectRoot: string }
 
 export type FallbackPackageExecutor = 'npm-exec' | 'pnpm-dlx'
+
+export interface NpmArtifactIdentity {
+  kind: 'npm'
+  packageName: 'nsolid-plugin' | 'nsolid-pi-plugin'
+  version: string
+  registry: string
+  tarball: string
+  integrity: string
+}
+
+export interface GitArtifactIdentity {
+  kind: 'git'
+  repository: string
+  commit: string
+  contentDigest: string
+}
+
+export interface LocalArtifactIdentity {
+  kind: 'local-snapshot'
+  root: string
+  contentDigest: string
+}
+
+export type ResolvedArtifactIdentity = NpmArtifactIdentity | GitArtifactIdentity | LocalArtifactIdentity
+
+export interface FallbackTransactionIdentity {
+  installationId: string
+  harness: HarnessType
+  trackingPath: string
+  trackingDigest: string
+  ownedSkillPaths: readonly string[]
+  ownedLinkPaths: readonly string[]
+  ownedMcpFields: readonly {
+    configPath: string
+    server: string
+    field: string
+    expectedDigest: string
+  }[]
+}
 
 export type AntigravityLayout =
   | {
@@ -331,6 +377,8 @@ export interface UpdatePlanItem {
   installed: boolean
   source: UpdateSource
   version: VersionInfo
+  artifact?: ResolvedArtifactIdentity
+  fallbackTransaction?: FallbackTransactionIdentity
   steps: readonly UpdatePlanStep[]
   rollbackSteps: readonly UpdatePlanStep[]
   planningError?: UpdateError
@@ -369,6 +417,7 @@ export interface UpdateSummary {
   results: UpdateResult[]
   counts: Record<UpdateStatus, number>
   success: boolean
+  exitCode: 0 | 1 | 2
 }
 
 export interface CommandSpec {
@@ -415,32 +464,38 @@ Rules enforced by these contracts:
 - A detected installation source that cannot be updated safely is represented as `unsupported`, never replaced with a different source.
 - `ownership: 'none'` with `source.kind: 'none'` is reserved for the synthetic, non-mutating plan/result produced when an explicitly requested harness has no detected installation. It has empty execute/rollback steps, requires no confirmation, and is never emitted as a detected target under `--all`.
 - Marketplace version resolution uses only the `versionSource` carried by the detected Claude or Codex registration. An unknown or stale local source yields `unknown`; it never falls back to the NodeSource marketplace.
+- A mutating plan that depends on Git carries a full immutable commit and content digest; a plan that depends on npm carries registry, tarball, version, and integrity; and a verified local snapshot carries its canonical root and content digest. Execution and post-update validation use that same `artifact` identity and never re-resolve a mutable ref, dist-tag, package name/version, ambient registry, or changed snapshot.
+- A project-scoped Pi command has `cwd` equal to the canonical captured `projectRoot`. Immediately before execution the strategy revalidates that directory identity, effective `.pi/settings.json` entry, scopes, source, and cache roots still match the approved plan; drift produces a non-mutating failure.
+- A fallback child receives and validates the exact `fallbackTransaction` manifest approved by the parent. Harness-only rediscovery is not an executable identity.
 - Strategies return data; the CLI formatter owns human-readable output.
-- A completed check whose result is `current`, `update-available`, `newer-than-registry`, `unsupported`, or evidence-only `unknown` is informational and exits zero. A timeout, invalid response, or other operational lookup/validation failure is `failed` and remains non-zero.
-- A mutating update with `newer-than-registry` performs no downgrade and exits zero; a mutating `unsupported` result exits non-zero with manual guidance.
+- A completed check whose result is `current`, `update-available`, `newer-than-registry`, `unsupported`, or evidence-only `unknown` is informational and exits `0`. A timeout, invalid response, or other operational lookup/validation failure is `failed` and exits `1`.
+- A mutating update with `newer-than-registry` performs no downgrade and exits `0`; a mutating `unsupported` result exits `2` with manual guidance.
 - A declined plan produces `skipped` results and exits zero.
+- Exit code `0` means a completed update/check or an intentional informational no-op. Exit code `1` means an operational lookup, planning, execution, validation, rollback, or recovery failure. Exit code `2` means the requested mutation was unavailable without operational failure because approval was missing or the result was `not-installed`, `unsupported`, or mutation-blocking `unknown`. In aggregate results, code `1` takes precedence over code `2`.
+- A read-only check with `not-installed`, `unsupported`, or evidence-only `unknown` exits `0`. A mutating invocation with any such unavailable result exits `2` unless another item failed and requires exit `1`.
+- An empty `--all` inventory is an explicit successful no-op: it exits `0`, emits `results: []` and zero counts in JSON, and reports that no targets were detected in human output.
 
 ### Fixed harness command plans
 
 | Target | Native/package action | Success guidance |
 |---|---|---|
-| CLI npm | `npm install --global nsolid-plugin@<resolved-version>` | invoke CLI again |
-| CLI pnpm | `pnpm add --global nsolid-plugin@<resolved-version>` | invoke CLI again |
+| CLI npm | verify the planned tarball integrity, then `npm install --global <verified-local-tarball>` | invoke CLI again |
+| CLI pnpm | verify the planned tarball integrity, then `pnpm add --global <verified-local-tarball>` | invoke CLI again |
 | Claude | `claude plugin update <detected-plugin-id> --scope <detected-scope>` | `/reload-plugins` or restart |
 | Codex | `codex plugin marketplace upgrade <detected-marketplace>`, then `codex plugin remove <detected-plugin-id>` and `codex plugin add <detected-plugin-id>` | start a new session |
-| Antigravity | `agy plugin uninstall nsolid-plugin`, then `agy plugin install https://github.com/NodeSource/nsolid-plugin.git` | restart AGY |
+| Antigravity | `agy plugin uninstall nsolid-plugin`, then install the canonical repository pinned to the planned full commit | restart AGY |
 | Pi user-only | `pi update npm:nsolid-pi-plugin --no-approve` | `/reload` or restart |
 | Pi with detected project scope | `pi update npm:nsolid-pi-plugin --approve` after the project root is disclosed and approved | `/reload` or restart |
-| Fallback/OpenCode through npm | `npm exec --yes --package=nsolid-plugin@<resolved-version> -- nsolid-plugin-refresh-owned --harness <target>` inside a fallback transaction | restart harness if needed |
-| Fallback/OpenCode through pnpm | `pnpm --package=nsolid-plugin@<resolved-version> dlx nsolid-plugin-refresh-owned --harness <target>` inside a fallback transaction | restart harness if needed |
+| Fallback/OpenCode through npm | execute `nsolid-plugin-refresh-owned --transaction <parent-manifest>` from the integrity-verified local npm tarball | restart harness if needed |
+| Fallback/OpenCode through pnpm | execute `nsolid-plugin-refresh-owned --transaction <parent-manifest>` from the integrity-verified local pnpm tarball | restart harness if needed |
 
 Marketplace IDs, Claude scopes, package versions, Pi scopes, and package sources are passed as separate arguments only after strict validation. A native ID is accepted only when it matches `nsolid-plugin@[A-Za-z0-9][A-Za-z0-9._-]*`; the base name alone, malformed IDs, control characters, whitespace, ambiguous matches, and a Claude installation whose scope cannot be determined return `unsupported`. Marketplace inventory also carries the exact repository/ref and relative manifest path, or the exact local snapshot path and freshness evidence, used for version resolution. Repository credentials are stripped before data reaches plan or result output; traversal-capable manifest paths and ambiguous source metadata return `unknown` or `unsupported` without canonical-source substitution. The only supported Pi identity is the exact unpinned `npm:nsolid-pi-plugin`. Inventory coalesces canonical user/project entries into one Pi target because one `pi update <source>` invocation updates every matching identity; the discriminated location requires `projectRoot` whenever project scope is present. Any local, Git, pinned, conflicting, or ambiguous matching entry returns `unsupported` for the whole target rather than producing a misleading partial success. No user-derived string is interpolated into an executable shell command.
 
 The planner emits one item per `UpdateInstallation`. If a harness has both native and fallback artifacts, both items remain visible and are updated independently; a native failure never switches to fallback ownership.
 
-The CLI registry lookup resolves the `latest` dist-tag once, validates it as a stable semantic version, and stores that exact version in the immutable plan. Execution never sends `@latest` back to a package manager. npm uses `install --global`; pnpm uses `add --global`. Success requires both a zero child exit and an on-disk package manifest at the positively identified global root whose name/version equal `nsolid-plugin` and the planned version. A failed or mismatched result returns the exact previous-version command for the same manager.
+The CLI registry lookup resolves the `latest` dist-tag once from the effective registry, validates it as a stable semantic version, and stores registry origin, exact tarball URL, version, and integrity in the immutable plan. Execution never sends `@latest` or `name@version` back to a package manager: it downloads the planned tarball, verifies integrity, and installs that verified local artifact. Success requires both a zero child exit and on-disk package evidence whose name, version, and content digest match the planned artifact. A failed or mismatched result returns the exact previous-artifact guidance for the same manager.
 
-Pi source detection reads both user and current-project settings, including object-form entries and filters. User and project entries for the same unpinned npm package become one command target. A user-only target passes `--no-approve` so an unrelated current directory cannot broaden the operation. A detected project target records and displays its project root and passes `--approve` only after the update plan is approved; this is a one-command trust decision and does not rewrite Pi trust/settings files. Pi's own updater preserves source entries and package filters. Because `pi update <source>` does not accept a target version, the registry version observed during planning is a minimum postcondition rather than an executable argument: the strategy reads and reports the actual package-cache version after Pi completes, accepts a newer valid version published during the run, and fails if any affected cache remains older than the planned version.
+Pi source detection reads both user and current-project settings, including object-form entries and filters. User and project entries for the same unpinned npm package become one command target. A user-only target passes `--no-approve` so an unrelated current directory cannot broaden the operation. A detected project target records the canonical project root and directory identity, displays it, and sets the command `cwd` to that exact root. Immediately before invoking `pi update`, the strategy re-reads the effective user/project entries, scopes, source, and cache roots and refuses mutation if they differ from the approved plan. It passes `--approve` only after this revalidation and plan approval. Because `pi update <source>` does not accept a target version, the planned registry artifact is a minimum postcondition; every affected cache must retain provenance for that registry and integrity/content evidence for the resulting package, including a newer valid publication observed during execution.
 
 OpenCode supports native skills and a separate npm/local plugin system, but the current N|Solid distribution is not registered as an OpenCode plugin. Its owner is therefore the tracked direct installer at `~/.config/opencode/skills/` plus the merged `mcp` entries in `opencode.json(c)`. The updater must not invoke `opencode plugin`. It invokes the exact published N|Solid CLI package's internal `nsolid-plugin-refresh-owned` binary as the payload provider and transaction executor. The existing public `install` flow keeps its idempotent copy/merge semantics and does not acquire stale-asset removal behavior.
 
@@ -587,13 +642,13 @@ sequenceDiagram
 - `--all` catches version-lookup, planning, and execution errors at the installation boundary and continues with independent installation records, including native and fallback records for the same harness.
 - Confirmation is mandatory for mutable non-interactive operations unless `--yes` is present.
 - Marketplace IDs and Claude scopes are validated before becoming arguments; local, pinned, conflicting, and ambiguous Pi sources are never silently replaced.
-- CLI and fallback package execution uses the exact immutable version from the plan; mutable dist-tags are not passed during mutation, and a package-manager success without matching on-disk version evidence is a failure.
-- Pi user-only updates pass `--no-approve`; `--approve` is used only when the immutable plan identifies and displays a project-scoped canonical package. Canonical entries across both scopes are updated once, while conflicting/pinned entries block automatic mutation.
+- CLI and fallback package execution uses the registry, tarball, and integrity identity from the plan; mutable dist-tags and ambient registry resolution are not used during mutation, and package-manager success without matching on-disk content evidence is a failure.
+- Pi user-only updates pass `--no-approve`; `--approve` is used only when the immutable plan identifies, displays, executes within, and immediately revalidates a project-scoped canonical package root. Canonical entries across both scopes are updated once, while changed/conflicting/pinned entries block automatic mutation.
 - Codex removes the installed plugin only after marketplace refresh and backup succeed. Rollback validates the restored registration and cached payload while preserving unrelated `config.toml` entries.
 - Antigravity accepts only one unambiguous documented layout pair. Backup paths are created with restrictive permissions in an OS temporary directory and always cleaned after success. Rollback validates both the staged root and its matching saved import-manifest registration.
-- OpenCode/fallback replacement mutates only paths and MCP entries proven to be owned by tracking. The transaction restores overwritten and stale-removed skill directories, config, and tracking together after any failed child execution or validation.
+- OpenCode/fallback replacement mutates only paths and MCP fields bound to the approved installation manifest. The parent-owned durable journal restores overwritten and stale-removed skill directories, config, and tracking after child failure, timeout, signal, or interrupted prior execution.
 - Update does not invoke setup, login, or auth modules.
-- Release scripts snapshot only an explicit allowlist; rollback never performs broad Git or recursive workspace resets.
+- Release scripts snapshot only explicit controlled files; rollback never performs broad Git or recursive workspace resets. Release payload checking includes runtime source inputs that are compiled or copied into both published packages.
 
 ## Migration Strategy
 

@@ -63,12 +63,12 @@ The updater SHALL compare installed and latest versions without invoking any mut
 **And** represents the affected installation in the ordered plan with a sanitized planning error and no mutation steps
 **And** performs no mutation for the affected target
 **And** an `--all` invocation continues planning or executing remaining independent targets and records their results
-**And** the overall invocation exits non-zero
+**And** the overall invocation exits with code `1`
 **And** preserves every installation whose lookup failed
 
 ### Requirement: Safe CLI self-update
 
-The default `nsolid-plugin update` scope SHALL update only a positively identified global CLI installation and SHALL require approval before mutation.
+The default `nsolid-plugin update` scope SHALL update only a positively identified global CLI installation, SHALL require approval before mutation, and SHALL bind registry discovery, package execution, and post-update validation to one integrity-verified artifact.
 
 #### Scenario: CLI update with a supported global package manager
 
@@ -77,20 +77,21 @@ The default `nsolid-plugin update` scope SHALL update only a positively identifi
 **When** the user runs `nsolid-plugin update`
 **Then** the command displays the current version, target version, package manager, and exact planned operation
 **And** asks for confirmation in an interactive terminal
-**And** freezes the resolved semantic version in the plan rather than passing the mutable `latest` tag during execution
-**And** after confirmation invokes `npm install --global nsolid-plugin@<resolved-version>` or `pnpm add --global nsolid-plugin@<resolved-version>` with a fixed argument array
-**And** verifies both that the child process succeeded and that the positively identified global package root contains `nsolid-plugin` at the resolved version
+**And** freezes the effective registry origin, exact tarball URL, stable version, and registry-provided integrity digest in the plan rather than passing the mutable `latest` tag during execution
+**And** downloads only that tarball and verifies its integrity before confirmation can authorize installation
+**And** after confirmation invokes npm or pnpm with the verified local tarball and a fixed argument array, without ambient registry resolution
+**And** verifies both that the child process succeeded and that the positively identified global package root contains `nsolid-plugin` with the planned version and content identity
 **And** reports that a new shell or command invocation may be required
 **And** prints the same package manager's exact command for restoring `nsolid-plugin@<previous-version>`
 
 #### Scenario: Package manager exits successfully without installing the planned CLI
 
 **Given** an exact CLI update was approved
-**When** the package-manager process exits successfully but the identified global package root is missing, belongs to a different package, or reports a version other than the planned version
+**When** the package-manager process exits successfully but the identified global package root is missing, belongs to a different package, reports a version other than the planned version, or cannot prove the planned content identity
 **Then** the update result is `failed`
 **And** the command does not report the CLI as updated
 **And** prints the exact previous-version restore command
-**And** exits non-zero
+**And** exits with code `1`
 
 #### Scenario: User declines a CLI update
 
@@ -106,7 +107,7 @@ The default `nsolid-plugin update` scope SHALL update only a positively identifi
 **And** standard input is not interactive
 **When** the user runs `nsolid-plugin update` without `--yes`
 **Then** the command performs no mutation
-**And** exits non-zero with guidance to pass `--yes`
+**And** exits with code `2` and guidance to pass `--yes`
 **When** the user reruns with `--yes`
 **Then** the command performs the displayed fixed update plan without prompting
 
@@ -126,11 +127,11 @@ The default `nsolid-plugin update` scope SHALL update only a positively identifi
 **And** reports the latest version when it can be resolved
 **And** prints safe exact-version manual commands for npm, pnpm, ephemeral execution, and the detected wrapper/source when known
 **And** the result status is `unsupported`
-**And** a mutating update exits non-zero while a read-only check exits successfully
+**And** a mutating update exits with code `2` while a read-only check exits with code `0`
 
 ### Requirement: Harness-owned update strategies
 
-The updater SHALL preserve native/package ownership and delegate each supported harness update to a deterministic strategy without starting OAuth.
+The updater SHALL preserve native/package ownership, bind discovery and execution to the same immutable source identity, and delegate each supported harness update to a deterministic strategy without starting OAuth.
 
 #### Scenario: Update one installed native harness
 
@@ -148,9 +149,11 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **When** the corresponding native update strategy runs
 **Then** Claude uses the detected complete plugin ID and installation scope
 **And** Codex refreshes the detected marketplace and reinstalls the detected complete plugin ID
-**And** inventory carries that marketplace's exact repository/ref and relative manifest path, or its exact local snapshot path and freshness evidence, for version resolution
+**And** inventory carries that marketplace's exact repository/ref and relative manifest path, or its exact local snapshot path, freshness evidence, and content digest, for version resolution
+**And** planning resolves every supported Git ref to a full commit object ID and content digest used by both lookup and execution
 **And** latest-version lookup reads only that carried source
-**And** missing, stale, ambiguous, traversal-capable, or unsupported version-source evidence reports `unknown` or `unsupported` without querying the NodeSource marketplace
+**And** a local snapshot must retain the planned digest through execution and post-update validation
+**And** a missing revision, mutable ref that cannot be resolved and honored by the harness, stale snapshot, ambiguous source, traversal-capable path, or unsupported version-source evidence reports `unknown` or `unsupported` without querying the NodeSource marketplace
 **And** the strategy never substitutes `nodesource`
 **And** an unqualified, malformed, or ambiguous ID, or a Claude installation with unknown scope, returns `unsupported` without mutation
 
@@ -159,8 +162,10 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **Given** `nsolid-plugin@<marketplace>` is installed natively in Claude at a detected `user`, `project`, `local`, or `managed` scope
 **And** the `claude` executable is available
 **When** the Claude update strategy runs
-**Then** it invokes `claude plugin update nsolid-plugin@<marketplace> --scope <detected-scope>` with a fixed executable and argument array
+**Then** the carried marketplace source resolves to an immutable commit and content digest that Claude can honor for this update
+**And** it invokes `claude plugin update nsolid-plugin@<marketplace> --scope <detected-scope>` with a fixed executable and argument array
 **And** verifies the native update command succeeded
+**And** verifies the installed payload matches the planned commit/content identity rather than version alone
 **And** reports `/reload-plugins` or restart guidance
 **And** does not run the fallback installer
 
@@ -175,7 +180,7 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **And** creates a restrictive temporary backup of the exact plugin registration, enabled state, user-owned plugin fields, and cached installed payload
 **And** confirms replacement unless `--yes` was supplied
 **And** invokes `codex plugin remove nsolid-plugin@<marketplace>` followed by `codex plugin add nsolid-plugin@<marketplace>` with fixed argument arrays
-**And** verifies the resulting local version/content matches the refreshed marketplace entry
+**And** verifies the refreshed marketplace snapshot and resulting local payload match the planned commit and content digest
 **And** reapplies the prior enabled state and preserves unrelated Codex configuration
 **And** reports that a new Codex session is required
 **And** does not run the fallback installer
@@ -187,7 +192,7 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **Then** the updater restores the prior plugin registration, enabled state, user-owned fields, and cached payload
 **And** preserves unrelated `~/.codex/config.toml` entries
 **And** reports whether rollback succeeded
-**And** exits non-zero
+**And** exits with code `1`
 **And** provides the exact detected plugin remove/add commands for manual recovery
 
 #### Scenario: Update Pi package-owned skills
@@ -199,7 +204,11 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **And** the plan displays whether user and/or project package caches will be updated and displays the project root when applicable
 **And** a user-only target invokes `pi update npm:nsolid-pi-plugin --no-approve`
 **And** a target containing the detected project scope invokes `pi update npm:nsolid-pi-plugin --approve` only after the plan is approved
+**And** that command's `cwd` is the canonical project root captured by inventory
+**And** immediately before execution the strategy revalidates the project directory identity, effective settings entries, scopes, canonical package source, and affected cache roots against the approved plan
+**And** any drift fails without invoking `pi update`
 **And** verifies every affected package cache contains `nsolid-pi-plugin` at a valid version no older than the registry version observed during planning
+**And** verifies the resulting caches retain the planned registry provenance and integrity/content evidence
 **And** reports the actual installed version, accepting a newer version published while Pi's native unpinned update was running
 **And** does not copy Pi skills into user-level skill directories
 **And** reports `/reload` or restart guidance
@@ -227,16 +236,28 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 
 **Given** N|Solid is tracked as a direct OpenCode installation, rather than as an OpenCode npm/local plugin, or another target uses the tracked N|Solid fallback installer
 **When** its update strategy runs
-**Then** it resolves and freezes the exact stable `nsolid-plugin` registry version in the plan
+**Then** it resolves and freezes the exact `nsolid-plugin` registry, tarball, stable version, and integrity in the plan
 **And** requires an available supported package executor
-**And** snapshots the target's tracked NodeSource-owned skill directories, affected MCP configuration, and complete tracking state before replacement
-**And** invokes either `npm exec --yes --package=nsolid-plugin@<resolved-version> -- nsolid-plugin-refresh-owned --harness <target>` or `pnpm --package=nsolid-plugin@<resolved-version> dlx nsolid-plugin-refresh-owned --harness <target>` with fixed argument arrays
+**And** the parent creates and durably records a complete snapshot of the selected installation's owned skill/link paths, owned MCP fields, and tracking state before launching a package executor
+**And** invokes `nsolid-plugin-refresh-owned --transaction <parent-manifest>` from the integrity-verified local tarball with a fixed argument array
 **And** runs the package executor from a restrictive temporary working directory where a workspace-local `nsolid-plugin` binary cannot shadow the resolved payload
-**And** the internal refresh binary refuses absent, ambiguous, or untracked ownership and does not broaden the planned harness
+**And** the parent manifest binds the exact `installationId`, harness, canonical paths, tracking path and digest, and field-level MCP ownership approved in the plan
+**And** the internal refresh binary revalidates that identity and refuses absent, stale, sibling, broadened, ambiguous, or untracked ownership
 **And** does not invoke `opencode plugin`
 **And** completely replaces tracked skill directories, removes previously tracked skills absent from the new bundle, and merges only the new bundle's NodeSource MCP entries
 **And** preserves untracked/user-owned skill paths, unrelated MCP entries, other configuration, and valid credentials
 **And** validates installed skills, MCP entries, tracking paths, and `bundleVersion` before deleting the backup
+
+Fallback mutation SHALL be authorized by an exact parent-owned installation manifest and SHALL remain recoverable without cooperation from the package-executor child.
+
+#### Scenario: Fallback tracking or ownership changes after planning
+
+**Given** a fallback plan and parent transaction manifest were approved
+**And** the tracking file, an owned path, a shared-path membership, or an owned MCP field changes before the child starts mutation
+**When** the internal refresh validates the manifest
+**Then** it fails without mutating any installation
+**And** it does not rediscover another installation from the harness name
+**And** a user-modified MCP field or sibling installation remains unchanged
 
 #### Scenario: No supported exact-package executor is available
 
@@ -272,7 +293,24 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **And** restores stale tracked assets removed during reconciliation
 **And** preserves unrelated OpenCode/fallback artifacts
 **And** reports whether rollback succeeded
-**And** exits non-zero
+**And** exits with code `1`
+
+#### Scenario: Fallback child terminates after mutation
+
+**Given** the parent durably recorded a complete snapshot and marked the fallback journal `mutating`
+**When** npm, pnpm, or the internal refresh process times out, crashes, receives a signal, or exits without a structured rollback result after mutation began
+**Then** the parent restores the selected installation from its own snapshot
+**And** records whether parent-owned recovery succeeded
+**And** retains an incomplete journal when automatic restoration cannot be proven complete
+**And** exits with code `1`
+
+#### Scenario: Recover an interrupted fallback transaction on the next run
+
+**Given** a prior invocation left a non-committed durable fallback journal
+**When** any later update invocation starts
+**Then** recovery runs before new inventory or mutation
+**And** restores and validates the exact recorded installation or reports a recovery failure
+**And** no new update plan executes while unresolved recovery state remains
 
 #### Scenario: Update coexisting native and fallback installations
 
@@ -291,6 +329,7 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 **And** the coordinator emits one non-mutating item with `ownership: none` and `source.kind: none` for the requested harness
 **And** the target result is `not-installed`
 **And** the command prints appropriate installation guidance
+**And** a mutating invocation exits with code `2`, while a read-only check exits with code `0`
 
 #### Scenario: Required harness executable is missing
 
@@ -303,7 +342,7 @@ The updater SHALL preserve native/package ownership and delegate each supported 
 
 ### Requirement: Transactional Antigravity replacement
 
-The Antigravity strategy SHALL back up and validate the staged NodeSource plugin because AGY has no native plugin-update command.
+The Antigravity strategy SHALL install a commit-pinned source and back up and validate the staged NodeSource plugin because AGY has no native plugin-update command.
 
 #### Scenario: Update Antigravity native plugin
 
@@ -313,8 +352,9 @@ The Antigravity strategy SHALL back up and validate the staged NodeSource plugin
 **Then** the layout is either `~/.gemini/config/plugins/nsolid-plugin` with `~/.gemini/config/import_manifest.json` or `~/.gemini/antigravity-cli/plugins/nsolid-plugin` with `~/.gemini/antigravity-cli/import_manifest.json`
 **And** it creates a temporary backup of the detected staged NodeSource plugin and matching N|Solid import-manifest entry
 **And** confirms replacement unless `--yes` was supplied
-**And** invokes `agy plugin uninstall nsolid-plugin` followed by `agy plugin install https://github.com/NodeSource/nsolid-plugin.git`
+**And** resolves the canonical repository to a full commit and invokes `agy plugin uninstall nsolid-plugin` followed by installation of that commit-pinned Git source
 **And** validates `plugin.json`, `bundle.json`, canonical skill presence, and the N|Solid entry in the detected matching import manifest
+**And** verifies the staged payload matches the planned commit/content digest
 **And** removes the backup only after the new staged plugin and registration validate
 **And** preserves `~/.agents/.nodesource-auth.json`
 
@@ -333,7 +373,7 @@ The Antigravity strategy SHALL back up and validate the staged NodeSource plugin
 **Then** the updater restores the previous staged plugin atomically where supported
 **And** restores the previous N|Solid entry in the matching detected import manifest while preserving unrelated imports
 **And** reports whether rollback succeeded
-**And** exits non-zero
+**And** exits with code `1`
 **And** provides a manual reinstall command
 
 ### Requirement: Deterministic multi-target orchestration
@@ -358,8 +398,17 @@ The updater SHALL plan targets before mutation, execute them sequentially in det
 **When** one target fails
 **Then** remaining independent targets are attempted
 **And** the summary includes the failed target and actionable error
-**And** the overall process exits non-zero
+**And** the overall process exits with code `1`
 **And** no credential value appears in logs or JSON
+
+#### Scenario: Update-all detects no targets
+
+**Given** no CLI or harness installation is detected
+**When** the user runs `nsolid-plugin update --all` or `nsolid-plugin update --all --check`
+**Then** no confirmation, child process, or filesystem mutation occurs
+**And** the result is an explicit successful no-op with `results: []` and zero counts for every status
+**And** human output reports that no targets were detected
+**And** the process exits with code `0`
 
 #### Scenario: Conflicting update scopes
 
@@ -378,7 +427,18 @@ Update results SHALL support human-readable and machine-readable output without 
 **When** an update or check completes
 **Then** standard output contains exactly one valid JSON document
 **And** progress and diagnostics are written to standard error
+**And** the summary contains `exitCode` with the exact process code selected from `0`, `1`, or `2`
 **And** each result contains `installationId`, `target`, `ownership`, `status`, optional `currentVersion` and `latestVersion`, `changed`, optional restart guidance and rollback status, and sanitized errors
+
+#### Scenario: Exit codes distinguish unavailable mutation from failure
+
+**Given** an update or check has completed
+**When** the CLI maps its summary to a process exit code
+**Then** code `0` represents completed work or an intentional informational no-op, including checks, `current`, `newer-than-registry`, `skipped`, and an empty `--all`
+**And** code `1` represents an operational lookup, planning, execution, validation, rollback, or recovery failure
+**And** code `2` represents a requested mutation that was unavailable without operational failure because approval was missing or its result was `not-installed`, `unsupported`, or mutation-blocking `unknown`
+**And** code `1` takes precedence over code `2` for aggregate results
+**And** JSON status data remains present so automation can distinguish individual results sharing an exit category
 
 ### Requirement: Preserve existing installation behavior
 
