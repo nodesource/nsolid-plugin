@@ -259,10 +259,13 @@ async function runMcpRemote (url, headers) {
     }
   }
 
-  const npxBin = process.platform === 'win32' ? 'npx.cmd' : 'npx'
+  const isWin = process.platform === 'win32'
+  const npxBin = isWin ? 'npx.cmd' : 'npx'
   const child = spawn(npxBin, ['-y', 'mcp-remote@0.1.38', url, ...headerArgs, '--transport', 'http-first', '--silent'], {
     stdio: 'inherit',
     env: process.env,
+    shell: isWin,
+    windowsHide: true,
   })
   await new Promise((resolve, reject) => {
     child.on('error', reject)
