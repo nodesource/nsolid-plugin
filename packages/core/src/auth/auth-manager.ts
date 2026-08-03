@@ -8,7 +8,7 @@ import { PermissionError, InvalidCredentialsError } from './errors.js'
 import { formatPluginError, toPluginError } from '../errors.js'
 import { deriveMcpUrlFromConsoleUrl } from './mcp-url.js'
 
-function openBrowser (url: string, logger?: Logger): void {
+export function openBrowser (url: string, logger?: Logger): void {
   try {
     // eslint-disable-next-line no-new
     new URL(url)
@@ -16,9 +16,16 @@ function openBrowser (url: string, logger?: Logger): void {
     logger?.warn('auth.openBrowser.invalidUrl', { url })
     return
   }
-  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
-  const args = process.platform === 'win32' ? ['/c', 'start', '""', `"${url}"`] : [url]
-  execFile(cmd, args, (err) => {
+  if (process.platform === 'win32') {
+    // Use ShellExecute directly instead of cmd /c start to avoid & being
+    // interpreted as a command separator on Windows.
+    execFile('rundll32', ['url.dll,FileProtocolHandler', url], (err) => {
+      if (err) logger?.warn('auth.openBrowser.failed', { error: err.message })
+    })
+    return
+  }
+  const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open'
+  execFile(cmd, [url], (err) => {
     if (err) logger?.warn('auth.openBrowser.failed', { error: err.message })
   })
 }

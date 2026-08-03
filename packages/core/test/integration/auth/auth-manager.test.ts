@@ -28,8 +28,12 @@ const authConfig: AuthConfig = {
 }
 
 function getUrlFromExecFileCall (): URL {
-  const args = execFileCalls[execFileCalls.length - 1][1] as string[]
-  const urlStr = args.find((a: string) => a.startsWith('http') || a.startsWith('"http'))!
+  const call = execFileCalls[execFileCalls.length - 1]
+  const cmd = call[0] as string
+  const args = call[1] as string[]
+  const urlStr = cmd === 'rundll32'
+    ? args[args.length - 1]
+    : args.find((a: string) => a.startsWith('http') || a.startsWith('"http'))!
   const cleaned = urlStr.replace(/^"|"$/g, '')
   return new URL(cleaned)
 }
@@ -511,7 +515,7 @@ describe('ensureAuthenticated - requiredPermissions', () => {
 })
 
 describe('ensureAuthenticated - Windows browser launch', () => {
-  it('uses cmd /c start on Windows', { timeout: 10000 }, async () => {
+  it('uses rundll32 url.dll,FileProtocolHandler on Windows', { timeout: 10000 }, async () => {
     const originalPlatform = process.platform
     Object.defineProperty(process, 'platform', { value: 'win32' })
 
@@ -540,10 +544,10 @@ describe('ensureAuthenticated - Windows browser launch', () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
 
       const lastCall = execFileCalls[execFileCalls.length - 1]
-      assert.strictEqual(lastCall[0], 'cmd')
+      assert.strictEqual(lastCall[0], 'rundll32')
       const lastArgs = lastCall[1] as string[]
-      assert.ok(lastArgs.includes('/c'))
-      assert.ok(lastArgs.includes('start'))
+      assert.strictEqual(lastArgs[0], 'url.dll,FileProtocolHandler')
+      assert.ok(lastArgs[1].startsWith('https://accounts.example.com/sign-in'))
 
       const state = getStateFromExecFileCall()
       await sendCallback(8767, state)
