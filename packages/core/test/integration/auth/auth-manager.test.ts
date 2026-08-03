@@ -29,8 +29,9 @@ const authConfig: AuthConfig = {
 
 function getUrlFromExecFileCall (): URL {
   const args = execFileCalls[execFileCalls.length - 1][1] as string[]
-  const urlStr = args.find((a: string) => a.startsWith('http'))!
-  return new URL(urlStr)
+  const urlStr = args.find((a: string) => a.startsWith('http') || a.startsWith('"http'))!
+  const cleaned = urlStr.replace(/^"|"$/g, '')
+  return new URL(cleaned)
 }
 
 function getStateFromExecFileCall (): string {

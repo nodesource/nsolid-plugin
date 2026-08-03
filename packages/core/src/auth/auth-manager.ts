@@ -17,7 +17,7 @@ function openBrowser (url: string, logger?: Logger): void {
     return
   }
   const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
-  const args = process.platform === 'win32' ? ['/c', 'start', url] : [url]
+  const args = process.platform === 'win32' ? ['/c', 'start', '""', `"${url}"`] : [url]
   execFile(cmd, args, (err) => {
     if (err) logger?.warn('auth.openBrowser.failed', { error: err.message })
   })
