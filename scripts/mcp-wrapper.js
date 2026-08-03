@@ -115,7 +115,8 @@ async function runMcpRemote (url, headers) {
     }
   }
 
-  const child = spawn('npx', ['-y', 'mcp-remote@0.1.38', url, ...headerArgs, '--transport', 'http-first', '--silent'], {
+  const npxBin = process.platform === 'win32' ? 'npx.cmd' : 'npx'
+  const child = spawn(npxBin, ['-y', 'mcp-remote@0.1.38', url, ...headerArgs, '--transport', 'http-first', '--silent'], {
     stdio: 'inherit',
     env: process.env,
   })
