@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { win32 } from 'node:path'
 import type { AuthConfig, Credentials, Logger, AuthConfirmation, HarnessType } from '../types.js'
 import { loadCredentials, saveCredentials, isExpired } from './token-storage.js'
 import { validateToken } from './token-validator.js'
@@ -18,8 +19,19 @@ export function openBrowser (url: string, logger?: Logger): void {
   }
   if (process.platform === 'win32') {
     // Use ShellExecute directly instead of cmd /c start to avoid & being
-    // interpreted as a command separator on Windows.
-    execFile('rundll32', ['url.dll,FileProtocolHandler', url], (err) => {
+    // interpreted as a command separator on Windows. Resolve rundll32 from
+    // the Windows directory explicitly: a bare executable name can otherwise
+    // be found in the current working directory before the system directory.
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR
+    // win32.isAbsolute accepts root-relative paths such as `\\Windows`, which
+    // would still depend on the current drive. Only accept a drive-qualified
+    // or UNC system root.
+    if (!systemRoot || !/^(?:[a-zA-Z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(systemRoot)) {
+      logger?.warn('auth.openBrowser.failed', { error: 'Windows system root is unavailable' })
+      return
+    }
+    const rundll32 = win32.join(systemRoot, 'System32', 'rundll32.exe')
+    execFile(rundll32, ['url.dll,FileProtocolHandler', url], (err) => {
       if (err) logger?.warn('auth.openBrowser.failed', { error: err.message })
     })
     return

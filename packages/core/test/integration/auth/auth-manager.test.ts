@@ -515,9 +515,11 @@ describe('ensureAuthenticated - requiredPermissions', () => {
 })
 
 describe('ensureAuthenticated - Windows browser launch', () => {
-  it('uses rundll32 url.dll,FileProtocolHandler on Windows', { timeout: 10000 }, async () => {
+  it('uses the trusted rundll32 path with url.dll,FileProtocolHandler on Windows', { timeout: 10000 }, async () => {
     const originalPlatform = process.platform
+    const originalSystemRoot = process.env.SystemRoot
     Object.defineProperty(process, 'platform', { value: 'win32' })
+    process.env.SystemRoot = 'C:\\Windows'
 
     try {
       const { saveCredentials } = await import('../../../src/auth/token-storage.js')
@@ -544,7 +546,7 @@ describe('ensureAuthenticated - Windows browser launch', () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
 
       const lastCall = execFileCalls[execFileCalls.length - 1]
-      assert.strictEqual(lastCall[0], 'rundll32')
+      assert.strictEqual(lastCall[0], 'C:\\Windows\\System32\\rundll32.exe')
       const lastArgs = lastCall[1] as string[]
       assert.strictEqual(lastArgs[0], 'url.dll,FileProtocolHandler')
       assert.ok(lastArgs[1].startsWith('https://accounts.example.com/sign-in'))
@@ -554,6 +556,8 @@ describe('ensureAuthenticated - Windows browser launch', () => {
       await promise
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform })
+      if (originalSystemRoot === undefined) delete process.env.SystemRoot
+      else process.env.SystemRoot = originalSystemRoot
     }
   })
 })
