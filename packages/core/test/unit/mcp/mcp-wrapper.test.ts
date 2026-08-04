@@ -38,9 +38,16 @@ function createWrapperFixture (wrapper: 'source' | 'generated'): { directory: st
 
 function wrapperEnvironment (fixture: ReturnType<typeof createWrapperFixture>): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { ...process.env, HOME: fixture.home, USERPROFILE: fixture.home, PATH: `${fixture.bin}${delimiter}${process.env.PATH}`, NSOLID_TEST_OUTPUT: fixture.output }
+  delete environment.NSOLID_TEST_SYSTEM_ROOT
   if (process.platform === 'win32') {
     const hook = join(fixture.directory, 'override-exec-path.mjs')
-    writeFileSync(hook, `Object.defineProperty(process, 'execPath', { value: ${JSON.stringify(join(fixture.bin, 'node.exe'))} })\n`)
+    writeFileSync(hook, [
+      `Object.defineProperty(process, 'execPath', { value: ${JSON.stringify(join(fixture.bin, 'node.exe'))} })`,
+      'if (process.env.NSOLID_TEST_SYSTEM_ROOT !== undefined) {',
+      '  process.env.SystemRoot = process.env.NSOLID_TEST_SYSTEM_ROOT',
+      '  delete process.env.NSOLID_TEST_SYSTEM_ROOT',
+      '}',
+    ].join('\n'))
     const importHook = `--import=${pathToFileURL(hook).href}`
     environment.NODE_OPTIONS = [process.env.NODE_OPTIONS, importHook].filter(Boolean).join(' ')
   }
@@ -74,7 +81,7 @@ describe('MCP wrapper fallback', () => {
   })
 
   for (const wrapper of ['source', 'generated'] as const) {
-    it(`${wrapper} wrapper preserves argv boundaries outside Windows`, () => {
+    it(`${wrapper} wrapper preserves argv boundaries outside Windows`, { skip: process.platform === 'win32' }, () => {
       const fixture = createWrapperFixture(wrapper)
       const npx = join(fixture.bin, 'npx')
       writeFileSync(npx, '#!/bin/sh\nprintf "%s\\n" "$@" > "$NSOLID_TEST_OUTPUT"\n')
@@ -108,7 +115,10 @@ describe('MCP wrapper fallback', () => {
       const fixture = createWrapperFixture(wrapper)
       writeFileSync(join(fixture.bin, 'npx.cmd'), '@echo off\r\nexit /b 0\r\n')
       const environment = wrapperEnvironment(fixture)
-      environment.SystemRoot = '\\Windows'
+      // Setting SystemRoot before Node starts breaks Windows CSPRNG
+      // initialization. The preload applies this invalid value after startup,
+      // immediately before the wrapper validates it.
+      environment.NSOLID_TEST_SYSTEM_ROOT = '\\Windows'
 
       const result = spawnSync(process.execPath, [fixture.wrapperPath, 'nsolid-console'], { env: environment, encoding: 'utf8' })
 
