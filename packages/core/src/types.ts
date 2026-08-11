@@ -114,12 +114,15 @@ export interface InstallResult {
   errors: string[];
 }
 
-export type SetupOptions = InstallOptions
+export interface SetupOptions extends InstallOptions {
+  /** Force a fresh OAuth round-trip even if valid credentials exist (used to switch NodeSource organizations). */
+  force?: boolean;
+}
 export type SetupResult = InstallResult
 
 export interface DoctorReport {
   healthy: boolean;
-  credentials: { status: 'ok' | 'missing' | 'expired'; message?: string };
+  credentials: { status: 'ok' | 'missing' | 'expired'; message?: string; organizationId?: string };
   /**
    * Native plugin/package install status. Only meaningful for plugin/package-
    * owned harnesses (claude, codex, antigravity, pi); for others the status is

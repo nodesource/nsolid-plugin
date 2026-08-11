@@ -96,6 +96,8 @@ function samePermissions (left: string[] | undefined, right: string[]): boolean 
 export interface EnsureAuthenticatedOptions {
   harness?: HarnessType;
   confirmAuth?: AuthConfirmation;
+  /** Force a fresh OAuth round-trip even if valid credentials exist (used to switch NodeSource organizations). */
+  force?: boolean;
 }
 
 export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logger, options: EnsureAuthenticatedOptions = {}): Promise<Credentials> {
@@ -110,7 +112,7 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     logger?.warn('auth.credentials.corrupt')
   }
 
-  if (existing && !isExpired(existing)) {
+  if (existing && !isExpired(existing) && !options.force) {
     if (existing.accountsUrl && existing.accountsUrl !== authConfig.accountsUrl) {
       logger?.info('auth.credentials.originMismatch', { stored: existing.accountsUrl, current: authConfig.accountsUrl })
     } else {
@@ -186,7 +188,7 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
   }
 
-  const mcpUrl = deriveMcpUrlFromConsoleUrl(callback.consoleUrl) ?? `https://${callback.consoleId}.mcp.saas.nodesource.io`
+  const mcpUrl = deriveMcpUrlFromConsoleUrl(callback.consoleUrl, callback.consoleId) ?? `https://${callback.consoleId}.mcp.saas.nodesource.io`
 
   try {
     const result = await validateToken(callback.token, callback.consoleId, authConfig.accountsUrl, logger)

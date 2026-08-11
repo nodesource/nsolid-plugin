@@ -3,6 +3,13 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+
+// Windows requires elevated privileges (or Developer Mode) for regular
+// symlinks, but not for junctions — which is exactly what the production
+// code creates on Windows (see skill-linker.ts's IS_WINDOWS branch). Match
+// that here so these fixtures don't need privileges the real code doesn't
+// need either.
+const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir'
 import type { SkillRef } from '../../../src/types.js'
 
 let tmpDir: string
@@ -71,7 +78,7 @@ describe('linkSkillsToHarness', () => {
 
     const harnessDir = join(tmpDir, '.claude', 'skills')
     mkdirSync(harnessDir, { recursive: true })
-    symlinkSync(join(tmpDir, 'nonexistent'), join(harnessDir, 'ns-analyze-cpu'), 'dir')
+    symlinkSync(join(tmpDir, 'nonexistent'), join(harnessDir, 'ns-analyze-cpu'), LINK_TYPE)
 
     const results = await linkSkillsToHarness('claude', skills)
 
@@ -86,7 +93,7 @@ describe('linkSkillsToHarness', () => {
     mkdirSync(harnessDir, { recursive: true })
     const otherSource = join(tmpDir, 'other', 'ns-analyze-cpu')
     mkdirSync(otherSource, { recursive: true })
-    symlinkSync(otherSource, join(harnessDir, 'ns-analyze-cpu'), 'dir')
+    symlinkSync(otherSource, join(harnessDir, 'ns-analyze-cpu'), LINK_TYPE)
 
     const results = await linkSkillsToHarness('claude', skills)
 

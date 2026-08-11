@@ -66,6 +66,31 @@ describe('formatDoctorReport', () => {
     assert.ok(out.includes('Re-run installation to re-authenticate'))
   })
 
+  it('appends the org id to the Credentials line when present (ok)', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({ credentials: { status: 'ok', organizationId: 'org-123' } })
+    const out = formatDoctorReport(report, 'claude', false)
+
+    assert.ok(out.includes('Credentials   ✓ ok (org: org-123)'))
+  })
+
+  it('appends the org id to the Credentials line when present (expired)', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({ credentials: { status: 'expired', organizationId: 'org-123' }, healthy: false })
+    const out = formatDoctorReport(report, 'claude', false)
+
+    assert.ok(out.includes('Credentials   ✗ expired (org: org-123)'))
+  })
+
+  it('omits the org suffix when organizationId is not present', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({ credentials: { status: 'missing' }, healthy: false })
+    const out = formatDoctorReport(report, 'claude', false)
+
+    assert.ok(out.includes('Credentials   ✗ missing'))
+    assert.ok(!out.includes('(org:'))
+  })
+
   it('shows "✓ installed" Plugin line for an installed native plugin (no color)', async () => {
     const { formatDoctorReport } = await import('../../../src/utils/format.js')
     const report = makeReport()
@@ -227,6 +252,79 @@ describe('formatDoctorReport', () => {
 
     assert.ok(out.includes('Something went wrong'))
     assert.ok(out.includes('Another error'))
+  })
+})
+
+describe('formatSwitchOrgGuidance', () => {
+  it('tells a native-only plugin-owned harness to reconnect', async () => {
+    const { formatSwitchOrgGuidance } = await import('../../../src/utils/format.js')
+    const lines = formatSwitchOrgGuidance({
+      harness: 'claude',
+      harnessLabel: 'Claude Code',
+      isPluginOwned: true,
+      nativeInstalled: true,
+      fallbackTracked: false,
+    }, false)
+
+    assert.ok(lines.some((l) => l.includes('Reconnect') && l.includes('Claude Code')))
+    assert.ok(!lines.some((l) => l.includes('fallback direct install')))
+  })
+
+  it('tells a fallback-only plugin-owned harness to re-run install', async () => {
+    const { formatSwitchOrgGuidance } = await import('../../../src/utils/format.js')
+    const lines = formatSwitchOrgGuidance({
+      harness: 'claude',
+      harnessLabel: 'Claude Code',
+      isPluginOwned: true,
+      nativeInstalled: false,
+      fallbackTracked: true,
+    }, false)
+
+    assert.ok(lines.some((l) => l.includes('fallback direct install')))
+    assert.ok(lines.some((l) => l.includes('nsolid-plugin install --harness claude')))
+  })
+
+  it('reports BOTH warnings when native and fallback installs coexist', async () => {
+    const { formatSwitchOrgGuidance } = await import('../../../src/utils/format.js')
+    const lines = formatSwitchOrgGuidance({
+      harness: 'claude',
+      harnessLabel: 'Claude Code',
+      isPluginOwned: true,
+      nativeInstalled: true,
+      fallbackTracked: true,
+    }, false)
+
+    assert.ok(lines.some((l) => l.includes('Reconnect') && l.includes('Claude Code')), 'should still tell the user to reconnect the native session')
+    assert.ok(lines.some((l) => l.includes('fallback direct install')), 'should ALSO warn about the stale fallback install')
+    assert.ok(lines.some((l) => l.includes('nsolid-plugin install --harness claude')))
+  })
+
+  it('falls back to a generic reconnect message when neither is detected', async () => {
+    const { formatSwitchOrgGuidance } = await import('../../../src/utils/format.js')
+    const lines = formatSwitchOrgGuidance({
+      harness: 'claude',
+      harnessLabel: 'Claude Code',
+      isPluginOwned: true,
+      nativeInstalled: false,
+      fallbackTracked: false,
+    }, false)
+
+    assert.ok(lines.length > 0, 'should never leave the user with no guidance')
+    assert.ok(lines.some((l) => l.includes('Reconnect')))
+  })
+
+  it('gives CLI-direct harnesses a plain reconnect message', async () => {
+    const { formatSwitchOrgGuidance } = await import('../../../src/utils/format.js')
+    const lines = formatSwitchOrgGuidance({
+      harness: 'opencode',
+      harnessLabel: 'OpenCode',
+      isPluginOwned: false,
+      nativeInstalled: false,
+      fallbackTracked: false,
+    }, false)
+
+    assert.ok(lines.some((l) => l.includes('Reconnect') && l.includes('OpenCode')))
+    assert.ok(!lines.some((l) => l.includes('fallback direct install')))
   })
 })
 

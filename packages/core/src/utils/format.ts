@@ -33,11 +33,12 @@ export function supportsColor (stream: { isTTY?: boolean } = process.stdout): bo
   return stream.isTTY === true
 }
 
-function credLine (status: DoctorReport['credentials']['status'], color: boolean): string {
+function credLine (creds: DoctorReport['credentials'], color: boolean): string {
   // No hint on the 'ok' branch — telling a user to authenticate when creds are
   // valid is misleading. Hints only attach to missing/expired (actionable) states.
-  if (status === 'ok') return line('Credentials', '✓ ok', C.green, '', color)
-  if (status === 'expired') return line('Credentials', '✗ expired', C.red, 'Re-run installation to re-authenticate', color)
+  const orgSuffix = creds.organizationId ? ` (org: ${creds.organizationId})` : ''
+  if (creds.status === 'ok') return line('Credentials', `✓ ok${orgSuffix}`, C.green, '', color)
+  if (creds.status === 'expired') return line('Credentials', `✗ expired${orgSuffix}`, C.red, 'Re-run installation to re-authenticate', color)
   return line('Credentials', '✗ missing', C.red, 'Run installation to authenticate', color)
 }
 
@@ -78,7 +79,7 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   const out: string[] = []
   const title = color ? C.dim(`NodeSource plugin health — ${harness}`) : `NodeSource plugin health — ${harness}`
   out.push(title, '─'.repeat(34))
-  out.push(credLine(report.credentials.status, color))
+  out.push(credLine(report.credentials, color))
   const plugin = pluginLine(report.plugin, harness, color)
   if (plugin) out.push(plugin)
   out.push(skillsLine(report.skills, color))
@@ -94,4 +95,60 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   if (report.healthy) out.push(color ? C.green('✓ All checks passed') : '✓ All checks passed')
   else out.push(color ? C.red('✗ Problems found') : '✗ Problems found')
   return out.join('\n')
+}
+
+export interface SwitchOrgGuidanceInput {
+  /** Raw harness id, e.g. "claude" — used to build the `--harness` value in printed commands. */
+  harness: string;
+  /** Display label for the harness, e.g. "Claude Code". */
+  harnessLabel: string;
+  /** True for claude/codex/antigravity — harnesses with a native plugin model. */
+  isPluginOwned: boolean;
+  /** Result of adapter.detectNativePlugin()?.installed for this harness. */
+  nativeInstalled: boolean;
+  /**
+   * True when this harness has an on-disk MCP config written by the fallback
+   * direct installer (nsolid-plugin install --harness <harness>), tracked via
+   * listTrackedMcps(harness). Independent of nativeInstalled: a machine can
+   * have BOTH a native plugin install and a leftover/parallel fallback
+   * install at once, and Claude Code (or another harness) may route real
+   * tool calls through whichever one is actually connected — so both must be
+   * checked and reported on independently, not as an either/or.
+   */
+  fallbackTracked: boolean;
+}
+
+/**
+ * Follow-up guidance printed after `switch-org` completes. Native-plugin
+ * installs read credentials live on reconnect, so they only need a
+ * reconnect/restart reminder. Fallback direct installs bake a resolved
+ * token into the harness's on-disk MCP config at `install()` time, so they
+ * stay stale until `install --harness <harness>` re-runs — regardless of
+ * whether a native plugin is ALSO installed for the same harness.
+ */
+export function formatSwitchOrgGuidance (input: SwitchOrgGuidanceInput, color: boolean): string[] {
+  const { harness, harnessLabel, isPluginOwned, nativeInstalled, fallbackTracked } = input
+  const dim = (s: string) => color ? C.dim(s) : s
+  const yellow = (s: string) => color ? C.yellow(s) : s
+  const lines: string[] = []
+
+  if (!isPluginOwned) {
+    lines.push(`  ${dim('Reconnect:')} restart/reconnect ${harnessLabel} so it reloads the refreshed MCP config from disk.`)
+    return lines
+  }
+
+  if (nativeInstalled) {
+    lines.push(`  ${dim('Reconnect:')} restart/reconnect your ${harnessLabel} MCP session to pick up the new org.`)
+  }
+
+  if (fallbackTracked) {
+    lines.push(`  ${yellow(`⚠ ${harnessLabel} also has a fallback direct install with a stale token baked in.`)}`)
+    lines.push(`  ${yellow('  Run: nsolid-plugin install --harness ' + harness)} to refresh it with the new org's token, then reconnect it too.`)
+  }
+
+  if (!nativeInstalled && !fallbackTracked) {
+    lines.push(`  ${dim('Reconnect:')} restart/reconnect ${harnessLabel} so it can pick up the refreshed credentials.`)
+  }
+
+  return lines
 }

@@ -20,4 +20,13 @@ describe('CLI help', () => {
     assert.match(output, /OpenCode: run setup --harness opencode for auth, then install --harness opencode for skills\/MCP config\./, 'help must describe OpenCode setup then install')
     assert.doesNotMatch(output, /OpenCode\/Codex/, 'help must not list Codex as a user-level skill harness')
   })
+
+  it('lists the switch-org command', () => {
+    const result = spawnSync(process.execPath, ['--import', 'tsx/esm', CLI_PATH, '--help'], {
+      encoding: 'utf-8',
+    })
+
+    assert.strictEqual(result.status, 0, `CLI --help failed: ${result.stderr}`)
+    assert.match(result.stdout, /switch-org\s+Force re-authentication to switch NodeSource organizations/, 'help must list switch-org command')
+  })
 })

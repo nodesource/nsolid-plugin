@@ -66,6 +66,7 @@ nsolid-plugin install --harness codex       # fallback direct install; no browse
 nsolid-plugin install --harness pi          # MCP config only; skills come from pi package
 nsolid-plugin install --harness opencode    # OpenCode: copy skills + write MCP config
 nsolid-plugin uninstall --harness claude
+nsolid-plugin switch-org --harness claude   # force re-auth to pick a different NodeSource org
 nsolid-plugin doctor --harness claude
 nsolid-plugin doctor --harness claude --json
 nsolid-plugin restore --harness claude
@@ -74,6 +75,8 @@ nsolid-plugin restore --harness claude --backup ~/.agents/.config-backup/claude/
 ```
 
 Use `--verbose` (or `NSOLID_PLUGIN_VERBOSE=1`) for detailed, timestamped logs written to stderr. Verbose mode redacts tokens and auth headers. For Claude Code, Codex, and Antigravity, prefer native GitHub plugin install from the repository root; `install --harness` is a fallback direct installer only. For Pi, install `nsolid-pi-plugin` for package-owned skills; CLI install/setup only writes MCP config. OpenCode is CLI-only and uses `setup --harness opencode` for auth followed by `install --harness opencode` to copy user-level skills and write MCP config.
+
+Credentials are a single shared file (`~/.agents/.nodesource-auth.json`), not per-harness, so a member of more than one NodeSource org can only be authenticated against one org at a time. `switch-org` forces a fresh OAuth round-trip — even if current credentials are still valid — so NodeSource's sign-in flow can show its org picker again; the new org then applies to every installed harness, not just the one named. Native-plugin-installed harnesses (claude/codex/antigravity) pick it up on their next MCP reconnect; fallback-installed harnesses and CLI-direct harnesses (opencode/pi) need `install --harness <harness>` re-run afterward (see `switch-org`'s own output for harness-specific guidance).
 
 ## Config backups
 

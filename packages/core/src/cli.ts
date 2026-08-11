@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline/promises'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { install, setup, uninstall, logout, doctor, restore } from './index.js'
+import { install, setup, uninstall, logout, doctor, restore, loadCredentials } from './index.js'
 import type { AuthConfirmation, HarnessType } from './types.js'
 import { HARNESS_VALUES } from './types.js'
 import { formatPluginError } from './errors.js'
@@ -55,12 +55,13 @@ function printUsage (): void {
   console.log(`Usage: nsolid-plugin <command> [options]
 
 Commands:
-  setup      Authenticate with NodeSource (may open a browser)
-  install    Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; does not open a browser)
-  uninstall  Remove N|Solid Plugin skills for a harness
-  logout     Forget your stored NodeSource login (removes credentials only)
-  doctor     Check installation health for a harness
-  restore    Restore a harness MCP config from the latest backup
+  setup       Authenticate with NodeSource (may open a browser)
+  install     Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; does not open a browser)
+  uninstall   Remove N|Solid Plugin skills for a harness
+  logout      Forget your stored NodeSource login (removes credentials only)
+  switch-org  Force re-authentication to switch NodeSource organizations (opens a browser; affects all harnesses)
+  doctor      Check installation health for a harness
+  restore     Restore a harness MCP config from the latest backup
 
 Options:
   --harness <harness>    Target harness (required in non-interactive mode): ${HARNESS_VALUES.join(', ')}
@@ -435,6 +436,68 @@ async function main (): Promise<void> {
       } else {
         console.log('No credentials found — nothing to log out.')
       }
+      break
+    }
+    case 'switch-org': {
+      if (values['accounts-url']) {
+        process.env.NSOLID_ACCOUNTS_URL = values['accounts-url']
+      }
+      const switchHarness = await requireHarness()
+
+      const previous = (() => {
+        try { return loadCredentials() } catch { return null }
+      })()
+
+      console.log('')
+      console.log(paint.yellow(`⚠ This changes the single shared NodeSource login used by ALL harnesses, not just ${HARNESS_LABELS[switchHarness]}.`))
+      if (previous) console.log(paint.dim(`  Currently signed in to org: ${previous.organizationId}`))
+      console.log('')
+
+      const result = await setup({
+        harness: switchHarness,
+        bundlePath,
+        skillsSource,
+        ...commonOptions,
+        progress: values.quiet === true ? silentProgress : createConsoleProgress({ color }),
+        confirmAuth: authConfirmation,
+        packageOwnedSkills: PACKAGE_OWNED_SKILL_HARNESSES.has(switchHarness),
+        harnessSpecificSkills: HARNESS_SPECIFIC_SKILL_HARNESSES.has(switchHarness),
+        force: true,
+      })
+
+      if (!result.success) {
+        console.error(`Switch organization failed for ${switchHarness}:`)
+        for (const err of result.errors) {
+          console.error(`  - ${err}`)
+        }
+        process.exit(1)
+      }
+
+      const current = (() => {
+        try { return loadCredentials() } catch { return null }
+      })()
+      console.log(`${paint.green('✓')} Now signed in to org: ${current?.organizationId ?? '(unknown)'}`)
+
+      const { formatSwitchOrgGuidance } = await import('./utils/format.js')
+      let nativeInstalled = false
+      let fallbackTracked = false
+      if (PLUGIN_OWNED_HARNESSES.has(switchHarness)) {
+        const { getAdapter } = await import('./harnesses/index.js')
+        nativeInstalled = getAdapter(switchHarness).detectNativePlugin?.()?.installed === true
+        const { listTrackedMcps } = await import('./mcp/index.js')
+        fallbackTracked = (await listTrackedMcps(switchHarness)).length > 0
+      }
+      for (const guidanceLine of formatSwitchOrgGuidance({
+        harness: switchHarness,
+        harnessLabel: HARNESS_LABELS[switchHarness],
+        isPluginOwned: PLUGIN_OWNED_HARNESSES.has(switchHarness),
+        nativeInstalled,
+        fallbackTracked,
+      }, color)) {
+        console.log(guidanceLine)
+      }
+
+      console.log(paint.dim('  Other harnesses sharing this login pick up the new org on their next MCP reconnect (native plugins) or next setup/install run (direct-config harnesses).'))
       break
     }
     case 'restore': {

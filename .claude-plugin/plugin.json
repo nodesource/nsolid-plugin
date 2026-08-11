@@ -25,6 +25,7 @@
     "./skills/ns-node-upgrade",
     "./skills/ns-optimize-function",
     "./skills/ns-replace-package",
+    "./skills/ns-switch-org",
     "./skills/ns-upgrade-package",
     "./skills/ns-validate-optimization"
   ],

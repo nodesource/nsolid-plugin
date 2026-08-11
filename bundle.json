@@ -87,6 +87,11 @@
       "requiresMcp": ["ncm"]
     },
     {
+      "name": "ns-switch-org",
+      "path": "skills/ns-switch-org",
+      "description": "Switch which NodeSource organization nsolid-plugin is authenticated against"
+    },
+    {
       "name": "ns-upgrade-package",
       "path": "skills/ns-upgrade-package",
       "description": "Safely upgrade npm packages with compatibility analysis",

@@ -227,6 +227,66 @@ describe('ensureAuthenticated', () => {
     assert.strictEqual(result.organizationId, 'org-456')
   })
 
+  it('force bypasses valid unexpired credentials to switch organizations', { timeout: 10000 }, async () => {
+    const { saveCredentials, loadCredentials } = await import('../../../src/auth/token-storage.js')
+    const creds: Credentials = {
+      serviceToken: 'existing-token',
+      organizationId: 'org-123',
+      saasToken: 'test-saas-token',
+      consoleUrl: 'https://test.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      permissions: ['nsolid:benchmark:run'],
+    }
+    saveCredentials(creds)
+
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig, undefined, { force: true })
+
+    const state = await pollForState(getStateFromExecFileCall)
+    assert.strictEqual(execFileCalls.length, 1, 'force should open the browser even though valid credentials exist')
+    await sendCallback(8767, state, { consoleId: 'org-456' })
+    const result = await promise
+
+    assert.strictEqual(result.organizationId, 'org-456')
+    assert.notStrictEqual(result.organizationId, creds.organizationId)
+    assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'stored credentials should be overwritten with the new org')
+  })
+
+  it('does not force re-authentication by default (regression guard)', async () => {
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
+    const creds: Credentials = {
+      serviceToken: 'existing-token',
+      organizationId: 'org-123',
+      saasToken: 'test-saas-token',
+      consoleUrl: 'https://test.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+      permissions: ['nsolid:benchmark:run'],
+    }
+    saveCredentials(creds)
+
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: ['nsolid:benchmark:run'] }),
+    })) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const result = await ensureAuthenticated(authConfig, undefined, { force: false })
+
+    assert.strictEqual(result.organizationId, 'org-123')
+    assert.strictEqual(execFileCalls.length, 0, 'force: false should still take the fast path')
+  })
+
   it('trusts stored credentials when validation API is unavailable during fast path', async () => {
     const { saveCredentials } = await import('../../../src/auth/token-storage.js')
     const creds: Credentials = {

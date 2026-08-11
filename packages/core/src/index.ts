@@ -160,16 +160,20 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
       // Corrupt credentials file — will re-authenticate via ensureAuthenticated
     }
 
+    const forcing = options.force === true
     if (existingCredentials) {
-      progress.step('Checking NodeSource login', isExpired(existingCredentials) ? 'sign-in required' : 'already signed in')
-      result.hadToAuthenticate = isExpired(existingCredentials)
+      progress.step(
+        'Checking NodeSource login',
+        forcing ? 'switching organization' : (isExpired(existingCredentials) ? 'sign-in required' : 'already signed in')
+      )
+      result.hadToAuthenticate = forcing || isExpired(existingCredentials)
     } else {
       progress.step('Checking NodeSource login', 'sign-in required')
       result.hadToAuthenticate = true
     }
 
     try {
-      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth })
+      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth, force: options.force })
     } catch (err) {
       const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
       result.errors.push(`Authentication failed: ${pluginErr.message}`)
@@ -307,7 +311,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   if (credentials && canConfigureMcp) {
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
-    const derivedMcpUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
+    const derivedMcpUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
     const explicitMcpUrl = credentials.mcpUrl || undefined
     const mcpUrl = explicitMcpUrl ?? derivedMcpUrl
     if (!mcpUrl) {
@@ -622,9 +626,9 @@ export async function doctor (
     const creds = loadCredentials()
     if (creds) {
       if (isExpired(creds)) {
-        report.credentials = { status: 'expired', message: 'Credentials have expired' }
+        report.credentials = { status: 'expired', message: 'Credentials have expired', organizationId: creds.organizationId }
       } else {
-        report.credentials = { status: 'ok' }
+        report.credentials = { status: 'ok', organizationId: creds.organizationId }
       }
     }
   } catch {
