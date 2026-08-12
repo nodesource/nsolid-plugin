@@ -52,7 +52,7 @@ function resolveServer (name, credentials) {
   switch (name) {
     case 'nsolid-console': {
       const derivedUrl = credentials.mcpUrl ? null : deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
-      const url = credentials.mcpUrl ?? derivedUrl
+      const url = credentials.mcpUrl || derivedUrl
       if (!url) {
         fail(`Could not derive NodeSource console MCP URL from stored credentials. Run: ${SETUP_COMMAND}`)
       }
@@ -95,9 +95,9 @@ function deriveMcpUrlFromConsoleUrl (consoleUrl, organizationId) {
   if (labels.length < 2) return null
 
   const suffix = labels.slice(1).join('.')
-  if (!suffix.endsWith('saas.nodesource.io')) return null
+  if (suffix !== 'saas.nodesource.io' && !suffix.endsWith('.saas.nodesource.io')) return null
 
-  return `${parsed.protocol}//${organizationId}.mcp.${suffix}/`
+  return `https://${organizationId}.mcp.${suffix}/`
 }
 
 async function runMcpRemote (url, headers) {

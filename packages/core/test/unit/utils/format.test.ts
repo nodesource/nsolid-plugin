@@ -328,6 +328,91 @@ describe('formatSwitchOrgGuidance', () => {
   })
 })
 
+describe('buildSwitchOrgOutcome', () => {
+  it('treats a failed auth as a switch failure with a nonzero exit', async () => {
+    const { buildSwitchOrgOutcome } = await import('../../../src/utils/format.js')
+    const outcome = buildSwitchOrgOutcome({
+      success: false,
+      authSucceeded: false,
+      errors: ['Authentication timed out. Please try again.'],
+      harness: 'opencode',
+      harnessLabel: 'OpenCode',
+      isPluginOwned: false,
+    })
+
+    assert.strictEqual(outcome.kind, 'auth-failed')
+    assert.strictEqual(outcome.exitCode, 1)
+    assert.ok(outcome.errorHeader?.includes('Switch organization failed for opencode'))
+    assert.ok(outcome.detail.some((l) => l.includes('Authentication timed out')))
+    assert.strictEqual(outcome.warning, null)
+  })
+
+  it('reports a partial success (nonzero exit, org switched, retry guidance) when the post-auth config refresh fails', async () => {
+    const { buildSwitchOrgOutcome } = await import('../../../src/utils/format.js')
+    const outcome = buildSwitchOrgOutcome({
+      success: false,
+      authSucceeded: true,
+      errors: ['MCP configuration failed: opencode.jsonc'],
+      previousOrg: 'org-original',
+      currentOrg: 'org-456',
+      harness: 'opencode',
+      harnessLabel: 'OpenCode',
+      isPluginOwned: false,
+    })
+
+    assert.strictEqual(outcome.kind, 'partial')
+    assert.strictEqual(outcome.exitCode, 1, 'incomplete refresh must still exit nonzero')
+    assert.strictEqual(outcome.currentOrg, 'org-456')
+    assert.strictEqual(outcome.orgChanged, true)
+    assert.match(outcome.stateLine, /Now signed in to org: org-456/)
+    assert.ok(outcome.warning?.includes('Organization switched to org-456'), 'must state the org switched (not that the switch failed)')
+    assert.ok(outcome.warning?.includes('MCP config could not be fully refreshed'))
+    assert.ok(outcome.detail.some((l) => l.includes('MCP configuration failed')))
+    assert.ok(outcome.commands.some((c) => c === 'nsolid-plugin install --harness opencode'))
+    assert.ok(outcome.commands.some((c) => c.includes('nsolid-plugin setup --harness opencode')))
+  })
+
+  it('words an unchanged selected org as "Still signed in to org"', async () => {
+    const { buildSwitchOrgOutcome } = await import('../../../src/utils/format.js')
+    const outcome = buildSwitchOrgOutcome({
+      success: true,
+      authSucceeded: true,
+      errors: [],
+      previousOrg: 'org-456',
+      currentOrg: 'org-456',
+      harness: 'opencode',
+      harnessLabel: 'OpenCode',
+      isPluginOwned: false,
+    })
+
+    assert.strictEqual(outcome.kind, 'success')
+    assert.strictEqual(outcome.exitCode, 0)
+    assert.strictEqual(outcome.orgChanged, false)
+    assert.match(outcome.stateLine, /Still signed in to org: org-456/)
+  })
+
+  it('treats a full org change as success (exit 0) with a "Now signed in" line', async () => {
+    const { buildSwitchOrgOutcome } = await import('../../../src/utils/format.js')
+    const outcome = buildSwitchOrgOutcome({
+      success: true,
+      authSucceeded: true,
+      errors: [],
+      previousOrg: 'org-original',
+      currentOrg: 'org-456',
+      harness: 'pi',
+      harnessLabel: 'Pi Agent',
+      isPluginOwned: true,
+    })
+
+    assert.strictEqual(outcome.kind, 'success')
+    assert.strictEqual(outcome.exitCode, 0)
+    assert.strictEqual(outcome.orgChanged, true)
+    assert.match(outcome.stateLine, /Now signed in to org: org-456/)
+    assert.strictEqual(outcome.warning, null)
+    assert.deepStrictEqual(outcome.commands, [])
+  })
+})
+
 describe('supportsColor', () => {
   let originalNoColor: string | undefined
   let originalForceColor: string | undefined

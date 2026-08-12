@@ -162,6 +162,15 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
   signInUrl.searchParams.set('state', state)
   logger?.info('auth.oauth.start', { accountsUrl: authConfig.accountsUrl })
 
+  // Headless-safe manual fallback: surface the sign-in URL on stderr so a
+  // failed `open`/`xdg-open` (devcontainer, CI, agent host) does not leave the
+  // user waiting out the full timeout with no path to authenticate. The URL
+  // carries only the loopback port + CSRF state — never tokens — and is always
+  // printed regardless of whether the browser launch succeeds.
+  process.stderr.write('\nNodeSource authentication started.\n')
+  process.stderr.write('If a browser did not open automatically, open this sign-in URL manually:\n')
+  process.stderr.write(`${signInUrl.toString()}\n\n`)
+
   openBrowser(signInUrl.toString(), logger)
 
   const callback = await server.waitForCallback()
@@ -188,7 +197,22 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
   }
 
-  const mcpUrl = deriveMcpUrlFromConsoleUrl(callback.consoleUrl, callback.consoleId) ?? `https://${callback.consoleId}.mcp.saas.nodesource.io`
+  // Never guess a production MCP host when the console URL is not a recognized
+  // NodeSource SaaS origin. Silently persisting a wrong endpoint here would
+  // make it sticky (install and the runtime wrapper both prefer stored
+  // `mcpUrl` over re-deriving). Fail with an actionable error instead, leaving
+  // the previous credentials untouched on disk.
+  const mcpUrl = deriveMcpUrlFromConsoleUrl(callback.consoleUrl, callback.consoleId)
+  if (mcpUrl === null) {
+    const pluginErr = toPluginError(
+      new Error(`Could not determine the N|Solid MCP endpoint from the console URL for org "${callback.consoleId}" (unrecognized NodeSource console host).`),
+      'AUTH_FAILED',
+      {
+        action: 'Re-run setup after confirming the console URL, or contact NodeSource support for your organization\'s MCP endpoint. Existing credentials were left unchanged.',
+      }
+    )
+    throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
+  }
 
   try {
     const result = await validateToken(callback.token, callback.consoleId, authConfig.accountsUrl, logger)

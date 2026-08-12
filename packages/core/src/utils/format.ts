@@ -152,3 +152,102 @@ export function formatSwitchOrgGuidance (input: SwitchOrgGuidanceInput, color: b
 
   return lines
 }
+
+export interface SwitchOrgOutcomeInput {
+  /** result.success — false when any step failed. */
+  success: boolean
+  /** result.authSucceeded — the org-switch signal, independent of `success`. */
+  authSucceeded: boolean
+  /** result.errors — non-empty when a step failed. */
+  errors: string[]
+  /** Org id signed in BEFORE the switch (undefined when none). */
+  previousOrg?: string | null
+  /** Org id signed in AFTER the switch (undefined when unknown). */
+  currentOrg?: string | null
+  harness: string
+  harnessLabel: string
+  isPluginOwned: boolean
+}
+
+export type SwitchOrgOutcomeKind = 'auth-failed' | 'partial' | 'success'
+
+/**
+ * Structured result of the `switch-org` orchestration, so the CLI handler and
+ * its exit-code/output semantics are unit-testable without spawning a browser
+ * or the CLI process. Deliberately separates an auth failure (the switch did
+ * not happen) from a partial success (the org DID switch, but the selected
+ * harness's direct config refresh failed afterward — credentials are live and
+ * MUST NOT be rolled back).
+ */
+export interface SwitchOrgOutcome {
+  kind: SwitchOrgOutcomeKind
+  /** 1 for both auth-failure and partial (incomplete refresh); 0 only on full success. */
+  exitCode: 0 | 1
+  currentOrg: string
+  orgChanged: boolean
+  /** "Now signed in to org: X" / "Still signed in to org: X" (colorized green by caller). */
+  stateLine: string
+  /** Red header shown only when auth itself failed. */
+  errorHeader: string | null
+  /** Yellow warning shown only on partial success (config refresh incomplete). */
+  warning: string | null
+  /** Plain error detail lines (from result.errors). */
+  detail: string[]
+  /** Dim retry commands to print verbatim. */
+  commands: string[]
+}
+
+export function buildSwitchOrgOutcome (input: SwitchOrgOutcomeInput): SwitchOrgOutcome {
+  const { success, authSucceeded, errors, previousOrg, currentOrg, harness, harnessLabel, isPluginOwned } = input
+  const org = currentOrg ?? '(unknown)'
+  const orgChanged = currentOrg !== previousOrg
+  const stateLine = `${orgChanged ? '✓ Now signed in to org' : '✓ Still signed in to org'}: ${org}`
+
+  if (!success && !authSucceeded) {
+    // Auth itself failed — the org was not switched.
+    return {
+      kind: 'auth-failed',
+      exitCode: 1,
+      currentOrg: org,
+      orgChanged,
+      stateLine,
+      errorHeader: `✗ Switch organization failed for ${harness}:`,
+      warning: null,
+      detail: errors.map((e) => `  - ${e}`),
+      commands: [],
+    }
+  }
+
+  if (!success) {
+    // Org switched (credentials live on disk) but the harness's direct MCP
+    // config could not be refreshed. Partial success: report it accurately,
+    // show the active org + retry command, and still exit nonzero.
+    const commands = [`nsolid-plugin install --harness ${harness}`]
+    if (!isPluginOwned) commands.push(`(or re-run: nsolid-plugin setup --harness ${harness})`)
+    return {
+      kind: 'partial',
+      exitCode: 1,
+      currentOrg: org,
+      orgChanged,
+      stateLine,
+      errorHeader: null,
+      warning: `! Organization switched to ${org}, but ${harnessLabel} MCP config could not be fully refreshed.`,
+      detail: errors.map((e) => `  - ${e}`),
+      commands,
+    }
+  }
+
+  // Full success. Caller still appends formatSwitchOrgGuidance / the
+  // "other direct-config harnesses" note.
+  return {
+    kind: 'success',
+    exitCode: 0,
+    currentOrg: org,
+    orgChanged,
+    stateLine,
+    errorHeader: null,
+    warning: null,
+    detail: [],
+    commands: [],
+  }
+}

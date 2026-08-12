@@ -73,16 +73,17 @@ Options:
   --verbose             Enable detailed logging to stderr
   --json                Output doctor report as JSON (machine-readable)
   --no-color            Disable colored output
-  --quiet               Suppress step-by-step progress output (install only)
+  --quiet               Suppress step-by-step progress output (setup/install/switch-org)
   --yes                 Skip interactive confirmation prompts
-  --accounts-url <url>  Explicit origin-only accounts URL override for setup
+  --accounts-url <url>  Explicit origin-only accounts URL override for setup/switch-org
   --help                Show this help message
 
 Distribution notes:
   Claude/Codex/Antigravity: install from the GitHub plugin root; setup is auth-only.
   Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
-  OpenCode: run setup --harness opencode for auth, then install --harness opencode for skills/MCP config.
-  Auth: only setup/login may open a browser.`)
+  OpenCode: setup --harness opencode authenticates AND writes its skills/MCP config; install --harness opencode re-runs that direct config.
+  After switch-org, the harness you pass to --harness has its direct MCP config refreshed on the spot; other direct-config harnesses (OpenCode, Pi, fallback CLI installs) need a later setup/install to re-bake the new org's token.
+  Auth: only setup/switch-org may open a browser.`)
 }
 
 function isInteractive (): boolean {
@@ -278,6 +279,7 @@ async function main (): Promise<void> {
     dim: (s: string) => color ? C.dim(s) : s,
     green: (s: string) => color ? C.green(s) : s,
     yellow: (s: string) => color ? C.yellow(s) : s,
+    red: (s: string) => color ? C.red(s) : s,
   }
 
   switch (command) {
@@ -465,18 +467,43 @@ async function main (): Promise<void> {
         force: true,
       })
 
-      if (!result.success) {
-        console.error(`Switch organization failed for ${switchHarness}:`)
-        for (const err of result.errors) {
-          console.error(`  - ${err}`)
-        }
-        process.exit(1)
-      }
-
       const current = (() => {
         try { return loadCredentials() } catch { return null }
       })()
-      console.log(`${paint.green('✓')} Now signed in to org: ${current?.organizationId ?? '(unknown)'}`)
+
+      // Pure, unit-tested orchestration of the switch-org output + exit code.
+      const { buildSwitchOrgOutcome } = await import('./utils/format.js')
+      const outcome = buildSwitchOrgOutcome({
+        success: result.success,
+        authSucceeded: result.authSucceeded,
+        errors: result.errors,
+        previousOrg: previous?.organizationId,
+        currentOrg: current?.organizationId,
+        harness: switchHarness,
+        harnessLabel: HARNESS_LABELS[switchHarness],
+        isPluginOwned: PLUGIN_OWNED_HARNESSES.has(switchHarness),
+      })
+
+      if (outcome.kind === 'auth-failed') {
+        console.error(paint.red(outcome.errorHeader ?? `✗ Switch organization failed for ${switchHarness}:`))
+        for (const line of outcome.detail) console.error(line)
+        process.exit(1)
+      }
+
+      console.log(paint.green(outcome.stateLine))
+
+      if (outcome.kind === 'partial') {
+        // Org switched (credentials live on disk) but the selected harness's
+        // on-disk MCP config could not be refreshed. This is a partial success:
+        // do NOT report the switch as failed, and do NOT roll back the
+        // globally-switched credentials. Exit nonzero so CI/scripts know the
+        // refresh is incomplete, and point at the retry command.
+        console.error(paint.yellow(outcome.warning!))
+        for (const line of outcome.detail) console.error(line)
+        console.error('  The new org is already saved globally; refresh this harness with:')
+        for (const line of outcome.commands) console.error(paint.dim(`    ${line}`))
+        process.exit(1)
+      }
 
       const { formatSwitchOrgGuidance } = await import('./utils/format.js')
       let nativeInstalled = false
@@ -497,7 +524,7 @@ async function main (): Promise<void> {
         console.log(guidanceLine)
       }
 
-      console.log(paint.dim('  Other harnesses sharing this login pick up the new org on their next MCP reconnect (native plugins) or next setup/install run (direct-config harnesses).'))
+      console.log(paint.dim('  Other direct-config harnesses sharing this login (OpenCode, Pi, fallback CLI installs) pick up the new org on their next setup/install run.'))
       break
     }
     case 'restore': {
