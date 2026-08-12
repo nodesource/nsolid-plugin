@@ -129,6 +129,7 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     skillsInstalled: 0,
     mcpServersConfigured: [],
     hadToAuthenticate: false,
+    authSucceeded: false,
     errors: [],
   }
 
@@ -174,6 +175,10 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
 
     try {
       await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth, force: options.force })
+      // Credentials are authenticated now — the active org is set (freshly
+      // stored, or already valid). This is the "org switch succeeded" signal,
+      // independent of the harness install/config refresh that follows.
+      result.authSucceeded = true
     } catch (err) {
       const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
       result.errors.push(`Authentication failed: ${pluginErr.message}`)
@@ -213,6 +218,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     skillsInstalled: 0,
     mcpServersConfigured: [],
     hadToAuthenticate: false,
+    authSucceeded: false,
     errors: [],
   }
 

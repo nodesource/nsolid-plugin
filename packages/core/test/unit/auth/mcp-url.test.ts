@@ -38,4 +38,23 @@ describe('deriveMcpUrlFromConsoleUrl', () => {
   it('returns null for a bare hostname with no suffix to trust', () => {
     assert.strictEqual(deriveMcpUrlFromConsoleUrl('https://localhost', 'org-123'), null)
   })
+
+  it('rejects a console URL whose suffix only contains saas as a label substring', () => {
+    // Regression: a dot-less endsWith check would accept `foo-saas.nodesource.io`
+    // because the naive check matches "…saas.nodesource.io" as a suffix even
+    // though `saas` is not a whole label. That host is not an ingress route.
+    assert.strictEqual(deriveMcpUrlFromConsoleUrl('https://alias.extra-saas.nodesource.io', 'org-123'), null)
+    assert.strictEqual(deriveMcpUrlFromConsoleUrl('https://alias.foosaas.nodesource.io', 'org-123'), null)
+  })
+
+  it('accepts the exact saas suffix and dot-delimited deeper suffixes only', () => {
+    assert.strictEqual(
+      deriveMcpUrlFromConsoleUrl('https://pretty-name.saas.nodesource.io', 'org-1'),
+      'https://org-1.mcp.saas.nodesource.io/'
+    )
+    assert.strictEqual(
+      deriveMcpUrlFromConsoleUrl('https://pretty-name.staging.saas.nodesource.io', 'org-2'),
+      'https://org-2.mcp.staging.saas.nodesource.io/'
+    )
+  })
 })

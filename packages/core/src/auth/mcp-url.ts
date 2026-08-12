@@ -12,6 +12,8 @@
  * etc.) is trusted from consoleUrl; the label itself is always rebuilt from
  * the trusted organizationId.
  */
+const SUFFIX = 'saas.nodesource.io'
+
 export function deriveMcpUrlFromConsoleUrl (consoleUrl: string, organizationId: string): string | null {
   let parsed: URL
   try {
@@ -24,7 +26,12 @@ export function deriveMcpUrlFromConsoleUrl (consoleUrl: string, organizationId: 
   if (labels.length < 2) return null
 
   const suffix = labels.slice(1).join('.')
-  if (!suffix.endsWith('saas.nodesource.io')) return null
+  // Trust only an exact `saas.nodesource.io` suffix or a deeper one reached
+  // through a DNS label boundary (dot-delimited). A plain `endsWith` would
+  // also accept a label like `foo-saas.nodesource.io` — where `saas` is a
+  // substring of a larger label — and rebuild the endpoint onto a hostname
+  // that accounts-api never provisions.
+  if (suffix !== SUFFIX && !suffix.endsWith(`.${SUFFIX}`)) return null
 
   return `https://${organizationId}.mcp.${suffix}/`
 }

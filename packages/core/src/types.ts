@@ -110,6 +110,16 @@ export interface InstallResult {
   mcpServersConfigured: string[];
   /** True if credentials were needed and re-authentication was performed (whether it succeeded or failed). */
   hadToAuthenticate: boolean;
+  /**
+   * True when the shared NodeSource credentials are authenticated and the
+   * active org is set (freshly stored, or already valid). For `switch-org`
+   * this is the "org switch succeeded" signal: it is independently true of
+   * `success`, because a later harness install/config refresh can still fail
+   * after the org has already been switched. Never set by `install()` (which
+   * does not authenticate). Do NOT roll back switched credentials when this
+   * is true but `success` is false — the org change is real and global.
+   */
+  authSucceeded: boolean;
   /** Non-empty when any step failed; fatal failures short-circuit, non-fatal ones leave partial state. */
   errors: string[];
 }

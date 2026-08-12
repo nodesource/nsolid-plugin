@@ -719,3 +719,88 @@ describe('ensureAuthenticated - accountsUrl override', () => {
     await promise
   })
 })
+
+describe('ensureAuthenticated - manual sign-in URL fallback', () => {
+  it('prints the sign-in URL to stderr without exposing tokens', { timeout: 10000 }, async () => {
+    const { saveCredentials } = await import('../../../src/auth/token-storage.js')
+    const expiredCreds: Credentials = {
+      serviceToken: 'expired-token',
+      organizationId: 'org-123',
+      saasToken: 'expired-saas',
+      consoleUrl: 'https://expired.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    }
+    saveCredentials(expiredCreds)
+
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+
+    const originalWrite = process.stderr.write
+    const stderrChunks: string[] = []
+    process.stderr.write = ((chunk: unknown) => {
+      stderrChunks.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig)
+    try {
+      const state = await pollForState(getStateFromExecFileCall)
+      await sendCallback(8767, state)
+      await promise
+    } finally {
+      process.stderr.write = originalWrite
+    }
+
+    const stderr = stderrChunks.join('')
+    const urlLine = stderr.split('\n').find((line) => line.includes('/sign-in'))
+    assert.ok(urlLine, 'sign-in URL must be surfaced on stderr as a manual fallback')
+    const url = new URL(urlLine.trim())
+    assert.strictEqual(url.pathname, '/sign-in')
+    assert.strictEqual(url.searchParams.get('port'), '8767')
+    assert.ok(url.searchParams.get('state'), 'CSRF state must be present')
+    // The manual URL must never leak credential material.
+    assert.ok(!stderr.includes('expired-token'))
+    assert.ok(!stderr.includes('expired-saas'))
+  })
+})
+
+describe('ensureAuthenticated - unrecognized console URL', () => {
+  it('rejects fresh OAuth instead of persisting a guessed MCP URL, leaving old credentials intact', { timeout: 10000 }, async () => {
+    const { saveCredentials, loadCredentials } = await import('../../../src/auth/token-storage.js')
+    const creds: Credentials = {
+      serviceToken: 'existing-token',
+      organizationId: 'org-123',
+      saasToken: 'test-saas-token',
+      consoleUrl: 'https://one.saas.nodesource.io',
+      mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    }
+    saveCredentials(creds)
+
+    globalThis.fetch = mock.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+
+    const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
+    const promise = ensureAuthenticated(authConfig, undefined, { force: true })
+    const rejection = assert.rejects(
+      promise,
+      /Could not determine the N\|Solid MCP endpoint from the console URL/
+    )
+
+    const state = await pollForState(getStateFromExecFileCall)
+    await sendCallback(8767, state, { consoleId: 'org-456', url: 'https://console.example.com' })
+    await rejection
+
+    assert.strictEqual(loadCredentials()?.organizationId, 'org-123', 'old credentials must survive a rejected fresh OAuth')
+  })
+})

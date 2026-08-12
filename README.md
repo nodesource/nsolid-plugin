@@ -8,7 +8,7 @@ N|Solid Plugin installs NodeSource AI skills and MCP servers into Claude Code, C
 |---|---|---|
 | **Claude Code** | Root GitHub marketplace/plugin + `.claude-plugin/plugin.json` | Native plugin install, then explicit setup |
 | **Codex CLI** | Root GitHub marketplace/plugin + `.codex-plugin/plugin.json` | Native plugin install, then explicit setup |
-| **OpenCode** | CLI direct install (user-level skills + MCP config) | `nsolid-plugin setup --harness opencode`, then `nsolid-plugin install --harness opencode` |
+| **OpenCode** | CLI direct install (user-level skills + MCP config) | `nsolid-plugin setup --harness opencode` (auth + writes config); `nsolid-plugin install --harness opencode` refreshes it |
 | **Antigravity CLI** | Root GitHub plugin + `plugin.json` | `agy plugin install <repo-url>`, then explicit setup |
 | **Pi Agent** | npm package + `pi.skills` | `pi install npm:nsolid-pi-plugin`, `nsolid-plugin setup --harness pi`, then `pi install npm:pi-mcp-adapter` |
 
@@ -47,7 +47,7 @@ Skills are canonical in the repository-root `skills/` directory. The repo root i
 | **Codex** | Root plugin | Native marketplace/plugin install; `setup` for auth |
 | **Antigravity** | Root plugin | `agy plugin install <repo-url>`; `setup` for auth |
 | **Pi** | Pi npm package (`pi.skills`) | Pi package owns skills; `setup` writes auth/MCP config |
-| **OpenCode** | CLI direct install | `setup` authenticates; `install` copies skills and writes MCP config |
+| **OpenCode** | CLI direct install | `setup` authenticates AND writes MCP config/skills; `install` refreshes the direct config |
 
 
 ## Authentication
@@ -63,14 +63,16 @@ On setup:
 1. Your browser opens `accounts.nodesource.com/sign-in` for login.
 2. A local HTTP server starts on port **8765** (fallback: 8766–8770) to receive the callback.
 3. The OAuth callback provides a `serviceToken`, `consoleId`, `saasToken`, and `consoleUrl`.
-4. An `mcpUrl` is derived from the callback's `consoleId` (or via string transform from `consoleUrl`).
+4. An `mcpUrl` is derived by combining the callback's `consoleId` (the org UUID) with the trusted environment suffix of `consoleUrl` (e.g. `saas.nodesource.io`, `staging.saas.nodesource.io`), giving `https://<organizationId>.mcp.<suffix>/`.
 5. Credentials are stored at `~/.agents/.nodesource-auth.json` with mode `0600`.
+
+If a browser does not open automatically (headless CI, devcontainer, agent host, etc.), the CLI prints the sign-in URL to stderr — open it manually in any browser to complete the flow. Nothing sensitive (no tokens) is printed there.
 
 **What is stored:** `serviceToken`, `organizationId`, `saasToken`, `consoleUrl`, `mcpUrl`, `expiresAt`, `permissions`, and the `accountsUrl` auth origin used to mint/validate the token.
 
 **Token lifecycle:** Expired credentials trigger re-authentication during explicit setup/login. Runtime MCP wrappers fail with an actionable `Run: nsolid-plugin setup --harness <harness>` message if credentials are missing or expired. Credentials are shared across harnesses — which also means there is only ever one authenticated NodeSource org at a time. If you belong to more than one org, use `nsolid-plugin switch-org --harness <harness>` to force a fresh sign-in and pick a different one; see [Switching organizations](#switching-organizations) below.
 
-**`mcpUrl` derivation:** Always built from the org's UUID (`consoleId`/`organizationId`), never from `consoleUrl`'s hostname label — a console may be reachable at a friendly display alias (e.g. `homedepot-nucleus-stage-1.saas.nodesource.io`), but the underlying MCP ingress route is only ever provisioned under the org's UUID, so using the alias verbatim produces a dead endpoint. `consoleUrl` is only consulted for its environment suffix (`saas.nodesource.io`, `staging.saas.nodesource.io`, etc.), giving `https://<organizationId>.mcp.<suffix>/`. Computed and stored on every fresh OAuth completion (`setup`, `switch-org`); a stored/explicit `credentials.mcpUrl` — including a legitimate custom operator override — still always takes priority over re-deriving. If `consoleUrl` doesn't match a recognized NodeSource pattern and no `mcpUrl` is stored, installation fails with an actionable error.
+**`mcpUrl` derivation:** Always built from the org's UUID (`consoleId`/`organizationId`), never from `consoleUrl`'s hostname label — a console may be reachable at a friendly display alias (e.g. `homedepot-nucleus-stage-1.saas.nodesource.io`), but the underlying MCP ingress route is only ever provisioned under the org's UUID, so using the alias verbatim produces a dead endpoint. `consoleUrl` is only consulted for its environment suffix (`saas.nodesource.io`, `staging.saas.nodesource.io`, etc.), which must be the exact suffix or a dot-delimited deeper suffix — a hostname where `saas` is merely a substring of a larger label (e.g. `foo-saas.nodesource.io`) is rejected. This gives `https://<organizationId>.mcp.<suffix>/`, always over `https`. Computed and stored on every fresh OAuth completion (`setup`, `switch-org`); a stored/explicit `credentials.mcpUrl` — including a legitimate custom operator override — still always takes priority over re-deriving. If `consoleUrl` doesn't match a recognized NodeSource pattern, fresh OAuth fails with an actionable error and never silently persists a guessed production URL, and any previously stored credentials are left unchanged.
 
 ## Per-harness install
 
@@ -131,7 +133,7 @@ nsolid-plugin setup --harness opencode
 nsolid-plugin install --harness opencode
 ```
 
-OpenCode does not use this repository as a native plugin. `setup` authenticates with NodeSource. `install` copies skills directly to `~/.config/opencode/skills/` and writes MCP servers to `~/.config/opencode/opencode.jsonc` under the top-level `mcp` key. It does not use shared `~/.agents/skills/`, avoiding cross-harness skill leakage and Pi package-owned skill collisions.
+OpenCode does not use this repository as a native plugin. `nsolid-plugin setup --harness opencode` authenticates AND writes the direct config in one step: it copies skills to `~/.config/opencode/skills/` and writes MCP servers to `~/.config/opencode/opencode.jsonc` under the top-level `mcp` key. It does not use shared `~/.agents/skills/`, avoiding cross-harness skill leakage and Pi package-owned skill collisions. `nsolid-plugin install --harness opencode` re-runs that same direct config — including after a `switch-org`, where the harness you pass to `--harness` is refreshed on the spot.
 
 ### Antigravity CLI
 
@@ -272,7 +274,7 @@ nsolid-plugin restore --harness <harness> --backup ~/.agents/.config-backup/<har
 
 ### Install vs setup
 
-`nsolid-plugin setup --harness <harness>` authenticates with NodeSource and may open a browser. `nsolid-plugin install --harness <harness>` never opens a browser; it directly writes N|Solid skills and MCP config for a harness. Claude, Codex, and Antigravity should normally use native GitHub plugin install from the repository root. OpenCode uses the explicit two-step CLI path: `setup`, then `install`. Pi is package-owned: `pi install npm:nsolid-pi-plugin` installs skills, while `nsolid-plugin install/setup --harness pi` only writes Pi MCP config.
+`nsolid-plugin setup --harness <harness>` authenticates with NodeSource and may open a browser; for direct-config harnesses (OpenCode, Pi) it also writes that harness's MCP config in the same step. `nsolid-plugin install --harness <harness>` never opens a browser; it directly writes N|Solid skills and MCP config for a harness and is used to (re)run a direct config — for example after `switch-org`. Claude, Codex, and Antigravity should normally use native GitHub plugin install from the repository root. OpenCode uses the single-step `setup`, and `install` to refresh its config. Pi is package-owned: `pi install npm:nsolid-pi-plugin` installs skills, while `nsolid-plugin install/setup --harness pi` writes Pi MCP config.
 
 ### Switching organizations
 
@@ -280,7 +282,7 @@ nsolid-plugin restore --harness <harness> --backup ~/.agents/.config-backup/<har
 nsolid-plugin switch-org --harness <harness>
 ```
 
-Credentials are one shared file (`~/.agents/.nodesource-auth.json`), not per-harness, so only one NodeSource org is authenticated at a time. `switch-org` forces a fresh OAuth round-trip even when current credentials are still valid, so NodeSource's sign-in flow can show its org picker again (it only appears when your account belongs to more than one org). The new org applies globally — to every installed harness, not just the one passed to `--harness` — and other harnesses pick it up on their own next MCP reconnect (native plugin installs) or next `setup`/`install` run (OpenCode, Pi, and fallback-installed Claude/Codex/Antigravity). The command's own output tells you which follow-up applies to the harness you ran it for. An `ns-switch-org` skill is also installed alongside the others, so this can be triggered from inside a harness instead of a separate terminal.
+Credentials are one shared file (`~/.agents/.nodesource-auth.json`), not per-harness, so only one NodeSource org is authenticated at a time. `switch-org` forces a fresh OAuth round-trip even when current credentials are still valid, so NodeSource's sign-in flow can show its org picker again (it only appears when your account belongs to more than one org). The new org applies globally — to every installed harness, not just the one passed to `--harness`. The harness you run it for is refreshed immediately: its direct MCP config (OpenCode/Pi) or its reconnect-ready native plugin picks up the new org. Other direct-config harnesses (OpenCode, Pi, and fallback-installed Claude/Codex/Antigravity) pick up the new org on their own next `setup`/`install` run; native-plugin harnesses get it on their next MCP reconnect. If the org switch itself succeeds but the selected harness's config refresh fails, the CLI reports a partial success (org already changed, credentials kept) with a nonzero exit and the retry command, rather than claiming the switch failed. The command's own output tells you which follow-up applies to the harness you ran it for. An `ns-switch-org` skill is also installed alongside the others, so this can be triggered from inside a harness instead of a separate terminal.
 
 ### Verbose logging
 
