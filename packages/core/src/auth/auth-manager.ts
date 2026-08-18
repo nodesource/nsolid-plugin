@@ -98,6 +98,8 @@ export interface EnsureAuthenticatedOptions {
   confirmAuth?: AuthConfirmation;
   /** Force a fresh OAuth round-trip even if valid credentials exist (used to switch NodeSource organizations). */
   force?: boolean;
+  /** Injectable stdout/stderr sink for headless OAuth sign-in instructions. Defaults to `process.stderr.write`. */
+  notify?: (text: string) => void;
 }
 
 export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logger, options: EnsureAuthenticatedOptions = {}): Promise<Credentials> {
@@ -167,9 +169,10 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
   // user waiting out the full timeout with no path to authenticate. The URL
   // carries only the loopback port + CSRF state — never tokens — and is always
   // printed regardless of whether the browser launch succeeds.
-  process.stderr.write('\nNodeSource authentication started.\n')
-  process.stderr.write('If a browser did not open automatically, open this sign-in URL manually:\n')
-  process.stderr.write(`${signInUrl.toString()}\n\n`)
+  const notify = options.notify ?? ((text: string) => process.stderr.write(text))
+  notify('\nNodeSource authentication started.\n')
+  notify('If a browser did not open automatically, open this sign-in URL manually:\n')
+  notify(`${signInUrl.toString()}\n\n`)
 
   openBrowser(signInUrl.toString(), logger)
 

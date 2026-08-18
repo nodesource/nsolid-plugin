@@ -472,7 +472,7 @@ async function main (): Promise<void> {
       })()
 
       // Pure, unit-tested orchestration of the switch-org output + exit code.
-      const { buildSwitchOrgOutcome } = await import('./utils/format.js')
+      const { buildSwitchOrgOutcome, formatSwitchOrgGuidance } = await import('./utils/format.js')
       const outcome = buildSwitchOrgOutcome({
         success: result.success,
         authSucceeded: result.authSucceeded,
@@ -505,7 +505,6 @@ async function main (): Promise<void> {
         process.exit(1)
       }
 
-      const { formatSwitchOrgGuidance } = await import('./utils/format.js')
       let nativeInstalled = false
       let fallbackTracked = false
       if (PLUGIN_OWNED_HARNESSES.has(switchHarness)) {

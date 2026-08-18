@@ -174,7 +174,7 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     }
 
     try {
-      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth, force: options.force })
+      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth, force: options.force, notify: options.notify })
       // Credentials are authenticated now — the active org is set (freshly
       // stored, or already valid). This is the "org switch succeeded" signal,
       // independent of the harness install/config refresh that follows.

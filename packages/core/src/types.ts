@@ -127,6 +127,12 @@ export interface InstallResult {
 export interface SetupOptions extends InstallOptions {
   /** Force a fresh OAuth round-trip even if valid credentials exist (used to switch NodeSource organizations). */
   force?: boolean;
+  /**
+   * Injectable stdout/stderr sink for headless sign-in instructions.
+   * Defaults to `process.stderr.write`. Library consumers can use this to
+   * capture or suppress OAuth sign-in URL messages without touching stderr.
+   */
+  notify?: (text: string) => void;
 }
 export type SetupResult = InstallResult
 
