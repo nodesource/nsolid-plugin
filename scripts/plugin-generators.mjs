@@ -195,8 +195,10 @@ function readCredentials () {
 function resolveServer (name, credentials) {
   switch (name) {
     case 'nsolid-console': {
-      const derivedUrl = credentials.mcpUrl ? null : deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
-      const url = credentials.mcpUrl || derivedUrl
+      const storedUrl = credentials.mcpUrl && !isLegacyAliasMcpUrl(credentials.mcpUrl, credentials.consoleUrl, credentials.organizationId)
+        ? credentials.mcpUrl
+        : null
+      const url = storedUrl || deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
       if (!url) {
         fail(\`Could not derive NodeSource console MCP URL from stored credentials. Run: \${SETUP_COMMAND}\`)
       }
@@ -242,6 +244,24 @@ function deriveMcpUrlFromConsoleUrl (consoleUrl, organizationId) {
   if (suffix !== 'saas.nodesource.io' && !suffix.endsWith('.saas.nodesource.io')) return null
 
   return \`https://\${organizationId}.mcp.\${suffix}/\`
+}
+
+function isLegacyAliasMcpUrl (mcpUrl, consoleUrl, organizationId) {
+  let consoleHost
+  let storedHost
+  try {
+    consoleHost = new URL(consoleUrl).hostname
+    storedHost = new URL(mcpUrl).hostname
+  } catch {
+    return false
+  }
+
+  const labels = consoleHost.split('.')
+  if (labels[0] === organizationId) return false
+  if (!consoleHost.endsWith('.saas.nodesource.io')) return false
+
+  const legacyHost = consoleHost.replace(/\\.saas\\.nodesource\\.io$/, '.mcp.saas.nodesource.io')
+  return storedHost === legacyHost
 }
 
 async function runMcpRemote (url, headers) {

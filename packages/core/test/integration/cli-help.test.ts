@@ -38,12 +38,12 @@ describe('CLI help', () => {
     assert.strictEqual(result.status, 0, `CLI --help failed: ${result.stderr}`)
     assert.match(
       result.stdout,
-      /After switch-org, the harness you pass to --harness has its direct MCP config refreshed on the spot/,
+      /After switch-org, a direct-config harness passed to --harness \(OpenCode, Pi, fallback CLI installs\) has its MCP config refreshed on the spot/,
       'help must state the selected direct-config harness is refreshed immediately'
     )
     assert.match(
       result.stdout,
-      /other direct-config harnesses \(OpenCode, Pi, fallback CLI installs\) need a later setup\/install/,
+      /and other direct-config harnesses need a later setup\/install/,
       'help must state other direct configs need a later setup/install'
     )
     assert.match(result.stdout, /--accounts-url <url>\s+Explicit origin-only accounts URL override for setup\/switch-org/, 'help must scope --accounts-url to setup/switch-org')

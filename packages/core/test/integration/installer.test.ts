@@ -282,7 +282,7 @@ describe('install()', () => {
     assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'shared credentials must be switched')
     const cfg = readJsonFile<Record<string, any>>(join(tmpDir, '.config', 'opencode', 'opencode.jsonc'))
     const server = (cfg?.mcp as Record<string, { url?: string; headers?: Record<string, string> }>)?.['nsolid-console']
-    assert.ok(server, 'openocode.jsonc must contain an nsolid-console server')
+    assert.ok(server, 'opencode.jsonc must contain an nsolid-console server')
     assert.strictEqual(server.url, 'https://org-456.mcp.saas.nodesource.io/')
     assert.strictEqual(server.headers?.['X-Nsolid-Service-Token'], 'oauth-token')
   })
@@ -535,6 +535,37 @@ describe('install()', () => {
     const servers = claudeConfig.mcpServers as Record<string, { type?: string; url?: string }>
     assert.strictEqual(servers['nsolid-console'].type, 'http')
     assert.strictEqual(servers['nsolid-console'].url, 'https://test-org.mcp.saas.nodesource.io/')
+  })
+
+  it('migrates a stored legacy alias-derived MCP URL to the org-UUID route', async () => {
+    const { install } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({
+      organizationId: '602b4703-8a7c-405a-ac1e-70bc98c3a915',
+      consoleUrl: 'https://homedepot-nucleus-stage-1.saas.nodesource.io',
+      mcpUrl: 'https://homedepot-nucleus-stage-1.mcp.saas.nodesource.io/',
+    })
+
+    const result = await install({ harness: 'claude', bundlePath, skillsSource })
+
+    assert.strictEqual(result.success, true)
+    const claudeConfig = readJsonFile<Record<string, unknown>>(join(tmpDir, '.claude.json'))
+    assert.ok(claudeConfig?.mcpServers && typeof claudeConfig.mcpServers === 'object')
+    const servers = claudeConfig.mcpServers as Record<string, { type?: string; url?: string }>
+    assert.strictEqual(servers['nsolid-console'].type, 'http')
+    assert.strictEqual(servers['nsolid-console'].url, 'https://602b4703-8a7c-405a-ac1e-70bc98c3a915.mcp.saas.nodesource.io/')
   })
 
   it('writes MCP config for Pi', async () => {

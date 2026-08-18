@@ -97,7 +97,7 @@ const REPORTER = pathToFileURL(join(ROOT, 'scripts', 'test-reporter.mjs')).href
 // appear to hang indefinitely rather than just run slowly — this bit the
 // husky pre-commit hook (`pnpm test`) in practice. Cap it, with an escape
 // hatch for anyone who wants to override it (e.g. a beefier CI runner).
-const DEFAULT_CONCURRENCY = Math.max(1, Math.floor(os.cpus().length / 2))
+const DEFAULT_CONCURRENCY = Math.max(1, Math.floor(os.availableParallelism() / 2))
 let concurrency
 try {
   // Validate the override before spawning anything: an invalid value (0,

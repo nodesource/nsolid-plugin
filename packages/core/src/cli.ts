@@ -82,7 +82,7 @@ Distribution notes:
   Claude/Codex/Antigravity: install from the GitHub plugin root; setup is auth-only.
   Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
   OpenCode: setup --harness opencode authenticates AND writes its skills/MCP config; install --harness opencode re-runs that direct config.
-  After switch-org, the harness you pass to --harness has its direct MCP config refreshed on the spot; other direct-config harnesses (OpenCode, Pi, fallback CLI installs) need a later setup/install to re-bake the new org's token.
+  After switch-org, a direct-config harness passed to --harness (OpenCode, Pi, fallback CLI installs) has its MCP config refreshed on the spot; Claude/Codex/Antigravity native plugins must be reconnected, and other direct-config harnesses need a later setup/install to re-bake the new org's token.
   Auth: only setup/switch-org may open a browser.`)
 }
 

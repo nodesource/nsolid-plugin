@@ -156,7 +156,11 @@ export function formatSwitchOrgGuidance (input: SwitchOrgGuidanceInput, color: b
 export interface SwitchOrgOutcomeInput {
   /** result.success — false when any step failed. */
   success: boolean
-  /** result.authSucceeded — the org-switch signal, independent of `success`. */
+  /**
+   * result.authSucceeded — the org-switch signal. When false, the switch did
+   * not happen (OAuth failed, or the bundle has no `auth` so no OAuth ran),
+   * regardless of `success`; the outcome is always `auth-failed`.
+   */
   authSucceeded: boolean
   /** result.errors — non-empty when a step failed. */
   errors: string[]
@@ -175,9 +179,9 @@ export type SwitchOrgOutcomeKind = 'auth-failed' | 'partial' | 'success'
  * Structured result of the `switch-org` orchestration, so the CLI handler and
  * its exit-code/output semantics are unit-testable without spawning a browser
  * or the CLI process. Deliberately separates an auth failure (the switch did
- * not happen) from a partial success (the org DID switch, but the selected
- * harness's direct config refresh failed afterward — credentials are live and
- * MUST NOT be rolled back).
+ * not happen — OAuth failed or no OAuth ran) from a partial success (the org
+ * DID switch, but the selected harness's direct config refresh failed
+ * afterward — credentials are live and MUST NOT be rolled back).
  */
 export interface SwitchOrgOutcome {
   kind: SwitchOrgOutcomeKind
@@ -203,8 +207,12 @@ export function buildSwitchOrgOutcome (input: SwitchOrgOutcomeInput): SwitchOrgO
   const orgChanged = currentOrg !== previousOrg
   const stateLine = `${orgChanged ? '✓ Now signed in to org' : '✓ Still signed in to org'}: ${org}`
 
-  if (!success && !authSucceeded) {
-    // Auth itself failed — the org was not switched.
+  if (!authSucceeded) {
+    // Auth did not happen — the org was not switched. This covers both an
+    // OAuth failure AND a bundle without `auth` (where setup() succeeds with
+    // no OAuth round-trip, leaving authSucceeded false): for switch-org,
+    // authSucceeded is the switch signal, so its absence is always a failure,
+    // never a success.
     return {
       kind: 'auth-failed',
       exitCode: 1,

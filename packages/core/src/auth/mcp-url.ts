@@ -1,3 +1,5 @@
+import type { Credentials } from '../types.js'
+
 /**
  * Derive the N|Solid console's MCP endpoint from its console URL and org id.
  *
@@ -34,4 +36,44 @@ export function deriveMcpUrlFromConsoleUrl (consoleUrl: string, organizationId: 
   if (suffix !== SUFFIX && !suffix.endsWith(`.${SUFFIX}`)) return null
 
   return `https://${organizationId}.mcp.${suffix}/`
+}
+
+/**
+ * True when a stored `mcpUrl` matches the legacy (pre-fix) derivation, which
+ * rebuilt the MCP host from consoleUrl's hostname label:
+ * `https://<alias>.mcp.saas.nodesource.io/`. That route is dead for aliased
+ * consoles, so such values must be re-derived from the org UUID. Genuine
+ * custom overrides (anything that is not an exact legacy derivation) are
+ * preserved. A value whose label already equals the org id is the correct
+ * route and is NOT flagged.
+ */
+export function isLegacyAliasMcpUrl (mcpUrl: string, consoleUrl: string, organizationId: string): boolean {
+  let consoleHost: string
+  let storedHost: string
+  try {
+    consoleHost = new URL(consoleUrl).hostname
+    storedHost = new URL(mcpUrl).hostname
+  } catch {
+    return false
+  }
+
+  const labels = consoleHost.split('.')
+  if (labels[0] === organizationId) return false
+  if (!consoleHost.endsWith(`.${SUFFIX}`)) return false
+
+  const legacyHost = consoleHost.replace(/\.saas\.nodesource\.io$/, '.mcp.saas.nodesource.io')
+  return storedHost === legacyHost
+}
+
+/**
+ * Resolve the MCP endpoint to use for stored credentials. Prefers an explicit
+ * stored `mcpUrl` (a genuine custom override), but migrates values that match
+ * the legacy alias-based derivation to the org-UUID route. Falls back to
+ * deriving from consoleUrl + organizationId.
+ */
+export function resolveMcpUrl (credentials: Pick<Credentials, 'mcpUrl' | 'consoleUrl' | 'organizationId'>): string | null {
+  if (credentials.mcpUrl && !isLegacyAliasMcpUrl(credentials.mcpUrl, credentials.consoleUrl, credentials.organizationId)) {
+    return credentials.mcpUrl
+  }
+  return deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
 }

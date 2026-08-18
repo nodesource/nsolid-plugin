@@ -33,8 +33,8 @@ when the account belongs to more than one). Then run, using an extended
 command timeout of **at least 300000ms** (the CLI's own OAuth wait window is
 5 minutes):
 
-```
-npx -y nsolid-plugin switch-org --harness <harness>
+```sh
+npx -y nsolid-plugin@1.0.3 switch-org --harness <harness>
 ```
 
 No `--yes` or other interactive flags are needed — the CLI detects it is not

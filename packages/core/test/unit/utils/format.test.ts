@@ -347,6 +347,24 @@ describe('buildSwitchOrgOutcome', () => {
     assert.strictEqual(outcome.warning, null)
   })
 
+  it('treats missing auth as a switch failure even when other steps succeed', async () => {
+    const { buildSwitchOrgOutcome } = await import('../../../src/utils/format.js')
+    const outcome = buildSwitchOrgOutcome({
+      success: true,
+      authSucceeded: false,
+      errors: [],
+      previousOrg: 'org-original',
+      harness: 'claude',
+      harnessLabel: 'Claude Code',
+      isPluginOwned: true,
+    })
+
+    assert.strictEqual(outcome.kind, 'auth-failed')
+    assert.strictEqual(outcome.exitCode, 1, 'a bundle without auth never switches the org, so it must not exit 0')
+    assert.ok(outcome.errorHeader?.includes('Switch organization failed for claude'))
+    assert.match(outcome.stateLine, /\(unknown\)/, 'no org id exists to report when OAuth never ran')
+  })
+
   it('reports a partial success (nonzero exit, org switched, retry guidance) when the post-auth config refresh fails', async () => {
     const { buildSwitchOrgOutcome } = await import('../../../src/utils/format.js')
     const outcome = buildSwitchOrgOutcome({

@@ -19,7 +19,7 @@ import type {
 } from './types.js'
 import { validateBundle } from './validate.js'
 import { ensureAuthenticated, loadCredentials, isExpired, removeCredentials } from './auth/index.js'
-import { deriveMcpUrlFromConsoleUrl } from './auth/mcp-url.js'
+import { resolveMcpUrl } from './auth/mcp-url.js'
 import { installSkills, installSkillsToDirectory, uninstallSkills, SkillCopyError } from './skills/skill-copier.js'
 import { linkSkillsToHarness, unlinkSkillsFromHarness } from './skills/skill-linker.js'
 import {
@@ -317,9 +317,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   if (credentials && canConfigureMcp) {
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
-    const derivedMcpUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
-    const explicitMcpUrl = credentials.mcpUrl || undefined
-    const mcpUrl = explicitMcpUrl ?? derivedMcpUrl
+    const mcpUrl = resolveMcpUrl(credentials)
     if (!mcpUrl) {
       result.errors.push('Could not derive MCP URL from console URL pattern')
       return result
