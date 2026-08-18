@@ -1,6 +1,6 @@
 {
   "name": "nsolid-plugin",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "NodeSource AI skills for N|Solid performance and security",
   "skills": [
     {

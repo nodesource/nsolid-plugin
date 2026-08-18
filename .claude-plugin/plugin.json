@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "nsolid-plugin",
   "displayName": "N|Solid Plugin",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "N|Solid performance & security skills + MCP servers",
   "author": {
     "name": "NodeSource"
