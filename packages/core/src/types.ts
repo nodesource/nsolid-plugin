@@ -2,6 +2,21 @@ export const HARNESS_VALUES = ['claude', 'codex', 'opencode', 'antigravity', 'pi
 
 export type HarnessType = (typeof HARNESS_VALUES)[number]
 
+/**
+ * Harnesses whose installs are owned by the harness's native plugin
+ * mechanism — the plugin ships skills and MCP config itself, so the CLI
+ * skips its tracking-file install for them.
+ */
+export const PLUGIN_OWNED_HARNESSES: ReadonlySet<HarnessType> = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
+
+/**
+ * Harnesses that install the nsolid plugin/package natively (owning skills and
+ * MCP config themselves) rather than via the shared CLI tracking file. The
+ * doctor probes each via `adapter.detectNativePlugin()`. Superset of
+ * {@link PLUGIN_OWNED_HARNESSES} plus the package-owned Pi harness.
+ */
+export const NATIVE_PLUGIN_HARNESSES: ReadonlySet<HarnessType> = new Set<HarnessType>(['claude', 'codex', 'antigravity', 'pi'])
+
 export interface SkillRef {
   name: string;
   path: string;

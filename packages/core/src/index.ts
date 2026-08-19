@@ -17,6 +17,7 @@ import type {
   Credentials,
   Logger,
 } from './types.js'
+import { PLUGIN_OWNED_HARNESSES, NATIVE_PLUGIN_HARNESSES } from './types.js'
 import { validateBundle } from './validate.js'
 import { ensureAuthenticated, loadCredentials, isExpired, removeCredentials } from './auth/index.js'
 import { deriveMcpUrlFromConsoleUrl } from './auth/mcp-url.js'
@@ -48,14 +49,6 @@ import { restoreConfigBackup, type BackupEntry } from './utils/backup.js'
 import { toPluginError } from './errors.js'
 
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
-const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
-/**
- * Harnesses that install the nsolid plugin/package natively (owning skills and
- * MCP config themselves) rather than via the shared CLI tracking file. The
- * doctor probes each via `adapter.detectNativePlugin()`. Superset of
- * {@link PLUGIN_OWNED_HARNESSES} plus the package-owned Pi harness.
- */
-const NATIVE_PLUGIN_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity', 'pi'])
 
 function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedSkills?: boolean }): string {
   if (options.packageOwnedSkills === true) {

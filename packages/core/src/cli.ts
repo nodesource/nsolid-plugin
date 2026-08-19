@@ -7,12 +7,11 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { install, setup, uninstall, logout, doctor, restore } from './index.js'
 import type { AuthConfirmation, HarnessType } from './types.js'
-import { HARNESS_VALUES } from './types.js'
+import { HARNESS_VALUES, PLUGIN_OWNED_HARNESSES } from './types.js'
 import { formatPluginError } from './errors.js'
 import { listConfigBackups } from './utils/backup.js'
 import { C, supportsColor } from './utils/format.js'
 import { createConsoleProgress, silentProgress } from './utils/progress.js'
-const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set<HarnessType>(['pi'])
 const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set<HarnessType>(['opencode'])
 
