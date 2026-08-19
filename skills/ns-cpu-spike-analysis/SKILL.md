@@ -140,6 +140,7 @@ description: >-
 - NEVER ask for capture approval on a telemetry alert unless the user explicitly requested read-only/offline behavior.
 - NEVER call discovery tools only to restate the same app and spike value the user already provided; continue to the target-agent selection and profile.
 - ALWAYS wait via the bundled `wait.cjs` script, never `setTimeout`/`sleep` or an estimate. Download assets via the bundled `fetch-asset.cjs` (do not use direct HTTP calls or curl). The only other shell helper allowed by this skill is the bundled same-directory `workspace-delta.cjs`.
+- Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.
 - NEVER paste the entire `runtime-code` response when only part of it is relevant. Keep the report focused on the code that explains the problem and proposed fix.
 - NEVER fetch or present dependency or Node-internal source as the code to optimize. Treat those frames as evidence, then explain the nearest relevant user-owned caller instead.
 - If you do not wait long enough with `wait.cjs`, `asset-summary` may still report that the profile asset is not ready.

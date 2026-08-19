@@ -27,6 +27,8 @@ const os = require('os')
 const path = require('path')
 const dns = require('dns').promises
 const net = require('net')
+const { pipeline } = require('stream/promises')
+const { Readable } = require('stream')
 
 const EXTENSIONS = {
   cpuprofile: '.cpuprofile',
@@ -352,7 +354,7 @@ async function readCredentials () {
   return { consoleUrl: consoleUrl.replace(/\/$/, ''), token }
 }
 
-async function fetchAsset (consoleUrl, token, assetId) {
+async function downloadAsset (consoleUrl, token, assetId, destPath) {
   const url = `${consoleUrl}/api/v3/asset/${encodeURIComponent(assetId)}`
   console.log(`Fetching asset from: ${url}`)
 
@@ -361,14 +363,19 @@ async function fetchAsset (consoleUrl, token, assetId) {
       'x-nsolid-service-token': token,
       Accept: 'application/json'
     },
-    signal: AbortSignal.timeout(120_000)
+    // 10-minute total budget: large snapshots (>256MB) over slow links
+    // must not abort at 120s mid-body.
+    signal: AbortSignal.timeout(600_000)
   })
 
   if (!res.ok) {
     throw new Error(`Console returned ${res.status} ${res.statusText} for asset ${assetId}`)
   }
 
-  return await res.text()
+  // Stream body straight to disk — constant memory regardless of asset size.
+  // Node's fetch transparently decompresses Content-Encoding: gzip.
+  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(destPath))
+  return fs.statSync(destPath).size
 }
 
 async function main () {
@@ -398,9 +405,7 @@ async function main () {
   if (existingAsset.exists) {
     fileSize = fs.statSync(existingAsset.filePath).size
   } else {
-    const data = await fetchAsset(consoleUrl, token, assetId)
-    fs.writeFileSync(existingAsset.filePath, data, 'utf-8')
-    fileSize = Buffer.byteLength(data)
+    fileSize = await downloadAsset(consoleUrl, token, assetId, existingAsset.filePath)
   }
 
   // Register in .nsolid/assets/index.json so the extension's AssetService can discover it
@@ -433,4 +438,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { isPrivateOrLocalIp, resolveHostnameIps, validateConsoleUrl, readCredentials, fetchAsset }
+module.exports = { isPrivateOrLocalIp, resolveHostnameIps, validateConsoleUrl, readCredentials, downloadAsset }

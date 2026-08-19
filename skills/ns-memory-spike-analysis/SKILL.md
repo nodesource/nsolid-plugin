@@ -82,3 +82,4 @@ Run the bundled wait script (use the absolute path of the directory where you re
 - Do not turn a user-supplied asset review into a fresh capture workflow unless the user asked for that or approved it.
 - Prioritize `heap-sampling` over `snapshot` to minimize production impact.
 - After a successful `asset-summary`, analyze that summary instead of falling back to a generic telemetry-only conclusion.
+- Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.

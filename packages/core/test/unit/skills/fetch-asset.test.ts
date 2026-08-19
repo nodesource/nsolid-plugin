@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { promises as dns } from 'node:dns'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import type { TestContext } from 'node:test'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -31,6 +33,7 @@ async function loadFetchAsset () {
     isPrivateOrLocalIp: (ip: string) => boolean
     resolveHostnameIps: (hostname: string) => Promise<string[]>
     validateConsoleUrl: (consoleUrl: string) => Promise<void>
+    downloadAsset: (consoleUrl: string, token: string, assetId: string, destPath: string) => Promise<number>
   }
 }
 
@@ -245,5 +248,67 @@ describe('validateConsoleUrl', () => {
       () => validateConsoleUrl('not-a-url'),
       /Invalid consoleUrl/
     )
+  })
+})
+
+describe('downloadAsset', () => {
+  let tempDir: string
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'fetch-asset-download-'))
+  })
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('streams the asset body to disk and returns the file size', async (t) => {
+    const payload = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    const calls: Array<{ url: string, headers: Record<string, string> }> = []
+    t.mock.method(globalThis, 'fetch', (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> })
+      return new Response(payload)
+    }) as typeof fetch)
+
+    const { downloadAsset } = await loadFetchAsset()
+    const destPath = join(tempDir, 'heapsnapshot-test.heapsnapshot')
+
+    const size = await downloadAsset('https://console.example.test', 'secret-token', 'asset-id-1', destPath)
+
+    const stats = await stat(destPath)
+    assert.equal(size, stats.size, 'returns the on-disk file size')
+    assert.equal(size, payload.byteLength)
+    assert.deepEqual(await readFile(destPath), Buffer.from(payload), 'file bytes match the response body')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, 'https://console.example.test/api/v3/asset/asset-id-1')
+    assert.equal(calls[0].headers['x-nsolid-service-token'], 'secret-token')
+    assert.equal(calls[0].headers.Accept, 'application/json')
+  })
+
+  it('URL-encodes the asset ID in the request path', async (t) => {
+    const urls: string[] = []
+    t.mock.method(globalThis, 'fetch', (async (input: RequestInfo | URL) => {
+      urls.push(String(input))
+      return new Response(new Uint8Array([1, 2, 3]))
+    }) as typeof fetch)
+
+    const { downloadAsset } = await loadFetchAsset()
+    await downloadAsset('https://console.example.test', 'token', 'id/with space', join(tempDir, 'a.heapsnapshot'))
+
+    assert.equal(urls[0], 'https://console.example.test/api/v3/asset/id%2Fwith%20space')
+  })
+
+  it('throws on non-ok responses without creating a file', async (t) => {
+    t.mock.method(globalThis, 'fetch', (async () => {
+      return new Response('not found', { status: 404, statusText: 'Not Found' })
+    }) as typeof fetch)
+
+    const { downloadAsset } = await loadFetchAsset()
+    const destPath = join(tempDir, 'missing.heapsnapshot')
+    await assert.rejects(
+      () => downloadAsset('https://console.example.test', 'token', 'missing-id', destPath),
+      /404 Not Found for asset missing-id/
+    )
+    await assert.rejects(() => stat(destPath), /ENOENT/)
   })
 })

@@ -62,4 +62,5 @@ Run the bundled wait script (use the absolute path of the directory where you re
 ## Guardrails
 - Do not use `runtime-code` or `workspace_delta`.
 - Waits and downloads use the bundled `wait.cjs` and `fetch-asset.cjs` scripts in this skill's directory. Do not use direct HTTP calls, `curl`, or ad hoc shell commands.
+- Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.
 - Do not use `assets-in-progress` as the first readiness check for CPU profiles or heap samples.

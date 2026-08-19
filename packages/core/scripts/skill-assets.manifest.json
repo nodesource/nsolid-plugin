@@ -12,6 +12,7 @@
     "ns-advanced-memory-leak-hunter",
     "ns-analyze-asset",
     "ns-cpu-spike-analysis",
+    "ns-download-asset",
     "ns-generate-asset",
     "ns-memory-spike-analysis"
   ]

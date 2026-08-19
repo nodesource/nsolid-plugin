@@ -101,3 +101,4 @@ description: >-
 - **No early assumptions**: Never declare a memory leak from a single snapshot. Always compare baseline to peak.
 - **Reuse what exists**: Do not capture a new baseline or peak sample if the user already supplied the needed assets.
 - **Wait times**: Memory tools block the thread. Do not spam endpoints while an asset is in progress.
+- Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.

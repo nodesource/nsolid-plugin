@@ -127,3 +127,4 @@ Rules:
 ## Guardrails
 - Never analyze a heap snapshot that is still marked as processing or pending. Poll and wait until `asset-summary` returns the actual summarized content.
 - Do not lie about findings. If the asset summary lacks detail, say so explicitly.
+- Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.

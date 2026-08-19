@@ -52,6 +52,12 @@
       "requiresMcp": ["nsolid-console"]
     },
     {
+      "name": "ns-download-asset",
+      "path": "skills/ns-download-asset",
+      "description": "Download a raw N|Solid diagnostic asset (heap snapshot, CPU profile, heap profile) to local disk",
+      "requiresMcp": ["nsolid-console"]
+    },
+    {
       "name": "ns-generate-asset",
       "path": "skills/ns-generate-asset",
       "description": "Generate N|Solid diagnostics assets from production processes",

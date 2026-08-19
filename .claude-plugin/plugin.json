@@ -19,6 +19,7 @@
     "./skills/ns-audit-dependencies",
     "./skills/ns-benchmark-run",
     "./skills/ns-cpu-spike-analysis",
+    "./skills/ns-download-asset",
     "./skills/ns-generate-asset",
     "./skills/ns-generate-sbom",
     "./skills/ns-memory-spike-analysis",
