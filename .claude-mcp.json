@@ -4,21 +4,24 @@
       "command": "node",
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js",
-        "nsolid-console"
+        "nsolid-console",
+        "claude"
       ]
     },
     "ns-benchmark": {
       "command": "node",
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js",
-        "ns-benchmark"
+        "ns-benchmark",
+        "claude"
       ]
     },
     "ncm": {
       "command": "node",
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js",
-        "ncm"
+        "ncm",
+        "claude"
       ]
     }
   }

@@ -131,5 +131,22 @@ export interface DoctorReport {
   skills: { status: 'ok' | 'partial' | 'missing' | 'unknown'; installed: string[]; missing: string[] };
   /** `unknown` when the bundle could not be loaded — the listed `reachable`/`unreachable` arrays are not meaningful. */
   mcpServers: { status: 'ok' | 'partial' | 'unreachable' | 'unknown'; reachable: string[]; unreachable: string[] };
+  /**
+   * Shared MCP bridge (`mcp-remote`) runtime status. Optional for backward
+   * compatibility with older JSON consumers. `required` is true only when
+   * this harness's MCP servers are actually served through the generated
+   * wrapper (native plugin installed for claude/codex/antigravity); for
+   * opencode/pi and direct (native-HTTP) installs the entry is
+   * informational and never affects `healthy`.
+   */
+  bridge?: {
+    status: 'ready' | 'missing' | 'invalid';
+    /** Pinned mcp-remote version this plugin expects. */
+    version: string;
+    root: string;
+    proxyPath?: string;
+    reason?: string;
+    required: boolean;
+  };
   errors: string[];
 }

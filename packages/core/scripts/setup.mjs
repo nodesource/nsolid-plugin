@@ -62,11 +62,11 @@ try {
       process.exit(1)
     }
     if (PLUGIN_OWNED_HARNESSES.has(harness)) {
-      console.log(`N|Solid Plugin credentials ready for ${harness}`)
+      console.log(`N|Solid Plugin credentials and MCP bridge ready for ${harness}`)
     } else if (PACKAGE_OWNED_SKILL_HARNESSES.has(harness)) {
-      console.log(`N|Solid Plugin MCP/auth configured for ${harness}; skills are package-owned`)
+      console.log(`N|Solid Plugin credentials, MCP bridge, and MCP/auth configured for ${harness}; skills are package-owned`)
     } else {
-      console.log(`N|Solid Plugin skills installed for ${harness}: ${res.skillsInstalled} skills`)
+      console.log(`N|Solid Plugin credentials, MCP bridge, and skills ready for ${harness}: ${res.skillsInstalled} skills`)
     }
   }
 } catch (err) {

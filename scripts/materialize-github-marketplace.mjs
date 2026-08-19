@@ -150,11 +150,9 @@ function validateCanonicalSkills () {
 }
 
 function generateSharedWrapper () {
+  // The wrapper receives the harness as an explicit argument, so a single
+  // generated artifact serves Claude, Codex, and Antigravity unchanged.
   return generateClaudeWrapper()
-    .replace(
-      "const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness claude'",
-      "const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness <claude|codex|opencode|antigravity|pi>'"
-    )
 }
 
 function writeFiles (files) {

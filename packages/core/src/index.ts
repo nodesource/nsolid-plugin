@@ -33,6 +33,8 @@ import {
   addTrackedMcps,
   removeTrackedMcps,
   listTrackedMcps,
+  ensureMcpRemoteRuntime,
+  inspectMcpRemoteRuntime,
 } from './mcp/index.js'
 import { getAdapter } from './harnesses/index.js'
 import type { HarnessAdapter } from './harnesses/index.js'
@@ -177,10 +179,33 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     }
   }
 
+  // Provision the shared MCP bridge runtime (mcp-remote) for every harness:
+  // harness startup must never invoke npm/npx. The first run needs network;
+  // once a valid runtime exists this is an offline no-op. Credentials may
+  // already be stored at this point — a runtime failure must finish with
+  // success:false (they remain valid for a retry of this same command).
+  try {
+    const runtime = await ensureMcpRemoteRuntime()
+    progress.step(
+      'Preparing MCP bridge runtime',
+      runtime.installed ? `installed mcp-remote ${runtime.version}` : 'already ready'
+    )
+    logger.info('setup.mcpRuntime.ready', {
+      installed: runtime.installed,
+      version: runtime.version,
+      root: runtime.root,
+    })
+  } catch (err) {
+    result.errors.push(`MCP runtime setup failed: ${(err as Error).message}`)
+    logger.error('setup.mcpRuntime.failed', { message: (err as Error).message })
+    return result
+  }
+
   // For CLI-only/package-owned harnesses, setup also performs the direct
   // fallback install/MCP config so that `nsolid-plugin setup` is a one-step
   // onboarding path. Package-owned harnesses can opt out of user-level skill
-  // copies via packageOwnedSkills while still receiving MCP config.
+  // copies via packageOwnedSkills while still receiving MCP config. The
+  // runtime is already ready at this point (guard above).
   if (!PLUGIN_OWNED_HARNESSES.has(options.harness)) {
     const installResult = await install({
       ...options,
@@ -191,13 +216,13 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     result.errors.push(...installResult.errors)
     result.success = installResult.success
     if (result.success) {
-      progress.done(`Setup complete — credentials ready for ${options.harness}`)
+      progress.done(`Setup complete — credentials and MCP bridge ready for ${options.harness}`)
     }
     return result
   }
 
   result.success = true
-  progress.done(`Setup complete — credentials ready for ${options.harness} plugin MCPs`)
+  progress.done(`Setup complete — credentials and MCP bridge ready for ${options.harness} plugin MCPs`)
   return result
 }
 
@@ -653,6 +678,28 @@ export async function doctor (
     }
   }
 
+  // Shared MCP bridge (mcp-remote) runtime. Required only when this
+  // harness's MCP servers are actually served through the generated wrapper
+  // (native plugin installed for claude/codex/antigravity). For native-HTTP
+  // transports (opencode, pi, and direct/fallback installs) the line is
+  // informational: a ready proxy says nothing about remote endpoint health,
+  // and a missing one does not break those configurations.
+  const bridge = inspectMcpRemoteRuntime()
+  const bridgeRequired = nativeOwned && PLUGIN_OWNED_HARNESSES.has(harness)
+  report.bridge = {
+    status: bridge.status,
+    version: bridge.version,
+    root: bridge.root,
+    ...(bridge.proxyPath !== undefined ? { proxyPath: bridge.proxyPath } : {}),
+    ...(bridge.reason !== undefined ? { reason: bridge.reason } : {}),
+    required: bridgeRequired,
+  }
+  if (bridgeRequired && bridge.status !== 'ready') {
+    report.errors.push(
+      `MCP bridge runtime is ${bridge.status}${bridge.reason ? ` (${bridge.reason})` : ''}. Run: nsolid-plugin setup --harness ${harness}`
+    )
+  }
+
   if (!bundle) {
     report.skills.status = 'unknown'
     report.mcpServers.status = 'unknown'
@@ -742,6 +789,7 @@ export async function doctor (
     report.credentials.status === 'ok' &&
     report.skills.status === 'ok' &&
     report.mcpServers.status === 'ok' &&
+    (report.bridge?.required !== true || report.bridge.status === 'ready') &&
     report.errors.length === 0
 
   logger.info('doctor.finish', { healthy: report.healthy })

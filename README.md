@@ -43,9 +43,9 @@ Skills are canonical in the repository-root `skills/` directory. The repo root i
 
 | Harness | Skill owner | Installer responsibility |
 |---|---|---|
-| **Claude** | Root plugin | Native marketplace/plugin install; `setup` for auth |
-| **Codex** | Root plugin | Native marketplace/plugin install; `setup` for auth |
-| **Antigravity** | Root plugin | `agy plugin install <repo-url>`; `setup` for auth |
+| **Claude** | Root plugin | Native marketplace/plugin install; `setup` for auth + bridge |
+| **Codex** | Root plugin | Native marketplace/plugin install; `setup` for auth + bridge |
+| **Antigravity** | Root plugin | `agy plugin install <repo-url>`; `setup` for auth + bridge |
 | **Pi** | Pi npm package (`pi.skills`) | Pi package owns skills; `setup` writes auth/MCP config |
 | **OpenCode** | CLI direct install | `setup` authenticates; `install` copies skills and writes MCP config |
 
@@ -60,15 +60,16 @@ nsolid-plugin setup --harness <harness>
 
 On setup:
 
-1. Your browser opens `accounts.nodesource.com/sign-in` for login.
+1. Your browser opens `accounts.nodesource.com/sign-in` for login (only if credentials are missing or expired).
 2. A local HTTP server starts on port **8765** (fallback: 8766–8770) to receive the callback.
 3. The OAuth callback provides a `serviceToken`, `consoleId`, `saasToken`, and `consoleUrl`.
 4. An `mcpUrl` is derived from the callback's `consoleId` (or via string transform from `consoleUrl`).
 5. Credentials are stored at `~/.agents/.nodesource-auth.json` with mode `0600`.
+6. The shared **MCP bridge runtime** (`mcp-remote`, exact pinned version) is provisioned at `~/.agents/nsolid-plugin/runtime/mcp-remote/<version>/` so MCP servers start without touching npm. The first `setup` needs network access for this one-time npm install; subsequent runs detect the valid runtime and skip npm entirely.
 
 **What is stored:** `serviceToken`, `organizationId`, `saasToken`, `consoleUrl`, `mcpUrl`, `expiresAt`, `permissions`, and the `accountsUrl` auth origin used to mint/validate the token.
 
-**Token lifecycle:** Expired credentials trigger re-authentication during explicit setup/login. Runtime MCP wrappers fail with an actionable `Run: nsolid-plugin setup --harness <harness>` message if credentials are missing or expired. Credentials are shared across harnesses.
+**Token lifecycle:** Expired credentials trigger re-authentication during explicit setup/login. Runtime MCP wrappers fail with an actionable `Run: npx -y nsolid-plugin setup --harness <harness>` message if credentials are missing/expired **or the MCP bridge runtime is missing/corrupt**. Credentials are shared across harnesses.
 
 **`mcpUrl` derivation:** Two paths exist:
 1. **Primary (at OAuth time):** Built from the callback's `consoleId` as `https://<consoleId>.mcp.saas.nodesource.io` and stored on the credentials.
@@ -91,7 +92,7 @@ npx -y nsolid-plugin setup --harness <harness>
 npx -y nsolid-plugin install --harness <harness>
 ```
 
-The setup step requires a NodeSource account and writes shared credentials to `~/.agents/.nodesource-auth.json`. The install step is needed only for direct CLI installs such as OpenCode or fallback/repair installs.
+The setup step requires a NodeSource account and writes shared credentials to `~/.agents/.nodesource-auth.json`; it also prepares the shared MCP bridge runtime used by the Claude/Codex/Antigravity wrappers (first run downloads it via npm, later runs are offline and idempotent). The install step is needed only for direct CLI installs such as OpenCode or fallback/repair installs.
 
 ### Direct CLI install
 
@@ -227,7 +228,17 @@ nsolid-plugin doctor --harness <harness>
 nsolid-plugin doctor --harness <harness> --json    # machine-readable
 ```
 
-The output shows green/yellow/red status for credentials, skills, and MCP servers.
+The output shows green/yellow/red status for credentials, skills, MCP servers, and the MCP bridge runtime. For harnesses whose MCP servers run through the plugin wrapper (native plugin installed for Claude/Codex/Antigravity), a missing or corrupt bridge makes the report unhealthy; for OpenCode/Pi the bridge line is informational.
+
+### MCP bridge runtime missing or corrupt
+
+Wrapper message:
+
+```text
+[nsolid-plugin] MCP bridge runtime is not ready. Run: npx -y nsolid-plugin setup --harness <harness>
+```
+
+Fix: run the suggested `setup` command once. This is different from an expired token (`credentials are expired`): the bridge runtime lives at `~/.agents/nsolid-plugin/runtime/mcp-remote/<version>/` and survives `uninstall`/`logout`. If `setup` itself reports `MCP runtime setup failed`, npm could not install the runtime (network/registry) — stored credentials remain valid, fix network access and rerun the same command. MCP wrappers never download dependencies during harness startup; there is intentionally no `npx` fallback.
 
 ### Permission denied writing config
 

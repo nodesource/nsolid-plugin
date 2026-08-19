@@ -55,7 +55,7 @@ function printUsage (): void {
   console.log(`Usage: nsolid-plugin <command> [options]
 
 Commands:
-  setup      Authenticate with NodeSource (may open a browser)
+  setup      Authenticate with NodeSource and prepare the MCP bridge runtime (may open a browser; first run needs npm access)
   install    Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; does not open a browser)
   uninstall  Remove N|Solid Plugin skills for a harness
   logout     Forget your stored NodeSource login (removes credentials only)
@@ -312,7 +312,7 @@ async function main (): Promise<void> {
         }
 
         const verb = result.hadToAuthenticate ? 'Authenticated' : 'Credentials ready'
-        console.log(`${paint.green('✓')} ${HARNESS_LABELS[setupHarness]} — ${verb}.`)
+        console.log(`${paint.green('✓')} ${HARNESS_LABELS[setupHarness]} — ${verb}; MCP bridge ready.`)
       }
 
       if (failures > 0) process.exit(1)

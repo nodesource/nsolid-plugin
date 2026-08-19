@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
-import { join, sep } from 'node:path'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+import { dirname, join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { BundleDescriptor } from '../../src/types.js'
 import type { ProgressReporter } from '../../src/utils/progress.js'
@@ -12,6 +12,7 @@ let originalHome: string | undefined
 let originalUserProfile: string | undefined
 let originalProgressEnv: string | undefined
 let originalFetch: typeof globalThis.fetch
+let originalNpmExecpath: string | undefined
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-installer-'))
@@ -19,9 +20,11 @@ beforeEach(() => {
   originalUserProfile = process.env.USERPROFILE
   originalProgressEnv = process.env.NSOLID_PLUGIN_PROGRESS
   originalFetch = globalThis.fetch
+  originalNpmExecpath = process.env.npm_execpath
   process.env.HOME = tmpDir
   process.env.USERPROFILE = tmpDir
   delete process.env.NSOLID_PLUGIN_PROGRESS
+  delete process.env.npm_execpath
 })
 
 afterEach(() => {
@@ -40,6 +43,11 @@ afterEach(() => {
     process.env.NSOLID_PLUGIN_PROGRESS = originalProgressEnv
   } else {
     delete process.env.NSOLID_PLUGIN_PROGRESS
+  }
+  if (originalNpmExecpath !== undefined) {
+    process.env.npm_execpath = originalNpmExecpath
+  } else {
+    delete process.env.npm_execpath
   }
   globalThis.fetch = originalFetch
 })
@@ -95,6 +103,63 @@ function seedCredentials (overrides: Partial<{
   }))
 }
 
+/** Path of the shared MCP bridge runtime under the test HOME. */
+function mcpRuntimeRoot (): string {
+  return join(tmpDir, '.agents', 'nsolid-plugin', 'runtime', 'mcp-remote', '0.1.38')
+}
+
+/** Seed a valid shared MCP bridge runtime so setup() finds it ready (no npm). */
+function seedMcpRemoteRuntime (): void {
+  const mcpRemoteDir = join(mcpRuntimeRoot(), 'node_modules', 'mcp-remote')
+  mkdirSync(join(mcpRemoteDir, 'dist'), { recursive: true })
+  writeFileSync(join(mcpRemoteDir, 'package.json'), JSON.stringify({
+    name: 'mcp-remote',
+    version: '0.1.38',
+    dependencies: {},
+  }))
+  writeFileSync(join(mcpRemoteDir, 'dist', 'proxy.js'), '// proxy\n')
+}
+
+const OK_FETCH = (async () => ({
+  ok: true,
+  status: 200,
+  headers: new Headers({ 'content-type': 'application/json' }),
+  json: async () => ({ permissions: [] }),
+})) as unknown as typeof fetch
+
+const SILENT_PROGRESS: ProgressReporter = {
+  header: () => {},
+  step: () => {},
+  done: () => {},
+  warn: () => {},
+}
+
+/**
+ * Point npm_execpath at a fake npm executed by the real runner (no network).
+ * The fake must sit at a path `isNpmEntryPoint()` accepts — an npm-cli-style
+ * basename under a `node_modules/npm` layout, mirroring the canonical npm
+ * location — otherwise resolution falls through to the real npm. Each call
+ * rewrites the same canonical file (fail first, then ok on retry).
+ */
+function fakeNpmExecpath (behavior: 'ok' | 'fail'): string {
+  const script = join(tmpDir, 'node_modules', 'npm', 'bin', 'npm-cli.mjs')
+  mkdirSync(dirname(script), { recursive: true })
+  if (behavior === 'fail') {
+    writeFileSync(script, "console.error('simulated npm failure')\nprocess.exit(1)\n")
+  } else {
+    writeFileSync(script, [
+      "import { mkdirSync, writeFileSync } from 'node:fs'",
+      "import path from 'node:path'",
+      'const cwd = process.cwd()',
+      "mkdirSync(path.join(cwd, 'node_modules', 'mcp-remote', 'dist'), { recursive: true })",
+      "writeFileSync(path.join(cwd, 'node_modules', 'mcp-remote', 'package.json'), JSON.stringify({ name: 'mcp-remote', version: '0.1.38', dependencies: {} }))",
+      "writeFileSync(path.join(cwd, 'node_modules', 'mcp-remote', 'dist', 'proxy.js'), '// proxy')",
+      'process.exit(0)',
+    ].join('\n'))
+  }
+  return script
+}
+
 describe('install()', () => {
   it('copies skills, links, and tracks on happy path', async () => {
     const { install } = await import('../../src/index.js')
@@ -133,18 +198,9 @@ describe('install()', () => {
     const bundlePath = writeBundle(bundle)
     const skillsSource = createSkillSource('ns-test-skill')
     seedCredentials()
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: [] }),
-    })) as unknown as typeof fetch
-    const progress: ProgressReporter = {
-      header: () => {},
-      step: () => {},
-      done: () => {},
-      warn: () => {},
-    }
+    seedMcpRemoteRuntime()
+    globalThis.fetch = OK_FETCH
+    const progress = SILENT_PROGRESS
 
     const result = await setup({ harness: 'claude', bundlePath, skillsSource, progress })
 
@@ -167,18 +223,9 @@ describe('install()', () => {
     const bundlePath = writeBundle(bundle)
     const skillsSource = createSkillSource('ns-test-skill')
     seedCredentials()
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: [] }),
-    })) as unknown as typeof fetch
-    const progress: ProgressReporter = {
-      header: () => {},
-      step: () => {},
-      done: () => {},
-      warn: () => {},
-    }
+    seedMcpRemoteRuntime()
+    globalThis.fetch = OK_FETCH
+    const progress = SILENT_PROGRESS
 
     const result = await setup({ harness: 'antigravity', bundlePath, skillsSource, progress })
 
@@ -201,18 +248,9 @@ describe('install()', () => {
     const bundlePath = writeBundle(bundle)
     const skillsSource = createSkillSource('ns-test-skill')
     seedCredentials()
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: [] }),
-    })) as unknown as typeof fetch
-    const progress: ProgressReporter = {
-      header: () => {},
-      step: () => {},
-      done: () => {},
-      warn: () => {},
-    }
+    seedMcpRemoteRuntime()
+    globalThis.fetch = OK_FETCH
+    const progress = SILENT_PROGRESS
 
     const result = await setup({ harness: 'codex', bundlePath, skillsSource, progress })
 
@@ -236,18 +274,9 @@ describe('install()', () => {
     const bundlePath = writeBundle(bundle)
     const skillsSource = createSkillSource('ns-test-skill')
     seedCredentials()
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ 'content-type': 'application/json' }),
-      json: async () => ({ permissions: [] }),
-    })) as unknown as typeof fetch
-    const progress: ProgressReporter = {
-      header: () => {},
-      step: () => {},
-      done: () => {},
-      warn: () => {},
-    }
+    seedMcpRemoteRuntime()
+    globalThis.fetch = OK_FETCH
+    const progress = SILENT_PROGRESS
 
     const result = await setup({ harness: 'pi', bundlePath, skillsSource, progress, packageOwnedSkills: true })
 
@@ -260,6 +289,110 @@ describe('install()', () => {
     const piServer = (piConfig?.mcpServers as Record<string, { auth?: boolean }> | undefined)?.['ns-test-mcp']
     assert.ok(piServer)
     assert.strictEqual(piServer.auth, false)
+  })
+
+  it('setup installs the MCP bridge runtime on first run and is offline-safe afterwards', async () => {
+    const { setup } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: { type: 'oauth', provider: 'nodesource', accountsUrl: 'https://accounts.nodesource.com' },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    globalThis.fetch = OK_FETCH
+    process.env.npm_execpath = fakeNpmExecpath('ok')
+
+    const result = await setup({ harness: 'claude', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(existsSync(join(mcpRuntimeRoot(), 'node_modules', 'mcp-remote', 'dist', 'proxy.js')), true)
+    assert.strictEqual(result.hadToAuthenticate, false, 'valid credentials: no browser')
+
+    // Second run: the runtime is ready, so npm must not be invoked again —
+    // point npm_execpath at a failing fake to prove it is never called.
+    process.env.npm_execpath = fakeNpmExecpath('fail')
+    const second = await setup({ harness: 'claude', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+    assert.strictEqual(second.success, true, 'idempotent rerun must not need npm')
+  })
+
+  it('setup fails without npm but keeps credentials valid and is retryable', async () => {
+    const { setup } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: { type: 'oauth', provider: 'nodesource', accountsUrl: 'https://accounts.nodesource.com' },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    globalThis.fetch = OK_FETCH
+    process.env.npm_execpath = fakeNpmExecpath('fail')
+
+    const failed = await setup({ harness: 'codex', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+
+    assert.strictEqual(failed.success, false)
+    assert.strictEqual(failed.errors.length, 1)
+    assert.match(failed.errors[0], /MCP runtime setup failed/)
+    // Credentials survive for the retry.
+    assert.strictEqual(existsSync(join(tmpDir, '.agents', '.nodesource-auth.json')), true)
+    assert.strictEqual(existsSync(mcpRuntimeRoot()), false, 'nothing published')
+
+    // Retry with a working npm completes.
+    process.env.npm_execpath = fakeNpmExecpath('ok')
+    const retried = await setup({ harness: 'codex', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+    assert.strictEqual(retried.success, true)
+    assert.strictEqual(existsSync(join(mcpRuntimeRoot(), 'node_modules', 'mcp-remote')), true)
+  })
+
+  it('setup for all five harnesses converges on the same shared runtime', async () => {
+    const { setup } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: { type: 'oauth', provider: 'nodesource', accountsUrl: 'https://accounts.nodesource.com' },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    globalThis.fetch = OK_FETCH
+    process.env.npm_execpath = fakeNpmExecpath('ok')
+
+    for (const harness of ['claude', 'codex', 'antigravity', 'opencode', 'pi'] as const) {
+      const result = await setup({
+        harness,
+        bundlePath,
+        skillsSource,
+        progress: SILENT_PROGRESS,
+        ...(harness === 'pi' ? { packageOwnedSkills: true } : {}),
+        ...(harness === 'opencode' ? { harnessSpecificSkills: true } : {}),
+      })
+      assert.strictEqual(result.success, true, `${harness} setup must succeed`)
+    }
+
+    // Exactly one shared runtime installation for all five.
+    const runtimeParent = join(tmpDir, '.agents', 'nsolid-plugin', 'runtime', 'mcp-remote')
+    assert.deepStrictEqual(readdirSync(runtimeParent), ['0.1.38'])
+    assert.strictEqual(existsSync(join(mcpRuntimeRoot(), 'node_modules', 'mcp-remote', 'dist', 'proxy.js')), true)
+    // OpenCode wrote its harness-specific skills and MCP config.
+    assert.strictEqual(existsSync(join(tmpDir, '.config', 'opencode', 'skills', 'ns-test-skill')), true)
+    assert.strictEqual(existsSync(join(tmpDir, '.config', 'opencode', 'opencode.jsonc')), true)
+  })
+
+  it('uninstall and logout preserve the shared runtime', async () => {
+    const { install, uninstall, logout } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: { type: 'oauth', provider: 'nodesource', accountsUrl: 'https://accounts.nodesource.com' },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials()
+    seedMcpRemoteRuntime()
+    globalThis.fetch = OK_FETCH
+
+    await install({ harness: 'opencode', bundlePath, skillsSource, harnessSpecificSkills: true, progress: SILENT_PROGRESS })
+    const uninstallResult = await uninstall('opencode', { bundlePath })
+    assert.deepStrictEqual(uninstallResult.errors, [])
+    assert.strictEqual(existsSync(mcpRuntimeRoot()), true, 'runtime survives uninstall')
+
+    await logout()
+    assert.strictEqual(existsSync(join(tmpDir, '.agents', '.nodesource-auth.json')), false)
+    assert.strictEqual(existsSync(mcpRuntimeRoot()), true, 'runtime survives logout')
   })
 
   it('prefers stored explicit MCP URL over derived console URL', async () => {
@@ -955,6 +1088,7 @@ describe('doctor()', () => {
       mcpUrl: 'https://mcp.nodesource.com',
       expiresAt: futureDate,
     }))
+    seedMcpRemoteRuntime()
 
     const bundle = createBundle()
     const bundlePath = writeBundle(bundle)
@@ -972,7 +1106,75 @@ describe('doctor()', () => {
     assert.strictEqual(report.plugin.status, 'ok')
     assert.strictEqual(report.skills.status, 'ok')
     assert.strictEqual(report.mcpServers.status, 'ok')
+    assert.strictEqual(report.bridge?.status, 'ready')
+    assert.strictEqual(report.bridge?.required, true)
     assert.deepStrictEqual(report.errors, [])
+  })
+
+  it('reports unhealthy for a wrapper-owned harness when the runtime is missing', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const { getAuthFilePath, getAgentsDir } = await import('../../src/utils/path.js')
+    const { ensureDir } = await import('../../src/utils/fs.js')
+    ensureDir(getAgentsDir())
+    const futureDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    writeFileSync(getAuthFilePath(), JSON.stringify({
+      serviceToken: 'valid-token',
+      organizationId: 'valid-org',
+      saasToken: 'valid-saas',
+      consoleUrl: 'https://console.nodesource.com',
+      mcpUrl: 'https://mcp.nodesource.com',
+      expiresAt: futureDate,
+    }))
+
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    // Native Codex plugin installed: MCPs are served through the wrapper.
+    mkdirSync(join(tmpDir, '.codex'), { recursive: true })
+    writeFileSync(join(tmpDir, '.codex', 'config.toml'), [
+      '[plugins."nsolid-plugin@nodesource"]',
+      'enabled = true',
+      '',
+    ].join('\n'))
+
+    const report = await doctor('codex', bundlePath)
+
+    assert.strictEqual(report.healthy, false, 'wrapper-owned harness with missing runtime is never healthy')
+    assert.strictEqual(report.bridge?.status, 'missing')
+    assert.strictEqual(report.bridge?.required, true)
+    assert.ok(
+      report.errors.some((e) => e.includes('MCP bridge runtime is missing') && e.includes('nsolid-plugin setup --harness codex')),
+      `errors should carry the repair hint, got: ${JSON.stringify(report.errors)}`
+    )
+  })
+
+  it('treats the bridge as informational for non-wrapper transports', async () => {
+    const { doctor } = await import('../../src/index.js')
+    const bundle = createBundle()
+    const bundlePath = writeBundle(bundle)
+    // No runtime anywhere; OpenCode uses native HTTP MCP config.
+
+    const report = await doctor('opencode', bundlePath)
+
+    assert.strictEqual(report.bridge?.required, false)
+    assert.ok(!report.errors.some((e) => e.includes('MCP bridge runtime')))
+
+    // Pi with its native package installed is still not wrapper-owned.
+    const packageRoot = join(tmpDir, 'pi-package')
+    mkdirSync(join(packageRoot, 'skills', 'ns-test-skill'), { recursive: true })
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+      name: 'nsolid-pi-plugin',
+      pi: { skills: ['./skills'] },
+    }))
+    writeFileSync(join(packageRoot, 'skills', 'ns-test-skill', 'SKILL.md'), '# ns-test-skill')
+    mkdirSync(join(tmpDir, '.pi', 'agent'), { recursive: true })
+    writeFileSync(join(tmpDir, '.pi', 'agent', 'settings.json'), JSON.stringify({
+      packages: [packageRoot],
+    }))
+
+    const piReport = await doctor('pi', bundlePath)
+    assert.strictEqual(piReport.plugin.status, 'ok')
+    assert.strictEqual(piReport.bridge?.required, false)
+    assert.ok(!piReport.errors.some((e) => e.includes('MCP bridge runtime')))
   })
 
   it('reports errors when bundle path is invalid', async () => {

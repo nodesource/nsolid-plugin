@@ -180,6 +180,49 @@ describe('formatDoctorReport', () => {
     assert.ok(out.includes('Pi needs an MCP adapter extension'))
   })
 
+  it('omits the MCP bridge line when the report has no bridge entry', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const out = formatDoctorReport(makeReport(), 'claude', false)
+    assert.ok(!out.includes('MCP bridge'))
+  })
+
+  it('shows a green ready MCP bridge line', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({
+      bridge: { status: 'ready', version: '0.1.38', root: '/home/x/.agents/nsolid-plugin/runtime/mcp-remote/0.1.38', required: true },
+    })
+    const out = formatDoctorReport(report, 'codex', false)
+
+    assert.ok(out.includes('MCP bridge    ✓ ready (mcp-remote 0.1.38)'))
+    assert.ok(out.includes('✓ All checks passed'))
+  })
+
+  it('shows a red MCP bridge line with the setup hint when required and missing', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({
+      healthy: false,
+      bridge: { status: 'missing', version: '0.1.38', root: '/home/x/.agents/nsolid-plugin/runtime/mcp-remote/0.1.38', required: true },
+      errors: ['MCP bridge runtime is missing. Run: nsolid-plugin setup --harness codex'],
+    })
+    const out = formatDoctorReport(report, 'codex', false)
+
+    assert.ok(out.includes('MCP bridge    ✗ not provisioned'))
+    assert.ok(out.includes('Run: nsolid-plugin setup --harness codex'))
+    assert.ok(out.includes('✗ Problems found'))
+  })
+
+  it('shows an informational MCP bridge line when not required', async () => {
+    const { formatDoctorReport } = await import('../../../src/utils/format.js')
+    const report = makeReport({
+      bridge: { status: 'invalid', version: '0.1.38', root: '/r', reason: 'expected mcp-remote@0.1.38, found 0.1.37', required: false },
+    })
+    const out = formatDoctorReport(report, 'opencode', false)
+
+    assert.ok(out.includes('MCP bridge    ? invalid (expected mcp-remote@0.1.38, found 0.1.37)'))
+    assert.ok(out.includes('not used by this harness configuration'))
+    assert.ok(out.includes('✓ All checks passed'), 'informational bridge never flips health')
+  })
+
   it('does not include Pi adapter notice for claude', async () => {
     const { formatDoctorReport } = await import('../../../src/utils/format.js')
     const report = makeReport({

@@ -68,6 +68,17 @@ function mcpLine (m: DoctorReport['mcpServers'], color: boolean): string {
   return line('MCP servers', '? unknown', C.dim, '', color)
 }
 
+function bridgeLine (b: NonNullable<DoctorReport['bridge']>, harness: string, color: boolean): string {
+  if (b.status === 'ready') return line('MCP bridge', `✓ ready (mcp-remote ${b.version})`, C.green, '', color)
+  const label = b.status === 'missing' ? 'not provisioned' : `invalid${b.reason ? ` (${b.reason})` : ''}`
+  if (b.required) {
+    return line('MCP bridge', `✗ ${label}`, C.red, `Run: nsolid-plugin setup --harness ${harness}`, color)
+  }
+  // Informational for harnesses/configs whose MCP transport is native HTTP:
+  // a missing bridge does not break them, so never paint them red.
+  return line('MCP bridge', `? ${label}`, C.dim, 'not used by this harness configuration', color)
+}
+
 function line (label: string, value: string, pick: (s: string) => string, fix: string, color: boolean): string {
   const v = color ? pick(value) : value
   const tail = fix ? `  ${color ? C.dim('— ' + fix) : '— ' + fix}` : ''
@@ -83,6 +94,7 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   if (plugin) out.push(plugin)
   out.push(skillsLine(report.skills, color))
   out.push(mcpLine(report.mcpServers, color))
+  if (report.bridge) out.push(bridgeLine(report.bridge, harness, color))
 
   if (harness === 'pi' && report.mcpServers.status !== 'unknown' && report.mcpServers.reachable.length > 0) {
     const note = 'ℹ Pi needs an MCP adapter extension to use these servers — run: pi install npm:pi-mcp-adapter'
