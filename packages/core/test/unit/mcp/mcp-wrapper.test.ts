@@ -96,7 +96,7 @@ describe('MCP wrapper runtime contract', () => {
     const harnessNames = generated.match(/const HARNESS_NAMES = new Set\(\[([^\]]*)\]\)/)?.[1]
     assert.ok(harnessNames, 'generated wrapper embeds a HARNESS_NAMES set')
     assert.deepEqual(
-      harnessNames.split(',').map((s) => s.trim().replaceAll("'", '')),
+      harnessNames.split(',').map((s: string) => s.trim().replaceAll("'", '')),
       CORE_HARNESS_VALUES
     )
     // Ownership semantics: opencode belongs to neither set; pi is native
