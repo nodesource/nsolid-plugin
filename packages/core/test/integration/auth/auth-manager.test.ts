@@ -7,6 +7,7 @@ import http from 'node:http'
 import { createRequire } from 'node:module'
 import type { AuthConfig, Credentials } from '../../../src/types.js'
 import { getAuthFilePath, getAgentsDir } from '../../../src/utils/path.js'
+import { getFreePort } from './ports.js'
 
 const require = createRequire(import.meta.url)
 const cp = require('node:child_process')
@@ -20,11 +21,17 @@ let originalUserProfile: string | undefined
 let originalFetch: typeof globalThis.fetch
 let originalAccountsUrl: string | undefined
 
+// Fresh port per test, drawn from a window below 8765 (src's oauth server
+// scans upward and rejects ports above 8770). oauth-server.test.ts keeps the
+// 8765-8770 range to itself, so parallel `node --test` files never contend,
+// and a lingering server from the previous test can no longer force a
+// fallback into that range.
+let callbackPort = 0
 const authConfig: AuthConfig = {
   type: 'oauth',
   provider: 'nodesource',
   accountsUrl: 'https://accounts.example.com',
-  callbackPort: 8767,
+  callbackPort: 0,
 }
 
 function getUrlFromExecFileCall (): URL {
@@ -74,7 +81,9 @@ function sendCallback (port: number, state: string, overrides?: Record<string, s
   })
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  callbackPort = await getFreePort(8000, 8300)
+  authConfig.callbackPort = callbackPort
   tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-test-'))
   originalHome = process.env.HOME
   originalUserProfile = process.env.USERPROFILE
@@ -186,9 +195,9 @@ describe('ensureAuthenticated', () => {
     assert.strictEqual(signInUrl.origin, 'https://accounts.example.com')
     assert.strictEqual(signInUrl.pathname, '/sign-in')
     assert.strictEqual(signInUrl.searchParams.get('extension'), 'nsolid-plugin')
-    assert.strictEqual(signInUrl.searchParams.get('port'), '8767')
+    assert.strictEqual(signInUrl.searchParams.get('port'), String(callbackPort))
     const state = getStateFromExecFileCall()
-    await sendCallback(8767, state)
+    await sendCallback(callbackPort, state)
     const result = await promise
 
     assert.strictEqual(result.serviceToken, 'oauth-token')
@@ -220,7 +229,7 @@ describe('ensureAuthenticated', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     const state = getStateFromExecFileCall()
-    await sendCallback(8767, state)
+    await sendCallback(callbackPort, state)
     const result = await promise
 
     assert.strictEqual(result.serviceToken, 'oauth-token')
@@ -281,7 +290,7 @@ describe('ensureAuthenticated', () => {
     const promise = ensureAuthenticated(authConfig)
 
     const state = await pollForState(getStateFromExecFileCall)
-    await sendCallback(8767, state)
+    await sendCallback(callbackPort, state)
     const result = await promise
 
     assert.strictEqual(result.serviceToken, 'oauth-token')
@@ -330,6 +339,9 @@ describe('ensureAuthenticated', () => {
 describe('ensureAuthenticated - requiredPermissions', () => {
   const authConfigWithPerms: AuthConfig = {
     ...authConfig,
+    // Read live: spreading would freeze the pre-beforeEach value (0) of
+    // callbackPort, since this object literal runs once at describe time.
+    get callbackPort () { return authConfig.callbackPort },
     requiredPermissions: ['nsolid:benchmark:run', 'nsolid:profile:read'],
   }
 
@@ -477,7 +489,7 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     )
 
     const state = await pollForState(getStateFromExecFileCall)
-    await sendCallback(8767, state)
+    await sendCallback(callbackPort, state)
     await rejection
     assert.strictEqual(fetchCalls, 1)
     assert.strictEqual(execFileCalls.length, 1)
@@ -506,7 +518,7 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     )
 
     const state = await pollForState(getStateFromExecFileCall)
-    await sendCallback(8767, state)
+    await sendCallback(callbackPort, state)
     await rejection
     assert.strictEqual(fetchCalls, 1)
     assert.strictEqual(execFileCalls.length, 1)
@@ -552,7 +564,7 @@ describe('ensureAuthenticated - Windows browser launch', () => {
       assert.ok(lastArgs[1].startsWith('https://accounts.example.com/sign-in'))
 
       const state = getStateFromExecFileCall()
-      await sendCallback(8767, state)
+      await sendCallback(callbackPort, state)
       await promise
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform })
@@ -583,7 +595,7 @@ describe('ensureAuthenticated - consoleId validation', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50))
       const state = getStateFromExecFileCall()
-      await sendCallback(8767, state, { consoleId: 'invalid@console!' })
+      await sendCallback(callbackPort, state, { consoleId: 'invalid@console!' })
 
       // Re-throw for assert.rejects to catch
       throw new Error('Invalid console ID format received from OAuth callback')
@@ -628,7 +640,7 @@ describe('ensureAuthenticated - accountsUrl override', () => {
     assert.strictEqual(signInUrl.host, 'custom.accounts.example.com')
     assert.strictEqual(signInUrl.pathname, '/sign-in')
     const state = getStateFromExecFileCall()
-    await sendCallback(8767, state)
+    await sendCallback(callbackPort, state)
     await promise
   })
 
@@ -655,7 +667,7 @@ describe('ensureAuthenticated - accountsUrl override', () => {
     assert.strictEqual(signInUrl.host, 'accounts.nodesource.com')
     assert.strictEqual(signInUrl.pathname, '/sign-in')
     const state = getStateFromExecFileCall()
-    await sendCallback(8767, state)
+    await sendCallback(callbackPort, state)
     await promise
   })
 })
