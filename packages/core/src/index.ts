@@ -19,7 +19,7 @@ import type {
 } from './types.js'
 import { validateBundle } from './validate.js'
 import { ensureAuthenticated, loadCredentials, isExpired, removeCredentials } from './auth/index.js'
-import { deriveMcpUrlFromConsoleUrl } from './auth/mcp-url.js'
+import { resolveMcpUrl } from './auth/mcp-url.js'
 import { installSkills, installSkillsToDirectory, uninstallSkills, SkillCopyError } from './skills/skill-copier.js'
 import { linkSkillsToHarness, unlinkSkillsFromHarness } from './skills/skill-linker.js'
 import {
@@ -129,6 +129,7 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     skillsInstalled: 0,
     mcpServersConfigured: [],
     hadToAuthenticate: false,
+    authSucceeded: false,
     errors: [],
   }
 
@@ -160,16 +161,24 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
       // Corrupt credentials file — will re-authenticate via ensureAuthenticated
     }
 
+    const forcing = options.force === true
     if (existingCredentials) {
-      progress.step('Checking NodeSource login', isExpired(existingCredentials) ? 'sign-in required' : 'already signed in')
-      result.hadToAuthenticate = isExpired(existingCredentials)
+      progress.step(
+        'Checking NodeSource login',
+        forcing ? 'switching organization' : (isExpired(existingCredentials) ? 'sign-in required' : 'already signed in')
+      )
+      result.hadToAuthenticate = forcing || isExpired(existingCredentials)
     } else {
       progress.step('Checking NodeSource login', 'sign-in required')
       result.hadToAuthenticate = true
     }
 
     try {
-      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth })
+      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth, force: options.force, notify: options.notify })
+      // Credentials are authenticated now — the active org is set (freshly
+      // stored, or already valid). This is the "org switch succeeded" signal,
+      // independent of the harness install/config refresh that follows.
+      result.authSucceeded = true
     } catch (err) {
       const pluginErr = toPluginError(err, 'AUTH_FAILED', { harness: options.harness })
       result.errors.push(`Authentication failed: ${pluginErr.message}`)
@@ -209,6 +218,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     skillsInstalled: 0,
     mcpServersConfigured: [],
     hadToAuthenticate: false,
+    authSucceeded: false,
     errors: [],
   }
 
@@ -307,9 +317,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   if (credentials && canConfigureMcp) {
     variables.AUTH_TOKEN = credentials.serviceToken
     variables.AUTH_ORG_ID = credentials.organizationId
-    const derivedMcpUrl = deriveMcpUrlFromConsoleUrl(credentials.consoleUrl)
-    const explicitMcpUrl = credentials.mcpUrl || undefined
-    const mcpUrl = explicitMcpUrl ?? derivedMcpUrl
+    const mcpUrl = resolveMcpUrl(credentials)
     if (!mcpUrl) {
       result.errors.push('Could not derive MCP URL from console URL pattern')
       return result
@@ -622,9 +630,9 @@ export async function doctor (
     const creds = loadCredentials()
     if (creds) {
       if (isExpired(creds)) {
-        report.credentials = { status: 'expired', message: 'Credentials have expired' }
+        report.credentials = { status: 'expired', message: 'Credentials have expired', organizationId: creds.organizationId }
       } else {
-        report.credentials = { status: 'ok' }
+        report.credentials = { status: 'ok', organizationId: creds.organizationId }
       }
     }
   } catch {

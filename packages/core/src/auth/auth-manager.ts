@@ -96,6 +96,10 @@ function samePermissions (left: string[] | undefined, right: string[]): boolean 
 export interface EnsureAuthenticatedOptions {
   harness?: HarnessType;
   confirmAuth?: AuthConfirmation;
+  /** Force a fresh OAuth round-trip even if valid credentials exist (used to switch NodeSource organizations). */
+  force?: boolean;
+  /** Injectable stdout/stderr sink for headless OAuth sign-in instructions. Defaults to `process.stderr.write`. */
+  notify?: (text: string) => void;
 }
 
 export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logger, options: EnsureAuthenticatedOptions = {}): Promise<Credentials> {
@@ -110,7 +114,7 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     logger?.warn('auth.credentials.corrupt')
   }
 
-  if (existing && !isExpired(existing)) {
+  if (existing && !isExpired(existing) && !options.force) {
     if (existing.accountsUrl && existing.accountsUrl !== authConfig.accountsUrl) {
       logger?.info('auth.credentials.originMismatch', { stored: existing.accountsUrl, current: authConfig.accountsUrl })
     } else {
@@ -160,6 +164,16 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
   signInUrl.searchParams.set('state', state)
   logger?.info('auth.oauth.start', { accountsUrl: authConfig.accountsUrl })
 
+  // Headless-safe manual fallback: surface the sign-in URL on stderr so a
+  // failed `open`/`xdg-open` (devcontainer, CI, agent host) does not leave the
+  // user waiting out the full timeout with no path to authenticate. The URL
+  // carries only the loopback port + CSRF state — never tokens — and is always
+  // printed regardless of whether the browser launch succeeds.
+  const notify = options.notify ?? ((text: string) => process.stderr.write(text))
+  notify('\nNodeSource authentication started.\n')
+  notify('If a browser did not open automatically, open this sign-in URL manually:\n')
+  notify(`${signInUrl.toString()}\n\n`)
+
   openBrowser(signInUrl.toString(), logger)
 
   const callback = await server.waitForCallback()
@@ -186,7 +200,22 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
     throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
   }
 
-  const mcpUrl = deriveMcpUrlFromConsoleUrl(callback.consoleUrl) ?? `https://${callback.consoleId}.mcp.saas.nodesource.io`
+  // Never guess a production MCP host when the console URL is not a recognized
+  // NodeSource SaaS origin. Silently persisting a wrong endpoint here would
+  // make it sticky (install and the runtime wrapper both prefer stored
+  // `mcpUrl` over re-deriving). Fail with an actionable error instead, leaving
+  // the previous credentials untouched on disk.
+  const mcpUrl = deriveMcpUrlFromConsoleUrl(callback.consoleUrl, callback.consoleId)
+  if (mcpUrl === null) {
+    const pluginErr = toPluginError(
+      new Error(`Could not determine the N|Solid MCP endpoint from the console URL for org "${callback.consoleId}" (unrecognized NodeSource console host).`),
+      'AUTH_FAILED',
+      {
+        action: 'Re-run setup after confirming the console URL, or contact NodeSource support for your organization\'s MCP endpoint. Existing credentials were left unchanged.',
+      }
+    )
+    throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
+  }
 
   try {
     const result = await validateToken(callback.token, callback.consoleId, authConfig.accountsUrl, logger)

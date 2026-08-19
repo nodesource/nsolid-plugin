@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline/promises'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { install, setup, uninstall, logout, doctor, restore } from './index.js'
+import { install, setup, uninstall, logout, doctor, restore, loadCredentials } from './index.js'
 import type { AuthConfirmation, HarnessType } from './types.js'
 import { HARNESS_VALUES } from './types.js'
 import { formatPluginError } from './errors.js'
@@ -55,12 +55,13 @@ function printUsage (): void {
   console.log(`Usage: nsolid-plugin <command> [options]
 
 Commands:
-  setup      Authenticate with NodeSource (may open a browser)
-  install    Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; does not open a browser)
-  uninstall  Remove N|Solid Plugin skills for a harness
-  logout     Forget your stored NodeSource login (removes credentials only)
-  doctor     Check installation health for a harness
-  restore    Restore a harness MCP config from the latest backup
+  setup       Authenticate with NodeSource (may open a browser)
+  install     Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; does not open a browser)
+  uninstall   Remove N|Solid Plugin skills for a harness
+  logout      Forget your stored NodeSource login (removes credentials only)
+  switch-org  Force re-authentication to switch NodeSource organizations (opens a browser; affects all harnesses)
+  doctor      Check installation health for a harness
+  restore     Restore a harness MCP config from the latest backup
 
 Options:
   --harness <harness>    Target harness (required in non-interactive mode): ${HARNESS_VALUES.join(', ')}
@@ -72,16 +73,17 @@ Options:
   --verbose             Enable detailed logging to stderr
   --json                Output doctor report as JSON (machine-readable)
   --no-color            Disable colored output
-  --quiet               Suppress step-by-step progress output (install only)
+  --quiet               Suppress step-by-step progress output (setup/install/switch-org)
   --yes                 Skip interactive confirmation prompts
-  --accounts-url <url>  Explicit origin-only accounts URL override for setup
+  --accounts-url <url>  Explicit origin-only accounts URL override for setup/switch-org
   --help                Show this help message
 
 Distribution notes:
   Claude/Codex/Antigravity: install from the GitHub plugin root; setup is auth-only.
   Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
-  OpenCode: run setup --harness opencode for auth, then install --harness opencode for skills/MCP config.
-  Auth: only setup/login may open a browser.`)
+  OpenCode: setup --harness opencode authenticates AND writes its skills/MCP config; install --harness opencode re-runs that direct config.
+  After switch-org, a direct-config harness passed to --harness (OpenCode, Pi, fallback CLI installs) has its MCP config refreshed on the spot; Claude/Codex/Antigravity native plugins must be reconnected, and other direct-config harnesses need a later setup/install to re-bake the new org's token.
+  Auth: only setup/switch-org may open a browser.`)
 }
 
 function isInteractive (): boolean {
@@ -277,6 +279,7 @@ async function main (): Promise<void> {
     dim: (s: string) => color ? C.dim(s) : s,
     green: (s: string) => color ? C.green(s) : s,
     yellow: (s: string) => color ? C.yellow(s) : s,
+    red: (s: string) => color ? C.red(s) : s,
   }
 
   switch (command) {
@@ -435,6 +438,92 @@ async function main (): Promise<void> {
       } else {
         console.log('No credentials found — nothing to log out.')
       }
+      break
+    }
+    case 'switch-org': {
+      if (values['accounts-url']) {
+        process.env.NSOLID_ACCOUNTS_URL = values['accounts-url']
+      }
+      const switchHarness = await requireHarness()
+
+      const previous = (() => {
+        try { return loadCredentials() } catch { return null }
+      })()
+
+      console.log('')
+      console.log(paint.yellow(`⚠ This changes the single shared NodeSource login used by ALL harnesses, not just ${HARNESS_LABELS[switchHarness]}.`))
+      if (previous) console.log(paint.dim(`  Currently signed in to org: ${previous.organizationId}`))
+      console.log('')
+
+      const result = await setup({
+        harness: switchHarness,
+        bundlePath,
+        skillsSource,
+        ...commonOptions,
+        progress: values.quiet === true ? silentProgress : createConsoleProgress({ color }),
+        confirmAuth: authConfirmation,
+        packageOwnedSkills: PACKAGE_OWNED_SKILL_HARNESSES.has(switchHarness),
+        harnessSpecificSkills: HARNESS_SPECIFIC_SKILL_HARNESSES.has(switchHarness),
+        force: true,
+      })
+
+      const current = (() => {
+        try { return loadCredentials() } catch { return null }
+      })()
+
+      // Pure, unit-tested orchestration of the switch-org output + exit code.
+      const { buildSwitchOrgOutcome, formatSwitchOrgGuidance } = await import('./utils/format.js')
+      const outcome = buildSwitchOrgOutcome({
+        success: result.success,
+        authSucceeded: result.authSucceeded,
+        errors: result.errors,
+        previousOrg: previous?.organizationId,
+        currentOrg: current?.organizationId,
+        harness: switchHarness,
+        harnessLabel: HARNESS_LABELS[switchHarness],
+        isPluginOwned: PLUGIN_OWNED_HARNESSES.has(switchHarness),
+      })
+
+      if (outcome.kind === 'auth-failed') {
+        console.error(paint.red(outcome.errorHeader ?? `✗ Switch organization failed for ${switchHarness}:`))
+        for (const line of outcome.detail) console.error(line)
+        process.exit(1)
+      }
+
+      console.log(paint.green(outcome.stateLine))
+
+      if (outcome.kind === 'partial') {
+        // Org switched (credentials live on disk) but the selected harness's
+        // on-disk MCP config could not be refreshed. This is a partial success:
+        // do NOT report the switch as failed, and do NOT roll back the
+        // globally-switched credentials. Exit nonzero so CI/scripts know the
+        // refresh is incomplete, and point at the retry command.
+        console.error(paint.yellow(outcome.warning!))
+        for (const line of outcome.detail) console.error(line)
+        console.error('  The new org is already saved globally; refresh this harness with:')
+        for (const line of outcome.commands) console.error(paint.dim(`    ${line}`))
+        process.exit(1)
+      }
+
+      let nativeInstalled = false
+      let fallbackTracked = false
+      if (PLUGIN_OWNED_HARNESSES.has(switchHarness)) {
+        const { getAdapter } = await import('./harnesses/index.js')
+        nativeInstalled = getAdapter(switchHarness).detectNativePlugin?.()?.installed === true
+        const { listTrackedMcps } = await import('./mcp/index.js')
+        fallbackTracked = (await listTrackedMcps(switchHarness)).length > 0
+      }
+      for (const guidanceLine of formatSwitchOrgGuidance({
+        harness: switchHarness,
+        harnessLabel: HARNESS_LABELS[switchHarness],
+        isPluginOwned: PLUGIN_OWNED_HARNESSES.has(switchHarness),
+        nativeInstalled,
+        fallbackTracked,
+      }, color)) {
+        console.log(guidanceLine)
+      }
+
+      console.log(paint.dim('  Other direct-config harnesses sharing this login (OpenCode, Pi, fallback CLI installs) pick up the new org on their next setup/install run.'))
       break
     }
     case 'restore': {

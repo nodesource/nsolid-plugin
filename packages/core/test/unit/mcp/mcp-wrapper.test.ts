@@ -81,6 +81,52 @@ describe('MCP wrapper fallback', () => {
   })
 
   for (const wrapper of ['source', 'generated'] as const) {
+    it(`${wrapper} wrapper derives the console MCP URL from the org id when no mcpUrl is stored`, { skip: process.platform === 'win32' }, () => {
+      const fixture = createWrapperFixture(wrapper)
+      // Blank out the stored mcpUrl so the wrapper must derive it from
+      // consoleUrl + org id (matching the TS deriveMcpUrlFromConsoleUrl).
+      writeFileSync(join(fixture.home, '.agents', '.nodesource-auth.json'), JSON.stringify({
+        serviceToken: token, organizationId: 'org-123', consoleUrl: 'https://pretty-name.saas.nodesource.io', mcpUrl: '', expiresAt: '2099-01-01T00:00:00.000Z',
+      }))
+      const npx = join(fixture.bin, 'npx')
+      writeFileSync(npx, '#!/bin/sh\nprintf "%s\\n" "$@" > "$NSOLID_TEST_OUTPUT"\n')
+      chmodSync(npx, 0o755)
+
+      const result = spawnSync(process.execPath, [fixture.wrapperPath, 'nsolid-console'], { env: wrapperEnvironment(fixture), encoding: 'utf8' })
+      assert.strictEqual(result.status, 0, result.stderr)
+      const args = readFileSync(fixture.output, 'utf8').trimEnd().split('\n')
+      assert.strictEqual(args[2], 'https://org-123.mcp.saas.nodesource.io/')
+    })
+
+    it(`${wrapper} wrapper forces https on the derived MCP URL even for an http consoleUrl`, { skip: process.platform === 'win32' }, () => {
+      const fixture = createWrapperFixture(wrapper)
+      writeFileSync(join(fixture.home, '.agents', '.nodesource-auth.json'), JSON.stringify({
+        serviceToken: token, organizationId: 'org-456', consoleUrl: 'http://pretty-name.saas.nodesource.io', mcpUrl: '', expiresAt: '2099-01-01T00:00:00.000Z',
+      }))
+      const npx = join(fixture.bin, 'npx')
+      writeFileSync(npx, '#!/bin/sh\nprintf "%s\\n" "$@" > "$NSOLID_TEST_OUTPUT"\n')
+      chmodSync(npx, 0o755)
+
+      const result = spawnSync(process.execPath, [fixture.wrapperPath, 'nsolid-console'], { env: wrapperEnvironment(fixture), encoding: 'utf8' })
+      assert.strictEqual(result.status, 0, result.stderr)
+      const args = readFileSync(fixture.output, 'utf8').trimEnd().split('\n')
+      assert.strictEqual(args[2], 'https://org-456.mcp.saas.nodesource.io/')
+    })
+
+    it(`${wrapper} wrapper rejects a console URL that is not a recognized NodeSource SaaS host`, { skip: process.platform === 'win32' }, () => {
+      const fixture = createWrapperFixture(wrapper)
+      writeFileSync(join(fixture.home, '.agents', '.nodesource-auth.json'), JSON.stringify({
+        serviceToken: token, organizationId: 'org-123', consoleUrl: 'https://console.example.com', mcpUrl: '', expiresAt: '2099-01-01T00:00:00.000Z',
+      }))
+      const npx = join(fixture.bin, 'npx')
+      writeFileSync(npx, '#!/bin/sh\nexit 0\n')
+      chmodSync(npx, 0o755)
+
+      const result = spawnSync(process.execPath, [fixture.wrapperPath, 'nsolid-console'], { env: wrapperEnvironment(fixture), encoding: 'utf8' })
+      assert.notStrictEqual(result.status, 0)
+      assert.match(result.stderr, /Could not derive NodeSource console MCP URL/)
+    })
+
     it(`${wrapper} wrapper preserves argv boundaries outside Windows`, { skip: process.platform === 'win32' }, () => {
       const fixture = createWrapperFixture(wrapper)
       const npx = join(fixture.bin, 'npx')
@@ -92,6 +138,38 @@ describe('MCP wrapper fallback', () => {
       assert.deepStrictEqual(readFileSync(fixture.output, 'utf8').trimEnd().split('\n'), [
         '-y', 'mcp-remote@0.1.38', url, '--header', `X-Nsolid-Service-Token:${token}`, '--transport', 'http-first', '--silent',
       ])
+    })
+
+    it(`${wrapper} wrapper migrates a stored legacy alias-derived mcpUrl to the org-UUID route`, { skip: process.platform === 'win32' }, () => {
+      const fixture = createWrapperFixture(wrapper)
+      // The previous release stored the alias-derived (dead) endpoint. It must
+      // be replaced by the org-UUID route even though a value is present.
+      writeFileSync(join(fixture.home, '.agents', '.nodesource-auth.json'), JSON.stringify({
+        serviceToken: token, organizationId: 'org-123', consoleUrl: 'https://homedepot-nucleus-stage-1.saas.nodesource.io', mcpUrl: 'https://homedepot-nucleus-stage-1.mcp.saas.nodesource.io/', expiresAt: '2099-01-01T00:00:00.000Z',
+      }))
+      const npx = join(fixture.bin, 'npx')
+      writeFileSync(npx, '#!/bin/sh\nprintf "%s\\n" "$@" > "$NSOLID_TEST_OUTPUT"\n')
+      chmodSync(npx, 0o755)
+
+      const result = spawnSync(process.execPath, [fixture.wrapperPath, 'nsolid-console'], { env: wrapperEnvironment(fixture), encoding: 'utf8' })
+      assert.strictEqual(result.status, 0, result.stderr)
+      const args = readFileSync(fixture.output, 'utf8').trimEnd().split('\n')
+      assert.strictEqual(args[2], 'https://org-123.mcp.saas.nodesource.io/')
+    })
+
+    it(`${wrapper} wrapper preserves a genuine custom mcpUrl override`, { skip: process.platform === 'win32' }, () => {
+      const fixture = createWrapperFixture(wrapper)
+      writeFileSync(join(fixture.home, '.agents', '.nodesource-auth.json'), JSON.stringify({
+        serviceToken: token, organizationId: 'org-123', consoleUrl: 'https://homedepot-nucleus-stage-1.saas.nodesource.io', mcpUrl: 'https://relay.example.com/mcp', expiresAt: '2099-01-01T00:00:00.000Z',
+      }))
+      const npx = join(fixture.bin, 'npx')
+      writeFileSync(npx, '#!/bin/sh\nprintf "%s\\n" "$@" > "$NSOLID_TEST_OUTPUT"\n')
+      chmodSync(npx, 0o755)
+
+      const result = spawnSync(process.execPath, [fixture.wrapperPath, 'nsolid-console'], { env: wrapperEnvironment(fixture), encoding: 'utf8' })
+      assert.strictEqual(result.status, 0, result.stderr)
+      const args = readFileSync(fixture.output, 'utf8').trimEnd().split('\n')
+      assert.strictEqual(args[2], 'https://relay.example.com/mcp')
     })
 
     it(`${wrapper} wrapper keeps URL and headers out of cmd.exe on Windows`, { skip: process.platform !== 'win32' }, () => {

@@ -3,9 +3,61 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
+import http from 'node:http'
+import { createRequire } from 'node:module'
 import type { BundleDescriptor } from '../../src/types.js'
 import type { ProgressReporter } from '../../src/utils/progress.js'
 import type { TrackingData } from '../../src/skills/skill-tracker.js'
+
+const require = createRequire(import.meta.url)
+const cp = require('node:child_process')
+
+const execFileCalls: unknown[][] = []
+cp.execFile = (...args: unknown[]) => { execFileCalls.push(args) }
+
+function getUrlFromExecFileCall (): URL {
+  const call = execFileCalls[execFileCalls.length - 1]
+  const cmd = call[0] as string
+  const args = call[1] as string[]
+  const urlStr = cmd === 'rundll32'
+    ? args[args.length - 1]
+    : args.find((a: string) => a.startsWith('http') || a.startsWith('"http'))!
+  return new URL(urlStr.replace(/^"|"$/g, ''))
+}
+
+async function pollForState (timeoutMs = 5000): Promise<{ state: string; port: number }> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const url = getUrlFromExecFileCall()
+      const state = url.searchParams.get('state')
+      const port = url.searchParams.get('port')
+      if (state && port) return { state, port: Number(port) }
+    } catch {
+      // not ready yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('OAuth state not ready within timeout')
+}
+
+function sendCallback (port: number, state: string, overrides?: Record<string, string>): Promise<void> {
+  const params = new URLSearchParams({
+    success: 'true',
+    token: 'oauth-token',
+    consoleId: 'org-456',
+    NSOLID_SAAS: 'oauth-saas-token',
+    url: 'https://org-456.saas.nodesource.io',
+    state,
+    ...overrides,
+  })
+  return new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${port}/?${params}`, (res) => {
+      res.resume()
+      resolve()
+    }).on('error', reject)
+  })
+}
 
 let tmpDir: string
 let originalHome: string | undefined
@@ -21,6 +73,7 @@ beforeEach(() => {
   originalFetch = globalThis.fetch
   process.env.HOME = tmpDir
   process.env.USERPROFILE = tmpDir
+  execFileCalls.length = 0
   delete process.env.NSOLID_PLUGIN_PROGRESS
 })
 
@@ -153,6 +206,168 @@ describe('install()', () => {
     assert.deepStrictEqual(result.mcpServersConfigured, [])
     assert.strictEqual(existsSync(join(tmpDir, '.claude', 'skills', 'ns-test-skill')), false)
     assert.strictEqual(existsSync(join(tmpDir, '.claude.json')), false)
+  })
+
+  it('setup with force forces a fresh OAuth round-trip and switches organization', { timeout: 10000 }, async () => {
+    const { setup, loadCredentials } = await import('../../src/index.js')
+    const bundle = createBundle({
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+        callbackPort: 8769,
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({ organizationId: 'org-original' })
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = {
+      header: () => {},
+      step: () => {},
+      done: () => {},
+      warn: () => {},
+    }
+
+    const promise = setup({ harness: 'claude', bundlePath, skillsSource, progress, force: true })
+
+    const { state, port } = await pollForState()
+    assert.strictEqual(execFileCalls.length, 1, 'force should open the browser despite valid stored credentials')
+    await sendCallback(port, state, { consoleId: 'org-456' })
+    const result = await promise
+
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(result.hadToAuthenticate, true, 'a forced run always counts as having authenticated')
+    assert.strictEqual(loadCredentials()?.organizationId, 'org-456')
+  })
+
+  it('setup with force rewrites the OpenCode on-disk MCP config with the new org url/token', { timeout: 10000 }, async () => {
+    const { setup, loadCredentials } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+        callbackPort: 8769,
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({ organizationId: 'org-original' })
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = { header: () => {}, step: () => {}, done: () => {}, warn: () => {} }
+
+    const promise = setup({ harness: 'opencode', bundlePath, skillsSource, progress, force: true, harnessSpecificSkills: true })
+
+    const { state, port } = await pollForState()
+    await sendCallback(port, state, { consoleId: 'org-456' })
+    const result = await promise
+
+    assert.strictEqual(result.authSucceeded, true)
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'shared credentials must be switched')
+    const cfg = readJsonFile<Record<string, any>>(join(tmpDir, '.config', 'opencode', 'opencode.jsonc'))
+    const server = (cfg?.mcp as Record<string, { url?: string; headers?: Record<string, string> }>)?.['nsolid-console']
+    assert.ok(server, 'opencode.jsonc must contain an nsolid-console server')
+    assert.strictEqual(server.url, 'https://org-456.mcp.saas.nodesource.io/')
+    assert.strictEqual(server.headers?.['X-Nsolid-Service-Token'], 'oauth-token')
+  })
+
+  it('setup with force rewrites the Pi on-disk MCP config with the new org url/token', { timeout: 10000 }, async () => {
+    const { setup, loadCredentials } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+        callbackPort: 8769,
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({ organizationId: 'org-original' })
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = { header: () => {}, step: () => {}, done: () => {}, warn: () => {} }
+
+    const promise = setup({ harness: 'pi', bundlePath, skillsSource, progress, force: true, packageOwnedSkills: true })
+
+    const { state, port } = await pollForState()
+    await sendCallback(port, state, { consoleId: 'org-456' })
+    const result = await promise
+
+    assert.strictEqual(result.authSucceeded, true)
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'shared credentials must be switched')
+    const cfg = readJsonFile<Record<string, any>>(join(tmpDir, '.pi', 'agent', 'mcp.json'))
+    const server = (cfg?.mcpServers as Record<string, { url?: string; headers?: Record<string, string> }>)?.['nsolid-console']
+    assert.ok(server, 'Pi mcp.json must contain an nsolid-console server')
+    assert.strictEqual(server.url, 'https://org-456.mcp.saas.nodesource.io/')
+    assert.strictEqual(server.headers?.['X-Nsolid-Service-Token'], 'oauth-token')
+  })
+
+  it('reports partial success when the post-auth MCP config refresh fails but the org already switched', { timeout: 10000 }, async () => {
+    const { setup, loadCredentials } = await import('../../src/index.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+        callbackPort: 8769,
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({ organizationId: 'org-original' })
+    // Make the OpenCode MCP config path un-writable after auth by colliding it
+    // with a directory: skills still copy, but the config write must fail.
+    mkdirSync(join(tmpDir, '.config', 'opencode', 'opencode.jsonc'), { recursive: true })
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ permissions: [] }),
+    })) as unknown as typeof fetch
+    const progress: ProgressReporter = { header: () => {}, step: () => {}, done: () => {}, warn: () => {} }
+
+    const promise = setup({ harness: 'opencode', bundlePath, skillsSource, progress, force: true, harnessSpecificSkills: true })
+
+    const { state, port } = await pollForState()
+    await sendCallback(port, state, { consoleId: 'org-456' })
+    const result = await promise
+
+    // Auth succeeded (the org switch itself is done and saved globally)...
+    assert.strictEqual(result.authSucceeded, true)
+    // ...but the config refresh after it failed.
+    assert.strictEqual(result.success, false)
+    assert.ok(result.errors.some((e) => e.includes('MCP configuration failed')), 'config write failure must be surfaced')
+    // The switched credentials MUST NOT be rolled back.
+    assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'globally switched credentials are kept despite the refresh failure')
   })
 
   it('setup for Antigravity authenticates only and does not write global skills/MCP config', async () => {
@@ -320,6 +535,37 @@ describe('install()', () => {
     const servers = claudeConfig.mcpServers as Record<string, { type?: string; url?: string }>
     assert.strictEqual(servers['nsolid-console'].type, 'http')
     assert.strictEqual(servers['nsolid-console'].url, 'https://test-org.mcp.saas.nodesource.io/')
+  })
+
+  it('migrates a stored legacy alias-derived MCP URL to the org-UUID route', async () => {
+    const { install } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({
+      organizationId: '602b4703-8a7c-405a-ac1e-70bc98c3a915',
+      consoleUrl: 'https://homedepot-nucleus-stage-1.saas.nodesource.io',
+      mcpUrl: 'https://homedepot-nucleus-stage-1.mcp.saas.nodesource.io/',
+    })
+
+    const result = await install({ harness: 'claude', bundlePath, skillsSource })
+
+    assert.strictEqual(result.success, true)
+    const claudeConfig = readJsonFile<Record<string, unknown>>(join(tmpDir, '.claude.json'))
+    assert.ok(claudeConfig?.mcpServers && typeof claudeConfig.mcpServers === 'object')
+    const servers = claudeConfig.mcpServers as Record<string, { type?: string; url?: string }>
+    assert.strictEqual(servers['nsolid-console'].type, 'http')
+    assert.strictEqual(servers['nsolid-console'].url, 'https://602b4703-8a7c-405a-ac1e-70bc98c3a915.mcp.saas.nodesource.io/')
   })
 
   it('writes MCP config for Pi', async () => {
@@ -684,6 +930,7 @@ describe('doctor()', () => {
 
     assert.strictEqual(report.healthy, true)
     assert.strictEqual(report.credentials.status, 'ok')
+    assert.strictEqual(report.credentials.organizationId, 'valid-org')
     assert.strictEqual(report.skills.status, 'ok')
     assert.ok(report.skills.installed.includes('ns-test-skill'))
     assert.deepStrictEqual(report.skills.missing, [])
@@ -700,6 +947,7 @@ describe('doctor()', () => {
     const report = await doctor('claude', bundlePath)
 
     assert.strictEqual(report.credentials.status, 'missing')
+    assert.strictEqual(report.credentials.organizationId, undefined)
     assert.strictEqual(report.healthy, false)
   })
 
@@ -724,6 +972,7 @@ describe('doctor()', () => {
     const report = await doctor('claude', bundlePath)
 
     assert.strictEqual(report.credentials.status, 'expired')
+    assert.strictEqual(report.credentials.organizationId, 'org')
     assert.strictEqual(report.healthy, false)
   })
 

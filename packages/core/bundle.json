@@ -1,6 +1,6 @@
 {
   "name": "nsolid-plugin",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "NodeSource AI skills for N|Solid performance and security",
   "skills": [
     {
@@ -85,6 +85,11 @@
       "path": "skills/ns-replace-package",
       "description": "Identify and replace risky npm packages with safer alternatives",
       "requiresMcp": ["ncm"]
+    },
+    {
+      "name": "ns-switch-org",
+      "path": "skills/ns-switch-org",
+      "description": "Switch which NodeSource organization nsolid-plugin is authenticated against"
     },
     {
       "name": "ns-upgrade-package",

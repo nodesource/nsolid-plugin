@@ -33,11 +33,12 @@ export function supportsColor (stream: { isTTY?: boolean } = process.stdout): bo
   return stream.isTTY === true
 }
 
-function credLine (status: DoctorReport['credentials']['status'], color: boolean): string {
+function credLine (creds: DoctorReport['credentials'], color: boolean): string {
   // No hint on the 'ok' branch — telling a user to authenticate when creds are
   // valid is misleading. Hints only attach to missing/expired (actionable) states.
-  if (status === 'ok') return line('Credentials', '✓ ok', C.green, '', color)
-  if (status === 'expired') return line('Credentials', '✗ expired', C.red, 'Re-run installation to re-authenticate', color)
+  const orgSuffix = creds.organizationId ? ` (org: ${creds.organizationId})` : ''
+  if (creds.status === 'ok') return line('Credentials', `✓ ok${orgSuffix}`, C.green, '', color)
+  if (creds.status === 'expired') return line('Credentials', `✗ expired${orgSuffix}`, C.red, 'Re-run installation to re-authenticate', color)
   return line('Credentials', '✗ missing', C.red, 'Run installation to authenticate', color)
 }
 
@@ -78,7 +79,7 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   const out: string[] = []
   const title = color ? C.dim(`NodeSource plugin health — ${harness}`) : `NodeSource plugin health — ${harness}`
   out.push(title, '─'.repeat(34))
-  out.push(credLine(report.credentials.status, color))
+  out.push(credLine(report.credentials, color))
   const plugin = pluginLine(report.plugin, harness, color)
   if (plugin) out.push(plugin)
   out.push(skillsLine(report.skills, color))
@@ -94,4 +95,167 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   if (report.healthy) out.push(color ? C.green('✓ All checks passed') : '✓ All checks passed')
   else out.push(color ? C.red('✗ Problems found') : '✗ Problems found')
   return out.join('\n')
+}
+
+export interface SwitchOrgGuidanceInput {
+  /** Raw harness id, e.g. "claude" — used to build the `--harness` value in printed commands. */
+  harness: string;
+  /** Display label for the harness, e.g. "Claude Code". */
+  harnessLabel: string;
+  /** True for claude/codex/antigravity — harnesses with a native plugin model. */
+  isPluginOwned: boolean;
+  /** Result of adapter.detectNativePlugin()?.installed for this harness. */
+  nativeInstalled: boolean;
+  /**
+   * True when this harness has an on-disk MCP config written by the fallback
+   * direct installer (nsolid-plugin install --harness <harness>), tracked via
+   * listTrackedMcps(harness). Independent of nativeInstalled: a machine can
+   * have BOTH a native plugin install and a leftover/parallel fallback
+   * install at once, and Claude Code (or another harness) may route real
+   * tool calls through whichever one is actually connected — so both must be
+   * checked and reported on independently, not as an either/or.
+   */
+  fallbackTracked: boolean;
+}
+
+/**
+ * Follow-up guidance printed after `switch-org` completes. Native-plugin
+ * installs read credentials live on reconnect, so they only need a
+ * reconnect/restart reminder. Fallback direct installs bake a resolved
+ * token into the harness's on-disk MCP config at `install()` time, so they
+ * stay stale until `install --harness <harness>` re-runs — regardless of
+ * whether a native plugin is ALSO installed for the same harness.
+ */
+export function formatSwitchOrgGuidance (input: SwitchOrgGuidanceInput, color: boolean): string[] {
+  const { harness, harnessLabel, isPluginOwned, nativeInstalled, fallbackTracked } = input
+  const dim = (s: string) => color ? C.dim(s) : s
+  const yellow = (s: string) => color ? C.yellow(s) : s
+  const lines: string[] = []
+
+  if (!isPluginOwned) {
+    lines.push(`  ${dim('Reconnect:')} restart/reconnect ${harnessLabel} so it reloads the refreshed MCP config from disk.`)
+    return lines
+  }
+
+  if (nativeInstalled) {
+    lines.push(`  ${dim('Reconnect:')} restart/reconnect your ${harnessLabel} MCP session to pick up the new org.`)
+  }
+
+  if (fallbackTracked) {
+    lines.push(`  ${yellow(`⚠ ${harnessLabel} also has a fallback direct install with a stale token baked in.`)}`)
+    lines.push(`  ${yellow('  Run: nsolid-plugin install --harness ' + harness)} to refresh it with the new org's token, then reconnect it too.`)
+  }
+
+  if (!nativeInstalled && !fallbackTracked) {
+    lines.push(`  ${dim('Reconnect:')} restart/reconnect ${harnessLabel} so it can pick up the refreshed credentials.`)
+  }
+
+  return lines
+}
+
+export interface SwitchOrgOutcomeInput {
+  /** result.success — false when any step failed. */
+  success: boolean
+  /**
+   * result.authSucceeded — the org-switch signal. When false, the switch did
+   * not happen (OAuth failed, or the bundle has no `auth` so no OAuth ran),
+   * regardless of `success`; the outcome is always `auth-failed`.
+   */
+  authSucceeded: boolean
+  /** result.errors — non-empty when a step failed. */
+  errors: string[]
+  /** Org id signed in BEFORE the switch (undefined when none). */
+  previousOrg?: string | null
+  /** Org id signed in AFTER the switch (undefined when unknown). */
+  currentOrg?: string | null
+  harness: string
+  harnessLabel: string
+  isPluginOwned: boolean
+}
+
+export type SwitchOrgOutcomeKind = 'auth-failed' | 'partial' | 'success'
+
+/**
+ * Structured result of the `switch-org` orchestration, so the CLI handler and
+ * its exit-code/output semantics are unit-testable without spawning a browser
+ * or the CLI process. Deliberately separates an auth failure (the switch did
+ * not happen — OAuth failed or no OAuth ran) from a partial success (the org
+ * DID switch, but the selected harness's direct config refresh failed
+ * afterward — credentials are live and MUST NOT be rolled back).
+ */
+export interface SwitchOrgOutcome {
+  kind: SwitchOrgOutcomeKind
+  /** 1 for both auth-failure and partial (incomplete refresh); 0 only on full success. */
+  exitCode: 0 | 1
+  currentOrg: string
+  orgChanged: boolean
+  /** "Now signed in to org: X" / "Still signed in to org: X" (colorized green by caller). */
+  stateLine: string
+  /** Red header shown only when auth itself failed. */
+  errorHeader: string | null
+  /** Yellow warning shown only on partial success (config refresh incomplete). */
+  warning: string | null
+  /** Plain error detail lines (from result.errors). */
+  detail: string[]
+  /** Dim retry commands to print verbatim. */
+  commands: string[]
+}
+
+export function buildSwitchOrgOutcome (input: SwitchOrgOutcomeInput): SwitchOrgOutcome {
+  const { success, authSucceeded, errors, previousOrg, currentOrg, harness, harnessLabel, isPluginOwned } = input
+  const org = currentOrg ?? '(unknown)'
+  const orgChanged = currentOrg !== previousOrg
+  const stateLine = `${orgChanged ? '✓ Now signed in to org' : '✓ Still signed in to org'}: ${org}`
+
+  if (!authSucceeded) {
+    // Auth did not happen — the org was not switched. This covers both an
+    // OAuth failure AND a bundle without `auth` (where setup() succeeds with
+    // no OAuth round-trip, leaving authSucceeded false): for switch-org,
+    // authSucceeded is the switch signal, so its absence is always a failure,
+    // never a success.
+    return {
+      kind: 'auth-failed',
+      exitCode: 1,
+      currentOrg: org,
+      orgChanged,
+      stateLine,
+      errorHeader: `✗ Switch organization failed for ${harness}:`,
+      warning: null,
+      detail: errors.map((e) => `  - ${e}`),
+      commands: [],
+    }
+  }
+
+  if (!success) {
+    // Org switched (credentials live on disk) but the harness's direct MCP
+    // config could not be refreshed. Partial success: report it accurately,
+    // show the active org + retry command, and still exit nonzero.
+    const commands = [`nsolid-plugin install --harness ${harness}`]
+    if (!isPluginOwned) commands.push(`(or re-run: nsolid-plugin setup --harness ${harness})`)
+    return {
+      kind: 'partial',
+      exitCode: 1,
+      currentOrg: org,
+      orgChanged,
+      stateLine,
+      errorHeader: null,
+      warning: `! Organization switched to ${org}, but ${harnessLabel} MCP config could not be fully refreshed.`,
+      detail: errors.map((e) => `  - ${e}`),
+      commands,
+    }
+  }
+
+  // Full success. Caller still appends formatSwitchOrgGuidance / the
+  // "other direct-config harnesses" note.
+  return {
+    kind: 'success',
+    exitCode: 0,
+    currentOrg: org,
+    orgChanged,
+    stateLine,
+    errorHeader: null,
+    warning: null,
+    detail: [],
+    commands: [],
+  }
 }

@@ -16,8 +16,10 @@
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { parseTestConcurrency } from './test-concurrency.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const LOG_PATH = join(ROOT, 'test-results.log')
@@ -87,10 +89,32 @@ if (files.length === 0) {
 }
 
 const REPORTER = pathToFileURL(join(ROOT, 'scripts', 'test-reporter.mjs')).href
+
+// node --test has no concurrency cap by default, so it happily spawns one
+// worker per test file at once. That's fine on a quiet CI runner, but on a
+// dev machine already running other node processes (editor extensions, MCP
+// server subprocesses, etc.) it can starve the CPU badly enough that tests
+// appear to hang indefinitely rather than just run slowly — this bit the
+// husky pre-commit hook (`pnpm test`) in practice. Cap it, with an escape
+// hatch for anyone who wants to override it (e.g. a beefier CI runner).
+const DEFAULT_CONCURRENCY = Math.max(1, Math.floor(os.availableParallelism() / 2))
+let concurrency
+try {
+  // Validate the override before spawning anything: an invalid value (0,
+  // negative, non-numeric, or non-integer) is a broken environment that should
+  // fail immediately with a clear message rather than spawning a runner with
+  // a garbage --test-concurrency value.
+  concurrency = parseTestConcurrency(process.env.NSOLID_TEST_CONCURRENCY, DEFAULT_CONCURRENCY)
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err))
+  process.exit(1)
+}
+
 const args = [
   '--experimental-test-module-mocks',
   '--import', 'tsx/esm',
   '--test',
+  `--test-concurrency=${concurrency}`,
   '--test-reporter', REPORTER,
   ...files,
 ]

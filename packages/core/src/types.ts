@@ -110,16 +110,35 @@ export interface InstallResult {
   mcpServersConfigured: string[];
   /** True if credentials were needed and re-authentication was performed (whether it succeeded or failed). */
   hadToAuthenticate: boolean;
+  /**
+   * True when the shared NodeSource credentials are authenticated and the
+   * active org is set (freshly stored, or already valid). For `switch-org`
+   * this is the "org switch succeeded" signal: it is independently true of
+   * `success`, because a later harness install/config refresh can still fail
+   * after the org has already been switched. Never set by `install()` (which
+   * does not authenticate). Do NOT roll back switched credentials when this
+   * is true but `success` is false — the org change is real and global.
+   */
+  authSucceeded: boolean;
   /** Non-empty when any step failed; fatal failures short-circuit, non-fatal ones leave partial state. */
   errors: string[];
 }
 
-export type SetupOptions = InstallOptions
+export interface SetupOptions extends InstallOptions {
+  /** Force a fresh OAuth round-trip even if valid credentials exist (used to switch NodeSource organizations). */
+  force?: boolean;
+  /**
+   * Injectable stdout/stderr sink for headless sign-in instructions.
+   * Defaults to `process.stderr.write`. Library consumers can use this to
+   * capture or suppress OAuth sign-in URL messages without touching stderr.
+   */
+  notify?: (text: string) => void;
+}
 export type SetupResult = InstallResult
 
 export interface DoctorReport {
   healthy: boolean;
-  credentials: { status: 'ok' | 'missing' | 'expired'; message?: string };
+  credentials: { status: 'ok' | 'missing' | 'expired'; message?: string; organizationId?: string };
   /**
    * Native plugin/package install status. Only meaningful for plugin/package-
    * owned harnesses (claude, codex, antigravity, pi); for others the status is
