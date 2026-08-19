@@ -68,10 +68,6 @@ export function generateClaudeMcpJson (bundle) {
   return generateMcpConfig('$' + '{CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js', bundle, 'claude')
 }
 
-export function generateClaudeWrapper () {
-  return generateMcpWrapper()
-}
-
 export function generateAntigravityPluginJson (bundle) {
   const b = getBundle(bundle)
   return stableJson({
