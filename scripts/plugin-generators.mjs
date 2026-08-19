@@ -32,7 +32,8 @@ export const skillNamesSet = new Set(skillNames)
  */
 export const MCP_REMOTE_VERSION = '0.1.38'
 
-const HARNESS_VALUES = ['claude', 'codex', 'opencode', 'antigravity', 'pi']
+// Keep in sync with packages/core/src/types.ts (guarded by a unit test).
+export const HARNESS_VALUES = ['claude', 'codex', 'opencode', 'antigravity', 'pi']
 
 const CODEX_MCP_STARTUP_TIMEOUT_SEC = 60
 

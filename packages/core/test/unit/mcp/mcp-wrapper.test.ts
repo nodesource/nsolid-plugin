@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
 // @ts-expect-error The repository's JavaScript generator intentionally has no TypeScript declarations.
-import { generateMcpWrapper, MCP_REMOTE_VERSION as GENERATOR_VERSION } from '../../../../../scripts/plugin-generators.mjs'
+import { generateMcpWrapper, MCP_REMOTE_VERSION as GENERATOR_VERSION, HARNESS_VALUES as GENERATOR_HARNESS_VALUES } from '../../../../../scripts/plugin-generators.mjs'
 import { MCP_REMOTE_VERSION as CORE_VERSION } from '../../../src/mcp/mcp-remote-runtime.js'
+import { HARNESS_VALUES as CORE_HARNESS_VALUES, PLUGIN_OWNED_HARNESSES, NATIVE_PLUGIN_HARNESSES } from '../../../src/types.js'
 
 const repoRoot = join(import.meta.dirname, '..', '..', '..', '..', '..')
 const sourceWrapper = join(repoRoot, 'scripts', 'mcp-wrapper.js')
@@ -85,6 +86,23 @@ describe('MCP wrapper runtime contract', () => {
     assert.strictEqual(rootPackageJson.dependencies?.['mcp-remote'], CORE_VERSION)
     // The generated wrapper embeds the version for its stable-path resolution.
     assert.ok(generateMcpWrapper().includes(`'${CORE_VERSION}'`))
+  })
+
+  it('keeps the harness lists in sync across core, generator and the generated wrapper', () => {
+    // The generator's list feeds the wrapper's HARNESS_NAMES literal; core's
+    // HARNESS_VALUES drives --harness validation. They must not diverge.
+    assert.deepEqual(GENERATOR_HARNESS_VALUES, CORE_HARNESS_VALUES)
+    const generated = generateMcpWrapper()
+    const harnessNames = generated.match(/const HARNESS_NAMES = new Set\(\[([^\]]*)\]\)/)?.[1]
+    assert.ok(harnessNames, 'generated wrapper embeds a HARNESS_NAMES set')
+    assert.deepEqual(
+      harnessNames.split(',').map((s) => s.trim().replaceAll("'", '')),
+      CORE_HARNESS_VALUES
+    )
+    // Ownership semantics: opencode belongs to neither set; pi is native
+    // (package-owned) but not plugin-owned.
+    assert.deepEqual([...PLUGIN_OWNED_HARNESSES], ['claude', 'codex', 'antigravity'])
+    assert.deepEqual([...NATIVE_PLUGIN_HARNESSES], ['claude', 'codex', 'antigravity', 'pi'])
   })
 
   it('contains no shell, npx or cmd.exe execution paths', () => {
