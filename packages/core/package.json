@@ -18,6 +18,7 @@
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "test": "node ../../scripts/run-tests.mjs core",
     "lint": "eslint src/ test/",
+    "typecheck": "tsc --noEmit",
     "skills:sync": "node scripts/sync-shared-skill-assets.mjs",
     "skills:check": "node scripts/sync-shared-skill-assets.mjs --check",
     "bundle:sync": "node scripts/check-bundle-sync.mjs --sync",

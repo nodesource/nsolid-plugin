@@ -12,6 +12,7 @@
     "test:unit": "node --experimental-test-module-mocks --import tsx/esm --test 'packages/*/test/unit/**/*.test.ts'",
     "test:integration": "node --experimental-test-module-mocks --import tsx/esm --test 'packages/*/test/integration/**/*.test.ts'",
     "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
     "test:marketplace": "node scripts/test-marketplace-install.js",
     "plugin:sync": "node scripts/sync-plugin-assets.mjs",
     "plugin:check": "node scripts/sync-plugin-assets.mjs --check && node scripts/materialize-github-marketplace.mjs --check",
