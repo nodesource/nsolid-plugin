@@ -43,7 +43,7 @@ every supported harness, so MCP startup never needs npm.
 - **WHEN** the user runs `nsolid-plugin setup --harness <harness>`
 - **THEN** setup finishes with `success: false` and an actionable `MCP runtime setup failed` error asking the user to rerun the same command
 - **AND** any credentials already stored remain valid and untouched
-- **AND** the temporary staging directory is cleaned up only after installer termination is confirmed; otherwise it remains inert for safe retry cleanup
+- **AND** the temporary staging directory is cleaned up only after installer termination is confirmed; otherwise it is marked retained-live and excluded from publication and cleanup
 - **AND** a previously valid runtime, if any, is left intact
 
 #### Scenario: A timed-out managed npm process tree is terminated safely
@@ -52,7 +52,7 @@ every supported harness, so MCP startup never needs npm.
 - **WHEN** the setup-time npm timeout elapses
 - **THEN** Unix setup signals the detached process group, awaits the root process and confirms the group no longer exists; Windows setup awaits `taskkill /T /F` and the root process
 - **AND** staging is cleaned only after termination is confirmed
-- **AND** if confirmation reaches its bounded deadline, setup returns an actionable `terminationError` and leaves staging inert instead of deleting a directory a survivor may still mutate
+- **AND** if confirmation reaches its bounded deadline, setup returns an actionable `terminationError`, records retained-live ownership metadata, and excludes staging from publication and cleanup while a survivor may still mutate it
 
 #### Scenario: An npm spawn error fails setup cleanly
 
@@ -81,8 +81,8 @@ every supported harness, so MCP startup never needs npm.
 Runtime readiness SHALL verify, for every dependency in the runtime's
 transitive closure, that the resolved package has the requested name, that its
 installed version satisfies the dependent's declared range, and that
-resolution never escapes the runtime root — so every state called `ready` is
-loadable by the wrapper.
+the canonical package, manifest and proxy targets never escape the canonical
+runtime root — so every state called `ready` is loadable by the wrapper.
 
 #### Scenario: A wrong-named transitive dependency is rejected
 
@@ -111,6 +111,21 @@ loadable by the wrapper.
 - **WHEN** readiness walks the dependency closure
 - **THEN** resolution stops at the runtime root and the dependency counts as missing
 - **AND** no `package.json` outside the runtime root is ever read to satisfy the closure
+
+#### Scenario: Runtime package symlink escapes are rejected
+
+- **GIVEN** `mcp-remote`, `dist/proxy.js`, or a transitive dependency appears lexically inside the runtime root but its canonical target is outside the canonical root
+- **WHEN** readiness is evaluated
+- **THEN** the runtime is reported invalid before package code is imported
+- **AND** the same canonical boundary rule applies to package directories, manifests and the proxy file
+
+#### Scenario: Dependency kinds follow runtime-install semantics
+
+- **GIVEN** a package declares required `dependencies`, missing `optionalDependencies`, and `peerDependencies` or `devDependencies`
+- **WHEN** readiness walks its closure
+- **THEN** every missing required dependency makes the runtime invalid
+- **AND** missing optional dependencies are tolerated
+- **AND** peer and development dependencies are ignored
 
 ### Requirement: Runtime publication is serialized and recoverable
 
@@ -148,6 +163,20 @@ renames of an invalid-runtime replacement.
 - **WHEN** the user reruns the repair command printed by the wrapper
 - **THEN** the next operation publishes its own validated staging through the root-absent branch and ends with exactly one valid runtime at the versioned root
 - **AND** the orphaned stale siblings are neither promoted nor required for recovery
+
+#### Scenario: Potentially live staging is retained until reclamation is safe
+
+- **GIVEN** managed-tree termination was not confirmed and staging is marked retained-live with its operation and process identity
+- **WHEN** a later setup scans temporary trees under the publication lock
+- **THEN** that staging is excluded from publication and deletion while its creator or managed process tree may still be alive or liveness is unknown
+- **AND** after the grace period it may be reclaimed only when the creator is proven dead, the managed process tree is confirmed absent, and no live lock carries its operation token
+
+#### Scenario: Orphaned stale trees are reclaimed conservatively
+
+- **GIVEN** a stale-aside tree has valid ownership metadata from an interrupted publisher
+- **WHEN** a later setup holds the publication lock and a valid versioned root exists
+- **THEN** the stale tree may be removed only after the creator is proven dead and no live lock carries its operation token
+- **AND** missing or malformed metadata, unknown liveness, permission errors or token mismatch retain the tree instead of guessing ownership
 
 #### Scenario: Concurrent setups converge on a valid runtime
 
@@ -251,12 +280,13 @@ asset installation, so OpenCode and Pi cannot bypass the precondition, while
 - **THEN** it never invoked npm, never downloaded dependencies, and never opened an authentication flow
 - **AND** the runtime precondition remains the dispatchers' responsibility
 
-### Requirement: The MCP wrapper uses only the stable runtime
+### Requirement: The MCP wrapper uses the stable runtime by default
 
 The generated MCP wrapper SHALL resolve `mcp-remote` from the stable shared
-runtime (or a version-matched development checkout) and SHALL NOT execute or
-spawn `npx`, npm, `cmd.exe`, or a shell during startup. The repair message
-may contain an `npx` command as text.
+runtime by default. A version-matched development checkout MAY be used only
+when explicit internal development mode is enabled. The wrapper SHALL NOT
+execute or spawn `npx`, npm, `cmd.exe`, or a shell during startup. The repair
+message may contain an `npx` command as text.
 
 #### Scenario: Wrapper starts from the stable runtime without npm
 
@@ -272,6 +302,19 @@ may contain an `npx` command as text.
 - **THEN** it exits non-zero within seconds with a message equivalent to `MCP bridge runtime is not ready. Run: npx -y nsolid-plugin@<plugin-version> setup --harness <harness>`
 - **AND** the message names the harness that launched the wrapper (claude, codex or antigravity)
 - **AND** the pinned plugin version is the release that generated the wrapper
+
+#### Scenario: A project dependency cannot bypass the managed runtime
+
+- **GIVEN** the stable runtime is missing or invalid, a matching `mcp-remote` exists in local/project `node_modules`, and development mode is not enabled
+- **WHEN** the wrapper starts
+- **THEN** it does not import the project dependency and fails with the version-pinned repair message
+
+#### Scenario: Explicit development mode permits only the pinned fallback
+
+- **GIVEN** `NSOLID_MCP_RUNTIME_DEV_FALLBACK=1` is explicitly set for development and a local `mcp-remote` checkout is available
+- **WHEN** the wrapper starts without a ready stable runtime
+- **THEN** it accepts the fallback only when its package name, exact pinned version and proxy file validate
+- **AND** released harness configurations never enable this mode
 
 #### Scenario: An import-time runtime failure becomes the repair message
 
@@ -305,13 +348,25 @@ wrapper-owned harness configuration unhealthy when the runtime is missing or
 invalid, without ever treating bridge readiness as proof of remote endpoint
 reachability.
 
-#### Scenario: Doctor reflects bridge health per harness
+#### Scenario: Required wrapper bridge missing is unhealthy
 
 - **GIVEN** doctor runs for a wrapper-owned harness configuration (native plugin installed for claude, codex or antigravity)
 - **WHEN** the runtime is missing or invalid
 - **THEN** doctor reports `healthy: false` and recommends `nsolid-plugin setup --harness <harness>`
-- **AND** for opencode/pi (and native-HTTP direct installs) the bridge status is informational only and does not affect health
-- **AND** a ready proxy is never reported as proof that the remote MCP endpoint is reachable
+
+#### Scenario: Ready wrapper bridge reports local readiness only
+
+- **GIVEN** doctor runs for a wrapper-owned harness configuration with a ready runtime
+- **WHEN** human or JSON output is produced
+- **THEN** bridge status is `ready` and does not make an otherwise unhealthy report healthy
+- **AND** the output never claims that the remote MCP endpoint is reachable
+
+#### Scenario: Non-wrapper bridge state is informational
+
+- **GIVEN** doctor runs for opencode, pi, a native-HTTP direct install, or claude/codex/antigravity without the native plugin detected
+- **WHEN** the runtime is ready, missing or invalid
+- **THEN** `bridge.required` is false and bridge state does not affect health
+- **AND** human and JSON output distinguish local bridge readiness from remote MCP reachability
 
 ### Requirement: Native MCP OAuth is out of scope
 

@@ -56,8 +56,8 @@ export interface NpmRunner {
    * Runs npm without a shell. On timeout, terminates the managed npm process
    * tree and confirms that it stopped before cleanup is allowed. If that
    * confirmation fails, returns `terminationError` and the caller leaves
-   * staging inert. Spawn failures surface as `spawnError`, never as a fake
-   * exit status.
+   * staging marked retained-live and excluded from publication/cleanup. Spawn
+   * failures surface as `spawnError`, never as a fake exit status.
    */
   run(command: string, args: string[], options: { cwd: string; timeoutMs: number }):
     Promise<NpmRunnerRunResult>
@@ -84,6 +84,15 @@ mutation, no network and no process spawning.
 ### Validation ("ready")
 
 A runtime at `root` is ready iff:
+
+Before reading package metadata, the probe canonicalizes `root`. The
+`mcp-remote` package directory, every transitively resolved package directory,
+each package manifest and `dist/proxy.js` are resolved with `realpath`; each
+canonical target must equal the canonical runtime root or remain below it by a
+path-segment-aware boundary check. Package targets must be directories and
+manifest/proxy targets regular files. A missing canonical target, a broken
+symlink or a symlink whose target escapes the runtime root makes the runtime
+invalid.
 
 1. `root/node_modules/mcp-remote/package.json` parses with
    `name === 'mcp-remote'` and `version === MCP_REMOTE_VERSION` (exact);
@@ -122,7 +131,10 @@ not been vetted/executed yet).
 3. Create staging `parent/.staging-<pid>-<uuid>/` (same filesystem ⇒ atomic
    rename is possible) and write a minimal private `package.json`
    (`{ name: "nsolid-plugin-mcp-remote-runtime", private: true }`) so npm does
-   not walk up into unrelated manifests/workspaces.
+   not walk up into unrelated manifests/workspaces. Before spawning npm, write
+   an adjacent ownership sidecar for the staging tree with the operation token,
+   creator pid, creation time and `active` state; record the managed process
+   group/tree identity immediately after spawn.
 4. Resolve npm (see below) and run, without a shell and with separated argv:
    `install --omit=dev --ignore-scripts --no-audit --no-fund --save-exact
    --no-package-lock mcp-remote@0.1.38`. On timeout the runner terminates the
@@ -149,11 +161,12 @@ runtime parent.
 All writes live under `parent = ~/.agents/nsolid-plugin/runtime/mcp-remote`,
 with `root = parent/<version>`, `staging = parent/.staging-<pid>-<uuid>`,
 `stale = parent/<version>.stale-<uuid>` and `lock =
-parent/.publish-<version>.lock`. Protocol:
+parent/.publish-<version>.lock`. Each staging/stale tree has an adjacent
+ownership sidecar tied to the same unique operation token. Protocol:
 
 1. **Serialize per version.** Before touching `root`, acquire the publication
    lock by exclusive creation (`O_CREAT | O_EXCL`) under the runtime parent.
-   The file records a unique owner token, pid and creation time. Waiters retry
+   The file records the operation token, pid and creation time. Waiters retry
    with bounded backoff while the recorded holder may still be alive. Only a
    successful exclusive create establishes ownership.
 2. **Stale-lock handling.** A lock older than 10 minutes (greater than the
@@ -177,6 +190,7 @@ parent/.publish-<version>.lock`. Protocol:
      destination is atomic on POSIX and Windows: `root` never becomes visible
      partially.
    - `root` present (necessarily invalid — step 3 returned not-ready):
+     first write the ownership sidecar for the future stale path, then run the
      replacement sequence `rename(root → stale-<uuid>)`, then
      `rename(staging → root)`, then remove the stale tree. If the rename-in
      fails with `EEXIST`/`EPERM`/`ENOTEMPTY` (platform refused a
@@ -186,16 +200,16 @@ parent/.publish-<version>.lock`. Protocol:
    `root` is absent (a predecessor died between the two replacement renames)
    needs no special case: it publishes its own validated staging through the
    root-absent branch of step 5. Every interruption state — `root` absent,
-   with or without inert `.staging-*`/`<version>.stale-*` siblings — converges
+   with or without ignored `.staging-*`/`<version>.stale-*` siblings — converges
    deterministically on the next locked operation, and until then the wrapper
    fails fast with the repair message exactly as it does for any missing
    runtime.
 7. **Cleanup ownership.** An operation deletes only what it created: its own
    staging, its own stale-aside tree, its own lock (released in a `finally`;
-   unlinked only when its unique owner token still matches). Orphaned
-   `.staging-*` and `<version>.stale-*` siblings are inert: readiness probes
-   never consult them, nothing ever promotes them, and they are not
-   garbage-collected (consistent with the no-auto-pruning policy).
+   unlinked only when its unique owner token still matches). A later operation
+   may delete an orphan only through the safe-reclamation protocol below.
+   Readiness probes never consult temporary siblings and nothing ever promotes
+   them.
 8. **Atomicity boundary (exact claim).**
    - A *fresh publish* is gap-free: `root` appears only through one atomic
      rename of a fully validated tree.
@@ -206,7 +220,30 @@ parent/.publish-<version>.lock`. Protocol:
      only entered when `root` failed validation); and every interruption
      state recovers deterministically (step 6). We claim preservation of
      valid runtimes and deterministic recovery — not a portable gap-free
-     directory swap, which Node does not expose.
+   directory swap, which Node does not expose.
+
+### Safe orphan reclamation
+
+Temporary-tree cleanup is separate from the no-auto-pruning policy for
+published, versioned runtimes:
+
+- If managed-tree termination cannot be confirmed, setup atomically updates the
+  staging sidecar to `retained-live` before returning `terminationError`. The
+  staging tree remains potentially mutable and is excluded from publication and
+  cleanup. If the marker cannot be written, the tree is retained as unclassified
+  and is never automatically deleted.
+- A later setup may scan ownership sidecars only while holding the per-version
+  publication lock. It may reclaim a staging/stale tree and its sidecar only
+  after a grace period longer than the npm and termination budgets, when the
+  metadata parses, the path is inside the canonical runtime parent, the creator
+  pid is proven dead, no live publication lock carries its operation token and,
+  for staging with a recorded managed process identity, the platform-specific
+  check confirms that process group/tree no longer exists. Unknown liveness,
+  permission errors, missing/malformed metadata or token mismatch means retain.
+- A stale-aside tree is reclaimed only after a valid versioned root exists.
+  Reclamation never restores or promotes an orphan. Tests use a short injected
+  grace period; production uses a fixed conservative grace period documented
+  beside the implementation constant.
 
 ### npm resolution (`resolveNpmCommand`)
 
@@ -300,10 +337,14 @@ A failed precondition aborts onboarding with the actionable
   built.
 - Resolution order: (1) stable runtime
   `~/.agents/nsolid-plugin/runtime/mcp-remote/<MCP_REMOTE_VERSION>/node_modules/mcp-remote`,
-  light-validated (name, exact version, `dist/proxy.js` is a file); (2)
-  development fallback `createRequire(import.meta.url).resolve('mcp-remote/...')`
-  accepted only when it validates against the same pinned version; (3)
-  otherwise fail immediately (non-zero).
+  light-validated (name, exact version, `dist/proxy.js` is a file); (2) only
+  when the explicit internal development mode
+  `NSOLID_MCP_RUNTIME_DEV_FALLBACK=1` is set, development fallback
+  `createRequire(import.meta.url).resolve('mcp-remote/...')`, accepted only when
+  it validates against the same pinned version; (3) otherwise fail immediately
+  (non-zero). Released harness configs never set the development flag. With the
+  flag absent, a local/project `node_modules` cannot mask a missing or invalid
+  managed runtime.
 - **The wrapper never executes or spawns `npx`, npm, `cmd.exe`, or a shell.**
   The repair message may contain an `npx` command as text. The Unix `npx`
   fallback, the Windows `npx.cmd`/`cmd.exe` bootstrap/payload machinery and
@@ -324,8 +365,10 @@ A failed precondition aborts onboarding with the actionable
   wrapper validates, so the printed command always recreates a usable
   runtime even when a newer CLI exists. `MCP_REMOTE_VERSION` is exported by
   the generator and kept in sync with the core module and the root
-  `package.json` dependency by a unit test; the sync test also asserts the
-  wrapper's embedded plugin version matches the generating release.
+  `package.json` `dependencies['mcp-remote']` entry by one assertion. A separate
+  assertion checks that `PLUGIN_VERSION` equals the generating plugin release
+  and the version embedded in the wrapper; neither version domain is compared
+  to the other.
 - URL and headers are handed to the imported proxy as separate
   `process.argv` elements.
 
@@ -376,8 +419,10 @@ optional field (documented in `packages/core/README.md`).
   group, SIGTERM → SIGKILL escalation, root-process close, and polling the
   process group until it no longer exists; Windows waits for `taskkill /T /F`
   and the root process. If termination cannot be confirmed within a bounded
-  deadline, setup leaves staging inert and returns `terminationError` rather
-  than deleting a directory a survivor might still mutate. Arbitrary
+  deadline, setup marks staging `retained-live`, excludes it from publication
+  and cleanup, and returns `terminationError` rather than deleting a directory
+  a survivor might still mutate. Later runs recognize the adjacent ownership
+  sidecar and apply the safe-reclamation protocol. Arbitrary
   descendants that deliberately escape the managed process group are outside
   this portable guarantee; `--ignore-scripts` prevents package lifecycle code
   from creating them. Any previously valid runtime is untouched (the
@@ -386,8 +431,8 @@ optional field (documented in `packages/core/README.md`).
   stored credentials remain valid for retry.
 - Interrupted install: `root` only ever appears via a single atomic rename of
   a fully validated staging tree, so partial runtimes are never published;
-  leftover `.staging-*` and `<version>.stale-*` siblings are inert and
-  ignored by probes.
+  leftover `.staging-*` and `<version>.stale-*` siblings are ignored by probes
+  and reclaimed only when their ownership/liveness proof is safe.
 
 ## Lifecycle / Migration
 

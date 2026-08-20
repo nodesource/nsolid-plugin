@@ -108,8 +108,9 @@ deferred technical debt.
    the runtime version the wrapper validates.
 5. npm failure, timeout, or spawn error during setup yields
    `success: false` and preserves stored credentials. Staging is cleaned only
-   after termination of the managed npm tree is confirmed; otherwise it stays
-   inert and retryable.
+   after termination of the managed npm tree is confirmed; otherwise it is
+   marked retained-live and excluded from publication/cleanup until conservative
+   reclamation proves the creator and managed tree are gone.
 6. Interrupted installation never publishes a partial runtime; a valid
    runtime is never removed by setup; an interrupted replacement leaves a
    deterministic recoverable state that the next setup converges on.
@@ -121,15 +122,17 @@ deferred technical debt.
    boundary.
 9. Runtime readiness verifies each dependency's package name and that its
    installed version satisfies the dependent's declared range, with
-   resolution confined to the runtime root; npm is resolved only from
+   canonical package, manifest and proxy targets confined to the runtime root
+   (including symlink boundaries); npm is resolved only from
    canonical Node.js-anchored candidates (`npm_execpath`, `PATH` and project `.bin`
    are never consulted).
 10. `uninstall`/`logout` preserve the shared runtime.
 11. `doctor` never reports healthy a wrapper-owned harness with a missing
     runtime; OpenCode/Pi runtime status stays informational.
-12. Generator, core module and root `package.json` stay pinned to the same
-    `mcp-remote` version, and the wrapper's embedded plugin version matches
-    the generating release (sync test).
+12. The generator/core runtime constant and root `package.json`
+    `dependencies['mcp-remote']` stay pinned to the same runtime version; a
+    separate assertion keeps the wrapper's embedded plugin version aligned
+    with the generating release.
 13. Lint, `pnpm test`, `pnpm plugin:check`, `pnpm test:marketplace` and
     `openspec validate stage-mcp-runtime-during-setup --strict` pass.
 

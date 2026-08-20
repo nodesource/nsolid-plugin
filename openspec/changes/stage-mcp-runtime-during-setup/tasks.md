@@ -23,7 +23,9 @@ proposal (scope/rollback), design (module contract, sequences), specs
 - [ ] `inspectMcpRemoteRuntime()`: read-only readiness probe (name, exact
       version, `dist/proxy.js`, transitive dependency closure with
       per-dependency name identity, semver range satisfaction and
-      resolution confined to the runtime root).
+      canonical package/manifest/proxy targets confined to the runtime root);
+      missing optional dependencies are tolerated, peer/development
+      dependencies ignored, and missing required dependencies rejected.
 - [ ] Add `semver` to `packages/core` dependencies for range evaluation;
       unparseable ranges fail closed (documented supported syntax in
       `design.md`).
@@ -50,13 +52,16 @@ proposal (scope/rollback), design (module contract, sequences), specs
       before touching `root`; root-absent publish = single rename; invalid
       root replaced by rename-aside + rename-in + stale removal; recovery
       of an absent root is the normal root-absent branch; cleanup strictly
-      limited to operation-created staging/stale/lock paths.
+      limited to operation-created staging/stale/lock paths, except for the
+      lock-held safe-reclamation protocol using ownership/liveness metadata.
 - [ ] Timeout handling: terminate and confirm the managed npm process tree
       stopped (Unix: detached process group, SIGTERM → SIGKILL escalation,
       root close and group-disappearance polling; Windows: await
       `taskkill /T /F` and root close) before staging cleanup; leave staging
-      inert and return `terminationError` when confirmation times out; spawn
-      errors
+      marked retained-live and excluded from publication/cleanup when
+      confirmation times out; later runs reclaim it only after creator death,
+      managed-tree absence, lock-token exclusion and the grace period; return
+      `terminationError`; spawn errors
       (`ENOENT`/`EACCES`/`EPERM`) surfaced as an explicit `spawnError`
       result, never as exit status.
 - [ ] Internal re-export from `packages/core/src/mcp/index.ts`.
@@ -85,10 +90,11 @@ proposal (scope/rollback), design (module contract, sequences), specs
       `MCP_REMOTE_VERSION` **and** `PLUGIN_VERSION` (the generating
       release) in the wrapper; wrapper takes `<serverName> <harness>`,
       validates both, resolves the stable runtime first, version-matched
-      `createRequire` dev fallback second, and never executes or spawns
+      `createRequire` dev fallback second only when
+      `NSOLID_MCP_RUNTIME_DEV_FALLBACK=1` is explicitly set, and never executes or spawns
       `npx`, npm, `cmd.exe`, or a shell (the repair message may contain an
-      `npx` command as text); import-time dependency-resolution failures
-      are translated into the repair message; repair message is
+      `npx` command as text); any import-time resolution or initialization
+      failure is translated into the repair message; repair message is
       version-pinned: `npx -y nsolid-plugin@<PLUGIN_VERSION> setup
       --harness <harness>`; Claude config passes `claude`; Codex and
       Antigravity bootstraps pass `codex`/`antigravity`.
@@ -112,10 +118,14 @@ proposal (scope/rollback), design (module contract, sequences), specs
 - [ ] New `packages/core/test/unit/mcp/mcp-remote-runtime.test.ts`: paths with
       spaces; initial install via fake runner; idempotence; invalid version;
       missing proxy; incomplete transitives; wrong-named transitive;
-      incompatible transitive version; dependency resolution confined to the
-      runtime root; npm error/timeout cleanup; managed process-group timeout
+      incompatible transitive version; missing optional dependency tolerated;
+      peer/dev dependencies ignored; missing required dependency rejected;
+      dependency resolution confined to the runtime root; symlink escapes for
+      `mcp-remote`, `dist/proxy.js` and transitives rejected; npm error/timeout cleanup; managed process-group timeout
       termination confirmation (grandchild included) and unconfirmed-
-      termination staging preservation; npm spawn error;
+      termination staging preservation with retained-live metadata; safe
+      reclamation after proof and retention on unknown/malformed ownership;
+      npm spawn error;
       prior valid runtime survives failed reinstall; publish race; race
       replacing an invalid runtime; interruption between the two replacement
       renames (root absent, stale inert); retry recovery determinism;
@@ -128,11 +138,15 @@ proposal (scope/rollback), design (module contract, sequences), specs
 - [ ] Rewrite `packages/core/test/unit/mcp/mcp-wrapper.test.ts`: stable-runtime
       fixture for `source` and `generated` wrappers; hostile URL/token argv
       boundaries; `npx` sentinel (exit 97) never executed; fast fail when
-      runtime missing / version mismatched; any import-time resolution or
+      runtime missing / version mismatched even when local `node_modules` has a
+      matching package; explicit dev-mode fallback accepts only the pinned
+      package; any import-time resolution or
       initialization failure translated into the repair message; harness-correct,
       version-pinned repair message; no `cmd.exe`/shell execution paths;
-      version sync across core module, generator and root `package.json`
-      plus wrapper-embedded `PLUGIN_VERSION`; old-wrapper/new-CLI repair
+      `MCP_REMOTE_VERSION` sync across the core constant, generator export and
+      root `package.json` `dependencies['mcp-remote']`; separate
+      `PLUGIN_VERSION` sync with the generating plugin release and wrapper;
+      old-wrapper/new-CLI repair
       (wrapper of release X prints `nsolid-plugin@X`, which provisions
       exactly X's pinned runtime version).
 - [ ] Update `packages/core/test/integration/installer.test.ts` (seed runtime
@@ -140,8 +154,11 @@ proposal (scope/rollback), design (module contract, sequences), specs
       runtime failure keeps credentials with `success: false`;
       five-harness convergence; opencode/pi dispatcher scenarios (runtime
       provisioned before assets); `install()` purity regression guards;
-      uninstall/logout preserve runtime; doctor unhealthy for wrapper-owned
-      runtime-missing cases.
+      uninstall/logout preserve runtime; doctor bridge matrix covering ready
+      and missing wrapper-owned runtimes, opencode/pi, native-HTTP direct
+      installs, and claude/codex/antigravity without native plugin detection;
+      only required-but-unready is unhealthy and no output claims remote MCP
+      reachability.
 
 ## 7. Documentation & lifecycle
 
