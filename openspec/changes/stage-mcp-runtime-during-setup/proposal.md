@@ -9,7 +9,7 @@ plugin installs (Claude, Codex, Antigravity) stage the wrapper **without**
 `node_modules`, so the wrapper cannot resolve `mcp-remote/dist/proxy.js`
 locally and falls back to:
 
-```
+```sh
 npx -y mcp-remote@0.1.38 ...
 ```
 
@@ -26,18 +26,33 @@ Move the `mcp-remote` download from **startup** to **setup**:
 
 - `nsolid-plugin setup --harness <harness>` provisions a shared, versioned,
   local runtime at `~/.agents/nsolid-plugin/runtime/mcp-remote/0.1.38/`
-  (exact-pinned `mcp-remote` with its transitive dependencies) for **all five**
-  harnesses, keeping the experience uniform.
+  (exact-pinned `mcp-remote` with its transitive dependencies) for **all
+  five** harnesses, keeping the experience uniform. The onboarding
+  dispatchers (the native-plugin bootstrap and the CLI) satisfy this runtime
+  precondition before any harness-specific asset installation; `install()`
+  itself stays free of authentication and dependency bootstrap.
 - The wrapper resolves that stable copy (validating name, exact version and
-  `dist/proxy.js`) before importing it. A `createRequire(import.meta.url)`
-  resolution remains only as a development-checkout convenience.
+  `dist/proxy.js`) before importing it, and translates import-time
+  dependency-resolution failures into the standard repair message. A
+  `createRequire(import.meta.url)` resolution remains only as a
+  development-checkout convenience.
 - The automatic `npx` fallback (Unix spawn, Windows `cmd.exe`/`npx.cmd`
-  bootstrap/payload) is **removed**. If the runtime is missing or corrupt, the
-  wrapper fails within seconds with an actionable message naming the correct
-  repair command (`npx -y nsolid-plugin setup --harness <harness>`).
-- Installation is idempotent, atomic (staging + rename on the same
-  filesystem), concurrency-safe (racing setups converge on one valid runtime),
-  and never runs npm when a valid runtime already exists.
+  bootstrap/payload) is **removed**. The wrapper never executes or spawns
+  `npx`, npm, `cmd.exe`, or a shell. If the runtime is missing or corrupt,
+  the wrapper fails within seconds with an actionable, version-pinned repair
+  command (`npx -y nsolid-plugin@<plugin-version> setup --harness
+  <harness>`) that recreates exactly the runtime version the wrapper
+  validates.
+- Installation is idempotent and never runs npm when a valid runtime already
+  exists. Publication renames a fully validated staging tree into place
+  under a per-version lock: a valid runtime is never destroyed, racing
+  setups converge on one valid runtime, and an interrupted replacement
+  (root briefly absent between two renames) recovers deterministically on
+  the next setup.
+- npm is resolved only from candidates anchored to the running Node.js
+  executable — never from `PATH`, the project, or `npm_execpath` — so
+  neither a hostile project nor another package manager can substitute the
+  installer.
 - `doctor` gains an MCP bridge check: for harnesses whose MCP servers are
   served through the wrapper, a missing/invalid runtime makes the report
   unhealthy with the repair hint; for OpenCode/Pi it is informational only
@@ -54,15 +69,22 @@ deferred technical debt.
 
 ## Affected Components and Files
 
-- `packages/core/src/mcp/mcp-remote-runtime.ts` (new) — runtime inspect/ensure.
+- `packages/core/src/mcp/mcp-remote-runtime.ts` (new) — runtime
+  inspect/ensure, publication protocol, trusted npm resolution.
 - `packages/core/src/mcp/index.ts` — internal re-exports.
 - `packages/core/src/index.ts` — `setup()` provisions the runtime;
   `doctor()` reports bridge status.
+- `packages/core/scripts/setup.mjs` — satisfies the runtime precondition
+  before delegating to `install()` for OpenCode/Pi.
+- `packages/core/src/cli.ts` — satisfies the runtime precondition before the
+  fallback `install` command; updated messages.
+- `packages/core/package.json` — adds the `semver` dependency used by the
+  readiness probe.
 - `packages/core/src/types.ts` — `DoctorReport.bridge`.
 - `packages/core/src/utils/format.ts` — human doctor output.
-- `packages/core/src/cli.ts`, `packages/core/scripts/setup.mjs` — messages.
-- `scripts/plugin-generators.mjs` — wrapper/generator rewrite (stable runtime,
-  harness argument, no npx), exported `MCP_REMOTE_VERSION`.
+- `scripts/plugin-generators.mjs` — wrapper/generator rewrite (stable
+  runtime, harness argument, no `npx`/npm/shell execution, import-error
+  translation), exported `MCP_REMOTE_VERSION` and embedded `PLUGIN_VERSION`.
 - Regenerated root artifacts: `.mcp.json`, `.claude-mcp.json`,
   `mcp_config.json`, `scripts/mcp-wrapper.js` (via `pnpm plugin:root`).
 - Tests: `packages/core/test/unit/mcp/mcp-remote-runtime.test.ts` (new),
@@ -73,23 +95,42 @@ deferred technical debt.
 
 ## Success Criteria / Acceptance Tests
 
-1. `setup` for any of the five harnesses leaves the shared exact runtime ready
-   (spec: first setup installs it; ready runtime ⇒ npm is not invoked).
+1. `setup` for any of the five harnesses leaves the shared exact runtime
+   ready (spec: first setup installs it; ready runtime ⇒ npm is not
+   invoked), through either onboarding dispatcher.
 2. Multi-harness setup reuses a single installation (one runtime root).
-3. No production wrapper executes `npx` or consults npm during startup; a fake
-   `npx` sentinel that exits 97 is never executed (unit test).
-4. Missing/corrupt runtime fails fast with the harness-correct repair command.
-5. npm failure/timeout during setup yields `success: false`, preserves stored
-   credentials, cleans its staging directory, and allows retry.
-6. Interrupted installation never publishes a partial runtime (atomic rename).
-7. Concurrent setups converge on one valid runtime.
-8. URLs/tokens with spaces, quotes, `&`, `%PATH%` never cross a shell boundary.
-9. `uninstall`/`logout` preserve the shared runtime.
-10. `doctor` never reports healthy a wrapper-owned harness with a missing
+3. No production wrapper executes or spawns `npx`, npm, `cmd.exe`, or a
+   shell during startup; a fake `npx` sentinel that exits 97 is never
+   executed (unit test). The repair message may contain an `npx` command as
+   text.
+4. Missing/corrupt runtime fails fast with the harness-correct,
+   version-pinned repair command; executing that command provisions exactly
+   the runtime version the wrapper validates.
+5. npm failure, timeout, or spawn error during setup yields
+   `success: false` and preserves stored credentials. Staging is cleaned only
+   after termination of the managed npm tree is confirmed; otherwise it stays
+   inert and retryable.
+6. Interrupted installation never publishes a partial runtime; a valid
+   runtime is never removed by setup; an interrupted replacement leaves a
+   deterministic recoverable state that the next setup converges on.
+7. Concurrent setups converge on one valid runtime, including when replacing
+   an invalid one. The publication lock serializes replacement; only a stale
+   lock whose holder is proven dead is broken, and ownership still requires a
+   fresh exclusive acquisition.
+8. URLs/tokens with spaces, quotes, `&`, `%PATH%` never cross a shell
+   boundary.
+9. Runtime readiness verifies each dependency's package name and that its
+   installed version satisfies the dependent's declared range, with
+   resolution confined to the runtime root; npm is resolved only from
+   canonical Node.js-anchored candidates (`npm_execpath`, `PATH` and project `.bin`
+   are never consulted).
+10. `uninstall`/`logout` preserve the shared runtime.
+11. `doctor` never reports healthy a wrapper-owned harness with a missing
     runtime; OpenCode/Pi runtime status stays informational.
-11. Generator, core module and root `package.json` stay pinned to the same
-    `mcp-remote` version (sync test).
-12. Lint, `pnpm test`, `pnpm plugin:check`, `pnpm test:marketplace` and
+12. Generator, core module and root `package.json` stay pinned to the same
+    `mcp-remote` version, and the wrapper's embedded plugin version matches
+    the generating release (sync test).
+13. Lint, `pnpm test`, `pnpm plugin:check`, `pnpm test:marketplace` and
     `openspec validate stage-mcp-runtime-during-setup --strict` pass.
 
 ## Rollback Plan
@@ -108,4 +149,4 @@ nothing new outside the runtime directory.
 `openspec/config.yaml` asks for Plannotator `submit_plan` review. The
 `submit_plan` tool is not available to this agent's toolset; limitation
 registered here. Proceeding under the explicit user approval already granted
-for this scope (handoff: `/tmp/nsolid-plugin-mcp-runtime-setup-handoff.md`).
+for this scope.
