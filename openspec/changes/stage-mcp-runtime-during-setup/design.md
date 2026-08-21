@@ -128,8 +128,9 @@ not been vetted/executed yet).
 1. `inspectMcpRemoteRuntime()` → ready ⇒ return `{ installed: false, ... }`
    without invoking npm (idempotence; no network, no lock taken).
 2. Create the controlled parent `~/.agents/nsolid-plugin/runtime/mcp-remote/`.
-3. Create staging `parent/.staging-<pid>-<uuid>/` (same filesystem ⇒ atomic
-   rename is possible) and write a minimal private `package.json`
+3. Create staging `parent/.staging-<pid>-<uuid>/` as a sibling of the versioned
+   root under the controlled runtime parent. This same-filesystem placement is
+   required for atomic publication, not an optimization. Write a minimal private `package.json`
    (`{ name: "nsolid-plugin-mcp-remote-runtime", private: true }`) so npm does
    not walk up into unrelated manifests/workspaces. Before spawning npm, write
    an adjacent ownership sidecar for the staging tree with the operation token,
@@ -196,6 +197,9 @@ ownership sidecar tied to the same unique operation token. Protocol:
      fails with `EEXIST`/`EPERM`/`ENOTEMPTY` (platform refused a
      directory-over-directory rename because a destination appeared), loop
      back to step 3 — the lock is still held.
+   - Publication never falls back to copying across filesystems. `EXDEV` or
+     any equivalent cross-filesystem rename failure fails closed, leaves an
+     existing runtime untouched and returns the actionable setup error.
 6. **Recovery is the normal flow.** An operation that acquires the lock while
    `root` is absent (a predecessor died between the two replacement renames)
    needs no special case: it publishes its own validated staging through the
@@ -337,11 +341,15 @@ A failed precondition aborts onboarding with the actionable
   built.
 - Resolution order: (1) stable runtime
   `~/.agents/nsolid-plugin/runtime/mcp-remote/<MCP_REMOTE_VERSION>/node_modules/mcp-remote`,
-  light-validated (name, exact version, `dist/proxy.js` is a file); (2) only
+  validated immediately before import by canonicalizing the runtime root,
+  package directory, `package.json` and `dist/proxy.js`, requiring the expected
+  directory/file types and enforcing segment-aware containment under the
+  canonical managed runtime root; (2) only
   when the explicit internal development mode
   `NSOLID_MCP_RUNTIME_DEV_FALLBACK=1` is set, development fallback
   `createRequire(import.meta.url).resolve('mcp-remote/...')`, accepted only when
-  it validates against the same pinned version; (3) otherwise fail immediately
+  it validates against the same pinned version and its canonical manifest and
+  proxy remain inside the canonical fallback package directory; (3) otherwise fail immediately
   (non-zero). Released harness configs never set the development flag. With the
   flag absent, a local/project `node_modules` cannot mask a missing or invalid
   managed runtime.
@@ -349,14 +357,15 @@ A failed precondition aborts onboarding with the actionable
   The repair message may contain an `npx` command as text. The Unix `npx`
   fallback, the Windows `npx.cmd`/`cmd.exe` bootstrap/payload machinery and
   its resolution helpers are deleted.
-- Import-time failure translation: any error thrown while importing or
-  initializing the light-validated `dist/proxy.js` (including missing or
-  incompatible transitives) becomes the same harness-specific repair message
-  instead of a raw module error. Dependency-name and version-range validation
-  remains the setup-time readiness probe's responsibility; the wrapper stays
-  dependency-free and does not evaluate semver ranges. A runtime that was
-  externally mutated after publication but still imports successfully is
-  revalidated on the next setup/doctor run, not during every wrapper startup.
+- Import-time failure translation: any error thrown or rejection surfaced
+  while importing or initializing the entry-validated `dist/proxy.js`
+  (including missing or incompatible transitives) becomes the same
+  harness-specific repair message instead of a raw module error. Direct
+  process termination by imported code, including `process.exit(1)` in the
+  pinned package, cannot be translated by an in-process wrapper; monitoring a
+  child process is outside this change. Dependency-name and version-range
+  validation remains the setup-time readiness probe's responsibility; the
+  wrapper stays dependency-free and does not evaluate semver ranges.
 - Version-pinned repair command: the generator embeds `MCP_REMOTE_VERSION`
   **and** `PLUGIN_VERSION` (the plugin release that generated the wrapper);
   the message reads

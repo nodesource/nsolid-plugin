@@ -37,9 +37,12 @@ proposal (scope/rollback), design (module contract, sequences), specs
       consults `PATH`, `cwd`/project `.bin`, or
       `npm_execpath` (fake, renamed, symlinked and pnpm/yarn values are
       ignored by construction).
-- [ ] `ensureMcpRemoteRuntime()`: idempotent check, staging + private
-      package.json, npm without shell (separated argv, `--save-exact` flag
-      set per design), bounded stderr tail, 5-minute timeout, staging
+- [ ] `ensureMcpRemoteRuntime()`: idempotent check, staging sibling under the
+      controlled runtime parent (same filesystem as the versioned root) +
+      private package.json, npm without shell (separated argv and the complete
+      `--omit=dev`, `--ignore-scripts`, `--no-audit`, `--no-fund`,
+      `--save-exact`, `--no-package-lock` safety set), bounded stderr tail,
+      5-minute timeout, staging
       validation, publication under the per-version lock, race
       convergence, invalid-runtime replacement via rename-aside, actionable
       error.
@@ -53,7 +56,8 @@ proposal (scope/rollback), design (module contract, sequences), specs
       root replaced by rename-aside + rename-in + stale removal; recovery
       of an absent root is the normal root-absent branch; cleanup strictly
       limited to operation-created staging/stale/lock paths, except for the
-      lock-held safe-reclamation protocol using ownership/liveness metadata.
+      lock-held safe-reclamation protocol using ownership/liveness metadata;
+      `EXDEV`/cross-filesystem rename fails closed with no copy fallback.
 - [ ] Timeout handling: terminate and confirm the managed npm process tree
       stopped (Unix: detached process group, SIGTERM → SIGKILL escalation,
       root close and group-disappearance polling; Windows: await
@@ -93,8 +97,13 @@ proposal (scope/rollback), design (module contract, sequences), specs
       `createRequire` dev fallback second only when
       `NSOLID_MCP_RUNTIME_DEV_FALLBACK=1` is explicitly set, and never executes or spawns
       `npx`, npm, `cmd.exe`, or a shell (the repair message may contain an
-      `npx` command as text); any import-time resolution or initialization
-      failure is translated into the repair message; repair message is
+      `npx` command as text); immediately before import, canonicalizes the
+      stable root, package directory, manifest and proxy and enforces
+      segment-aware containment, while the explicit dev fallback confines its
+      manifest/proxy to its canonical package directory; thrown import errors
+      and surfaced initialization rejections are translated into the repair
+      message, while direct imported-code `process.exit` is an explicit
+      in-process limitation (no child-process redesign in this change); repair message is
       version-pinned: `npx -y nsolid-plugin@<PLUGIN_VERSION> setup
       --harness <harness>`; Claude config passes `claude`; Codex and
       Antigravity bootstraps pass `codex`/`antigravity`.
@@ -134,7 +143,10 @@ proposal (scope/rollback), design (module contract, sequences), specs
       fails;
       stale dead-lock break followed by fresh acquisition, live-lock
       non-eviction and competing-breaker serialization; `shell: false` argv
-      separation; trusted npm resolution (fake `npm-cli.js`, renamed entry
+      separation; staging is a same-parent/same-filesystem sibling and
+      `EXDEV` fails without a copy fallback; fake and real runner argv assert
+      the complete `--omit=dev`, `--ignore-scripts`, `--no-audit`, `--no-fund`,
+      `--save-exact`, `--no-package-lock` safety set; trusted npm resolution (fake `npm-cli.js`, renamed entry
       point, anchored-candidate symlink/path escape, pnpm/yarn `npm_execpath`
       ignored, supported Node/npm layouts,
       `node_modules/.bin` and `PATH` never consulted); no secrets in output.
@@ -145,8 +157,13 @@ proposal (scope/rollback), design (module contract, sequences), specs
       modes; fast fail when
       runtime missing / version mismatched even when local `node_modules` has a
       matching package; explicit dev-mode fallback accepts only the pinned
-      package; any import-time resolution or
-      initialization failure translated into the repair message; harness-correct,
+      package; post-publication package-directory, manifest and proxy
+      symlink/replacement escapes are rejected immediately before import for
+      both source and generated wrappers, with the dev fallback checked against
+      its own canonical package boundary; thrown import errors and surfaced
+      initialization rejections translated into the repair message;
+      direct imported-code process termination is not promised to translate;
+      harness-correct,
       version-pinned repair message; no `cmd.exe`/shell execution paths;
       `MCP_REMOTE_VERSION` sync across the core constant, generator export and
       root `package.json` `dependencies['mcp-remote']`; separate
@@ -176,6 +193,8 @@ proposal (scope/rollback), design (module contract, sequences), specs
 
 ## 8. Validation & commit
 
+- [ ] `openspec validate stage-mcp-runtime-during-setup --strict` passes after
+      all final spec and task edits.
 - [ ] `pnpm --filter nsolid-plugin lint`, `pnpm --filter nsolid-plugin test`,
       `pnpm plugin:check`, `pnpm test:marketplace`, `pnpm test`.
 - [ ] `git diff --check`, `git status --short` clean of drift.
