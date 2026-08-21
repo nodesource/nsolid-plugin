@@ -129,6 +129,9 @@ proposal (scope/rollback), design (module contract, sequences), specs
       prior valid runtime survives failed reinstall; publish race; race
       replacing an invalid runtime; interruption between the two replacement
       renames (root absent, stale inert); retry recovery determinism;
+      pre-existing invalid runtime (wrong version, missing proxy or incomplete
+      dependency closure) remains untouched when npm or staging validation
+      fails;
       stale dead-lock break followed by fresh acquisition, live-lock
       non-eviction and competing-breaker serialization; `shell: false` argv
       separation; trusted npm resolution (fake `npm-cli.js`, renamed entry
@@ -137,7 +140,9 @@ proposal (scope/rollback), design (module contract, sequences), specs
       `node_modules/.bin` and `PATH` never consulted); no secrets in output.
 - [ ] Rewrite `packages/core/test/unit/mcp/mcp-wrapper.test.ts`: stable-runtime
       fixture for `source` and `generated` wrappers; hostile URL/token argv
-      boundaries; `npx` sentinel (exit 97) never executed; fast fail when
+      boundaries; `npx` sentinel (exit 97) never executed; direct `npm`
+      sentinel never executed in stable-runtime and explicit dev-fallback
+      modes; fast fail when
       runtime missing / version mismatched even when local `node_modules` has a
       matching package; explicit dev-mode fallback accepts only the pinned
       package; any import-time resolution or
