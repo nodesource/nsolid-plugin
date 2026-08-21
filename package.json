@@ -30,7 +30,8 @@
     "eslint": "9.39.4",
     "husky": "9.1.7",
     "neostandard": "0.13.0",
-    "tsx": "4.22.4"
+    "tsx": "4.22.4",
+    "undici": "7.28.0"
   },
   "dependencies": {
     "mcp-remote": "0.1.38"

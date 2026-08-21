@@ -27,8 +27,10 @@ const os = require('os')
 const path = require('path')
 const dns = require('dns').promises
 const net = require('net')
+const { randomUUID } = require('crypto')
 const { pipeline } = require('stream/promises')
 const { Readable } = require('stream')
+const { Agent } = require('undici')
 
 const EXTENSIONS = {
   cpuprofile: '.cpuprofile',
@@ -300,7 +302,7 @@ async function validateConsoleUrl (consoleUrl) {
   }
 
   if (process.env.NSOLID_ALLOW_INSECURE_CONSOLE) {
-    return
+    return null
   }
 
   if (url.protocol !== 'https:') {
@@ -322,6 +324,51 @@ async function validateConsoleUrl (consoleUrl) {
       throw new Error(`consoleUrl resolves to a private or local address: ${consoleUrl} (${ip})`)
     }
   }
+
+  return ips
+}
+
+function createPinnedDispatcher (consoleUrl, resolvedIps) {
+  const expectedHostname = new URL(consoleUrl).hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '')
+  const allowedIps = [...new Set(resolvedIps)]
+
+  if (allowedIps.length === 0) {
+    throw new Error(`No validated addresses available for consoleUrl: ${consoleUrl}`)
+  }
+
+  return new Agent({
+    connect: {
+      autoSelectFamily: true,
+      lookup: (hostname, options, callback) => {
+        const requestedHostname = hostname.toLowerCase().replace(/\.$/, '')
+        if (requestedHostname !== expectedHostname) {
+          const error = new Error(`Refusing to resolve unvalidated hostname: ${hostname}`)
+          error.code = 'ENOTFOUND'
+          callback(error)
+          return
+        }
+
+        const family = typeof options === 'number' ? options : options?.family
+        const matches = allowedIps
+          .map(address => ({ address, family: net.isIP(address) }))
+          .filter(record => record.family !== 0 && (!family || record.family === family))
+
+        if (matches.length === 0) {
+          const error = new Error(`No validated address matches the requested family for: ${hostname}`)
+          error.code = 'ENOTFOUND'
+          callback(error)
+          return
+        }
+
+        if (typeof options === 'object' && options?.all) {
+          callback(null, matches)
+          return
+        }
+
+        callback(null, matches[0].address, matches[0].family)
+      }
+    }
+  })
 }
 
 async function readCredentials () {
@@ -349,33 +396,55 @@ async function readCredentials () {
     throw new Error('Missing "serviceToken" in ~/.agents/.nodesource-auth.json')
   }
 
-  await validateConsoleUrl(consoleUrl)
+  const resolvedIps = await validateConsoleUrl(consoleUrl)
 
-  return { consoleUrl: consoleUrl.replace(/\/$/, ''), token }
+  return { consoleUrl: consoleUrl.replace(/\/$/, ''), token, resolvedIps }
 }
 
-async function downloadAsset (consoleUrl, token, assetId, destPath) {
+async function downloadAsset (consoleUrl, token, assetId, destPath, validatedIps) {
   const url = `${consoleUrl}/api/v3/asset/${encodeURIComponent(assetId)}`
   console.log(`Fetching asset from: ${url}`)
 
-  const res = await fetch(url, {
-    headers: {
-      'x-nsolid-service-token': token,
-      Accept: 'application/json'
-    },
-    // 10-minute total budget: large snapshots (>256MB) over slow links
-    // must not abort at 120s mid-body.
-    signal: AbortSignal.timeout(600_000)
-  })
+  const resolvedIps = validatedIps === undefined
+    ? await validateConsoleUrl(consoleUrl)
+    : validatedIps
+  const dispatcher = resolvedIps === null
+    ? undefined
+    : createPinnedDispatcher(consoleUrl, resolvedIps)
 
-  if (!res.ok) {
-    throw new Error(`Console returned ${res.status} ${res.statusText} for asset ${assetId}`)
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'x-nsolid-service-token': token,
+        Accept: 'application/json'
+      },
+      redirect: 'error',
+      dispatcher,
+      // 10-minute total budget: large snapshots (>256MB) over slow links
+      // must not abort at 120s mid-body.
+      signal: AbortSignal.timeout(600_000)
+    })
+
+    if (!res.ok) {
+      await res.body?.cancel()
+      throw new Error(`Console returned ${res.status} ${res.statusText} for asset ${assetId}`)
+    }
+
+    // Keep incomplete bytes invisible to resolveExistingAsset(). The temporary
+    // file lives beside the destination so renameSync publishes it atomically.
+    const tempPath = `${destPath}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tempPath, { flags: 'wx' }))
+      fs.renameSync(tempPath, destPath)
+    } catch (error) {
+      fs.rmSync(tempPath, { force: true })
+      throw error
+    }
+
+    return fs.statSync(destPath).size
+  } finally {
+    await dispatcher?.close()
   }
-
-  // Stream body straight to disk — constant memory regardless of asset size.
-  // Node's fetch transparently decompresses Content-Encoding: gzip.
-  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(destPath))
-  return fs.statSync(destPath).size
 }
 
 async function main () {
@@ -394,7 +463,7 @@ async function main () {
   }
 
   const workspaceRoot = process.cwd()
-  const { consoleUrl, token } = await readCredentials()
+  const { consoleUrl, token, resolvedIps } = await readCredentials()
 
   const assetsDir = getAssetsDir(workspaceRoot)
   fs.mkdirSync(assetsDir, { recursive: true })
@@ -405,7 +474,7 @@ async function main () {
   if (existingAsset.exists) {
     fileSize = fs.statSync(existingAsset.filePath).size
   } else {
-    fileSize = await downloadAsset(consoleUrl, token, assetId, existingAsset.filePath)
+    fileSize = await downloadAsset(consoleUrl, token, assetId, existingAsset.filePath, resolvedIps)
   }
 
   // Register in .nsolid/assets/index.json so the extension's AssetService can discover it

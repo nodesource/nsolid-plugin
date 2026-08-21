@@ -26,7 +26,7 @@ description: >-
 
 Run the bundled script (use the absolute path of the directory where you read this SKILL.md):
 
-```
+```sh
 node "<skill-dir>/fetch-asset.cjs" <assetId> <assetType> <appName>
 ```
 
