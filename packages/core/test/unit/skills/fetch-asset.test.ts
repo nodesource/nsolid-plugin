@@ -255,9 +255,8 @@ describe('validateConsoleUrl', () => {
   })
 })
 
-function makeFakeRequest (respond: () => IncomingMessage) {
+function makeFakeRequest (respond: () => void) {
   const req = new EventEmitter() as ClientRequest
-  req.setTimeout = () => req
   req.end = (() => {
     respond()
     return req
@@ -316,7 +315,7 @@ describe('downloadAsset', () => {
         headers: (options.headers ?? {}) as Record<string, string>,
         lookup: options.lookup
       })
-      return makeFakeRequest(() => callback?.(makeFakeResponse(payload)))
+      return makeFakeRequest(() => { callback?.(makeFakeResponse(payload)) })
     }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
@@ -346,7 +345,7 @@ describe('downloadAsset', () => {
     const urls: string[] = []
     t.mock.method(https, 'request', ((input: string | URL, _options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
       urls.push(String(input))
-      return makeFakeRequest(() => callback?.(makeFakeResponse(Buffer.from([1, 2, 3]))))
+      return makeFakeRequest(() => { callback?.(makeFakeResponse(Buffer.from([1, 2, 3]))) })
     }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
@@ -363,7 +362,7 @@ describe('downloadAsset', () => {
 
   it('throws on non-ok responses without creating a file', async (t) => {
     t.mock.method(https, 'request', ((_input: string | URL, _options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
-      return makeFakeRequest(() => callback?.(makeFakeResponse(Buffer.from('not found'), 404, 'Not Found')))
+      return makeFakeRequest(() => { callback?.(makeFakeResponse(Buffer.from('not found'), 404, 'Not Found')) })
     }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
@@ -377,10 +376,12 @@ describe('downloadAsset', () => {
 
   it('removes temporary bytes when the response stream fails', async (t) => {
     t.mock.method(https, 'request', ((_input: string | URL, _options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
-      return makeFakeRequest(() => callback?.(makeFakeResponse(function (this: Readable) {
-        this.push(Buffer.from([1, 2, 3]))
-        queueMicrotask(() => this.destroy(new Error('stream interrupted')))
-      })))
+      return makeFakeRequest(() => {
+        callback?.(makeFakeResponse(function (this: Readable) {
+          this.push(Buffer.from([1, 2, 3]))
+          queueMicrotask(() => this.destroy(new Error('stream interrupted')))
+        }))
+      })
     }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
