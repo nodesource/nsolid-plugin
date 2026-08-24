@@ -29,8 +29,8 @@ const dns = require('dns').promises
 const net = require('net')
 const { randomUUID } = require('crypto')
 const { pipeline } = require('stream/promises')
-const { Readable } = require('stream')
-const { Agent } = require('undici')
+const http = require('http')
+const https = require('https')
 
 const EXTENSIONS = {
   cpuprofile: '.cpuprofile',
@@ -328,7 +328,12 @@ async function validateConsoleUrl (consoleUrl) {
   return ips
 }
 
-function createPinnedDispatcher (consoleUrl, resolvedIps) {
+// Returns a dns.lookup-compatible function that resolves the console hostname
+// exclusively to the addresses validated by validateConsoleUrl(). Passing it as
+// the `lookup` option of http/https.request pins the connection to those
+// addresses and closes the DNS-rebinding gap between validation and connect.
+// Built-in modules only — this script must stay standalone (no node_modules).
+function createPinnedLookup (consoleUrl, resolvedIps) {
   const expectedHostname = new URL(consoleUrl).hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '')
   const allowedIps = [...new Set(resolvedIps)]
 
@@ -336,39 +341,34 @@ function createPinnedDispatcher (consoleUrl, resolvedIps) {
     throw new Error(`No validated addresses available for consoleUrl: ${consoleUrl}`)
   }
 
-  return new Agent({
-    connect: {
-      autoSelectFamily: true,
-      lookup: (hostname, options, callback) => {
-        const requestedHostname = hostname.toLowerCase().replace(/\.$/, '')
-        if (requestedHostname !== expectedHostname) {
-          const error = new Error(`Refusing to resolve unvalidated hostname: ${hostname}`)
-          error.code = 'ENOTFOUND'
-          callback(error)
-          return
-        }
-
-        const family = typeof options === 'number' ? options : options?.family
-        const matches = allowedIps
-          .map(address => ({ address, family: net.isIP(address) }))
-          .filter(record => record.family !== 0 && (!family || record.family === family))
-
-        if (matches.length === 0) {
-          const error = new Error(`No validated address matches the requested family for: ${hostname}`)
-          error.code = 'ENOTFOUND'
-          callback(error)
-          return
-        }
-
-        if (typeof options === 'object' && options?.all) {
-          callback(null, matches)
-          return
-        }
-
-        callback(null, matches[0].address, matches[0].family)
-      }
+  return (hostname, options, callback) => {
+    const requestedHostname = hostname.toLowerCase().replace(/\.$/, '')
+    if (requestedHostname !== expectedHostname) {
+      const error = new Error(`Refusing to resolve unvalidated hostname: ${hostname}`)
+      error.code = 'ENOTFOUND'
+      callback(error)
+      return
     }
-  })
+
+    const family = typeof options === 'number' ? options : options?.family
+    const matches = allowedIps
+      .map(address => ({ address, family: net.isIP(address) }))
+      .filter(record => record.family !== 0 && (!family || record.family === family))
+
+    if (matches.length === 0) {
+      const error = new Error(`No validated address matches the requested family for: ${hostname}`)
+      error.code = 'ENOTFOUND'
+      callback(error)
+      return
+    }
+
+    if (typeof options === 'object' && options?.all) {
+      callback(null, matches)
+      return
+    }
+
+    callback(null, matches[0].address, matches[0].family)
+  }
 }
 
 async function readCredentials () {
@@ -402,48 +402,65 @@ async function readCredentials () {
 }
 
 async function downloadAsset (consoleUrl, token, assetId, destPath, validatedIps) {
-  const url = `${consoleUrl}/api/v3/asset/${encodeURIComponent(assetId)}`
+  const url = new URL(`${consoleUrl}/api/v3/asset/${encodeURIComponent(assetId)}`)
   console.log(`Fetching asset from: ${url}`)
 
   const resolvedIps = validatedIps === undefined
     ? await validateConsoleUrl(consoleUrl)
     : validatedIps
-  const dispatcher = resolvedIps === null
+  const lookup = resolvedIps === null
     ? undefined
-    : createPinnedDispatcher(consoleUrl, resolvedIps)
+    : createPinnedLookup(consoleUrl, resolvedIps)
+
+  // Keep incomplete bytes invisible to resolveExistingAsset(). The temporary
+  // file lives beside the destination so renameSync publishes it atomically.
+  const tempPath = `${destPath}.${process.pid}.${randomUUID()}.tmp`
+
+  // One absolute deadline spanning connect, response headers, and body — the
+  // same total budget AbortSignal.timeout(600_000) enforced before.
+  // req.setTimeout() would only measure socket inactivity, so a stalled
+  // connection could otherwise exceed the budget indefinitely.
+  let abortInFlight = () => {}
+  const deadline = setTimeout(() => {
+    abortInFlight(new Error(`Download of asset ${assetId} exceeded 10 minutes`))
+  }, 600_000)
 
   try {
-    const res = await fetch(url, {
-      headers: {
-        'x-nsolid-service-token': token,
-        Accept: 'application/json'
-      },
-      redirect: 'error',
-      dispatcher,
-      // 10-minute total budget: large snapshots (>256MB) over slow links
-      // must not abort at 120s mid-body.
-      signal: AbortSignal.timeout(600_000)
+    const res = await new Promise((resolve, reject) => {
+      // http/https.request never follows redirects, so the service token can
+      // never be forwarded to a different origin.
+      const transport = url.protocol === 'http:' ? http : https
+      const req = transport.request(url, {
+        headers: {
+          'x-nsolid-service-token': token,
+          Accept: 'application/json'
+        },
+        lookup
+      }, resolve)
+      abortInFlight = (error) => req.destroy(error)
+      req.on('error', reject)
+      req.end()
     })
 
-    if (!res.ok) {
-      await res.body?.cancel()
-      throw new Error(`Console returned ${res.status} ${res.statusText} for asset ${assetId}`)
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      res.resume() // drain the socket before throwing
+      const isRedirect = res.statusCode >= 300 && res.statusCode < 400
+      throw new Error(
+        `Console returned ${res.statusCode} ${res.statusMessage} for asset ${assetId}` +
+        (isRedirect ? ' (redirects are not followed)' : '')
+      )
     }
 
-    // Keep incomplete bytes invisible to resolveExistingAsset(). The temporary
-    // file lives beside the destination so renameSync publishes it atomically.
-    const tempPath = `${destPath}.${process.pid}.${randomUUID()}.tmp`
-    try {
-      await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tempPath, { flags: 'wx' }))
-      fs.renameSync(tempPath, destPath)
-    } catch (error) {
-      fs.rmSync(tempPath, { force: true })
-      throw error
-    }
+    abortInFlight = (error) => res.destroy(error)
+    await pipeline(res, fs.createWriteStream(tempPath, { flags: 'wx' }))
+    fs.renameSync(tempPath, destPath)
 
     return fs.statSync(destPath).size
+  } catch (error) {
+    fs.rmSync(tempPath, { force: true })
+    throw error
   } finally {
-    await dispatcher?.close()
+    clearTimeout(deadline)
   }
 }
 

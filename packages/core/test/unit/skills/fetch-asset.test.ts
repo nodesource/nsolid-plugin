@@ -5,7 +5,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import https from 'node:https'
+import { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
 import type { TestContext } from 'node:test'
+import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const fetchAssetPath = join(__dirname, '../../../../../skill-assets/fetch-asset.cjs')
@@ -251,6 +255,43 @@ describe('validateConsoleUrl', () => {
   })
 })
 
+function makeFakeRequest (respond: () => IncomingMessage) {
+  const req = new EventEmitter() as ClientRequest
+  req.setTimeout = () => req
+  req.end = (() => {
+    respond()
+    return req
+  }) as ClientRequest['end']
+  req.destroy = ((error?: Error) => {
+    if (error) queueMicrotask(() => req.emit('error', error))
+    return req
+  }) as ClientRequest['destroy']
+  return req
+}
+
+function makeFakeResponse (body: Buffer | ((this: Readable) => void), statusCode = 200, statusMessage = 'OK') {
+  let readCount = 0
+  const res = new Readable({
+    read () {
+      if (readCount++ === 0) {
+        if (Buffer.isBuffer(body)) {
+          this.push(body)
+        } else {
+          // Function bodies own the stream lifecycle (EOF and/or error).
+          body.call(this)
+        }
+        return
+      }
+      if (Buffer.isBuffer(body)) {
+        this.push(null)
+      }
+    }
+  }) as IncomingMessage
+  res.statusCode = statusCode
+  res.statusMessage = statusMessage
+  return res
+}
+
 describe('downloadAsset', () => {
   let tempDir: string
 
@@ -263,23 +304,20 @@ describe('downloadAsset', () => {
   })
 
   it('streams the asset body to disk and returns the file size', async (t) => {
-    const payload = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    const payload = Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
     const calls: Array<{
       url: string
-      headers: Record<string, string>
-      redirect: RequestRedirect | undefined
-      dispatcher: unknown
+      headers: Record<string, string | string[] | undefined>
+      lookup: unknown
     }> = []
-    t.mock.method(globalThis, 'fetch', (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const options = init as RequestInit & { dispatcher?: unknown }
+    t.mock.method(https, 'request', ((input: string | URL, options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
       calls.push({
         url: String(input),
-        headers: (init?.headers ?? {}) as Record<string, string>,
-        redirect: init?.redirect,
-        dispatcher: options.dispatcher,
+        headers: (options.headers ?? {}) as Record<string, string>,
+        lookup: options.lookup
       })
-      return new Response(payload)
-    }) as typeof fetch)
+      return makeFakeRequest(() => callback?.(makeFakeResponse(payload)))
+    }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
     const destPath = join(tempDir, 'heapsnapshot-test.heapsnapshot')
@@ -295,22 +333,21 @@ describe('downloadAsset', () => {
     const stats = await stat(destPath)
     assert.equal(size, stats.size, 'returns the on-disk file size')
     assert.equal(size, payload.byteLength)
-    assert.deepEqual(await readFile(destPath), Buffer.from(payload), 'file bytes match the response body')
+    assert.deepEqual(await readFile(destPath), payload, 'file bytes match the response body')
     assert.equal(calls.length, 1)
     assert.equal(calls[0].url, 'https://console.example.test/api/v3/asset/asset-id-1')
     assert.equal(calls[0].headers['x-nsolid-service-token'], 'secret-token')
     assert.equal(calls[0].headers.Accept, 'application/json')
-    assert.equal(calls[0].redirect, 'error')
-    assert.ok(calls[0].dispatcher, 'uses a dispatcher pinned to validated addresses')
+    assert.equal(typeof calls[0].lookup, 'function', 'uses a lookup pinned to validated addresses')
     assert.deepEqual(await readdir(tempDir), ['heapsnapshot-test.heapsnapshot'])
   })
 
   it('URL-encodes the asset ID in the request path', async (t) => {
     const urls: string[] = []
-    t.mock.method(globalThis, 'fetch', (async (input: RequestInfo | URL) => {
+    t.mock.method(https, 'request', ((input: string | URL, _options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
       urls.push(String(input))
-      return new Response(new Uint8Array([1, 2, 3]))
-    }) as typeof fetch)
+      return makeFakeRequest(() => callback?.(makeFakeResponse(Buffer.from([1, 2, 3]))))
+    }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
     await downloadAsset(
@@ -325,9 +362,9 @@ describe('downloadAsset', () => {
   })
 
   it('throws on non-ok responses without creating a file', async (t) => {
-    t.mock.method(globalThis, 'fetch', (async () => {
-      return new Response('not found', { status: 404, statusText: 'Not Found' })
-    }) as typeof fetch)
+    t.mock.method(https, 'request', ((_input: string | URL, _options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
+      return makeFakeRequest(() => callback?.(makeFakeResponse(Buffer.from('not found'), 404, 'Not Found')))
+    }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
     const destPath = join(tempDir, 'missing.heapsnapshot')
@@ -339,17 +376,12 @@ describe('downloadAsset', () => {
   })
 
   it('removes temporary bytes when the response stream fails', async (t) => {
-    let pullCount = 0
-    const body = new ReadableStream<Uint8Array>({
-      pull (controller) {
-        if (pullCount++ === 0) {
-          controller.enqueue(new Uint8Array([1, 2, 3]))
-          return
-        }
-        controller.error(new Error('stream interrupted'))
-      },
-    })
-    t.mock.method(globalThis, 'fetch', (async () => new Response(body)) as typeof fetch)
+    t.mock.method(https, 'request', ((_input: string | URL, _options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
+      return makeFakeRequest(() => callback?.(makeFakeResponse(function (this: Readable) {
+        this.push(Buffer.from([1, 2, 3]))
+        queueMicrotask(() => this.destroy(new Error('stream interrupted')))
+      })))
+    }) as typeof https.request)
 
     const { downloadAsset } = await loadFetchAsset()
     const destPath = join(tempDir, 'partial.heapsnapshot')
@@ -358,6 +390,24 @@ describe('downloadAsset', () => {
       () => downloadAsset('https://console.example.test', 'token', 'partial-id', destPath, ['93.184.216.34']),
       /stream interrupted/
     )
+    await assert.rejects(() => stat(destPath), /ENOENT/)
+    assert.deepEqual(await readdir(tempDir), [], 'does not leave a temporary file behind')
+  })
+
+  it('aborts when the whole exchange exceeds the 10-minute deadline', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    // The request never responds: covers connect/headers stalling past the
+    // absolute deadline (req.setTimeout would not catch this — it only
+    // measures socket inactivity, and the body timer only starts after
+    // headers arrive).
+    t.mock.method(https, 'request', (() => makeFakeRequest(() => {})) as typeof https.request)
+
+    const { downloadAsset } = await loadFetchAsset()
+    const destPath = join(tempDir, 'stalled.heapsnapshot')
+    const pending = downloadAsset('https://console.example.test', 'token', 'stalled-id', destPath, ['93.184.216.34'])
+    const assertion = assert.rejects(pending, /exceeded 10 minutes/)
+    t.mock.timers.tick(600_000)
+    await assertion
     await assert.rejects(() => stat(destPath), /ENOENT/)
     assert.deepEqual(await readdir(tempDir), [], 'does not leave a temporary file behind')
   })
