@@ -31,6 +31,7 @@ const { randomUUID } = require('crypto')
 const { pipeline } = require('stream/promises')
 const http = require('http')
 const https = require('https')
+const zlib = require('zlib')
 
 const EXTENSIONS = {
   cpuprofile: '.cpuprofile',
@@ -433,7 +434,10 @@ async function downloadAsset (consoleUrl, token, assetId, destPath, validatedIps
       const req = transport.request(url, {
         headers: {
           'x-nsolid-service-token': token,
-          Accept: 'application/json'
+          Accept: 'application/json',
+          // We handle gzip manually below; ask the server for identity so the
+          // common case streams straight to disk.
+          'Accept-Encoding': 'identity'
         },
         lookup
       }, resolve)
@@ -451,8 +455,23 @@ async function downloadAsset (consoleUrl, token, assetId, destPath, validatedIps
       )
     }
 
+    // The console can serve assets gzip-compressed regardless of
+    // Accept-Encoding negotiation (its `compressed` flag). Decompress before
+    // writing so the on-disk asset and the recorded fileSize are always the
+    // plain payload — fetch() used to do this transparently.
+    const encoding = String(res.headers['content-encoding'] ?? 'identity').toLowerCase()
+    if (encoding !== 'identity' && encoding !== 'gzip') {
+      res.resume() // drain the socket before throwing
+      throw new Error(`Unsupported Content-Encoding "${encoding}" for asset ${assetId}`)
+    }
+
     abortInFlight = (error) => res.destroy(error)
-    await pipeline(res, fs.createWriteStream(tempPath, { flags: 'wx' }))
+    const writer = fs.createWriteStream(tempPath, { flags: 'wx' })
+    if (encoding === 'gzip') {
+      await pipeline(res, zlib.createGunzip(), writer)
+    } else {
+      await pipeline(res, writer)
+    }
     fs.renameSync(tempPath, destPath)
 
     return fs.statSync(destPath).size

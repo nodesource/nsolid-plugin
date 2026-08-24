@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import https from 'node:https'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
+import { gzipSync } from 'node:zlib'
 import type { TestContext } from 'node:test'
 import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http'
 
@@ -268,7 +269,7 @@ function makeFakeRequest (respond: () => void) {
   return req
 }
 
-function makeFakeResponse (body: Buffer | ((this: Readable) => void), statusCode = 200, statusMessage = 'OK') {
+function makeFakeResponse (body: Buffer | ((this: Readable) => void), statusCode = 200, statusMessage = 'OK', headers: Record<string, string> = {}) {
   let readCount = 0
   const res = new Readable({
     read () {
@@ -288,6 +289,7 @@ function makeFakeResponse (body: Buffer | ((this: Readable) => void), statusCode
   }) as IncomingMessage
   res.statusCode = statusCode
   res.statusMessage = statusMessage
+  res.headers = headers
   return res
 }
 
@@ -393,6 +395,30 @@ describe('downloadAsset', () => {
     )
     await assert.rejects(() => stat(destPath), /ENOENT/)
     assert.deepEqual(await readdir(tempDir), [], 'does not leave a temporary file behind')
+  })
+
+  it('decompresses gzip-encoded responses before writing to disk', async (t) => {
+    const payload = Buffer.from('heap snapshot payload '.repeat(64))
+    t.mock.method(https, 'request', ((_input: string | URL, _options: RequestOptions, callback?: (res: IncomingMessage) => void) => {
+      return makeFakeRequest(() => {
+        callback?.(makeFakeResponse(gzipSync(payload), 200, 'OK', { 'content-encoding': 'gzip' }))
+      })
+    }) as typeof https.request)
+
+    const { downloadAsset } = await loadFetchAsset()
+    const destPath = join(tempDir, 'gzipped.heapsnapshot')
+
+    const size = await downloadAsset(
+      'https://console.example.test',
+      'token',
+      'gzip-id',
+      destPath,
+      ['93.184.216.34']
+    )
+
+    assert.equal(size, payload.byteLength, 'reports the decompressed size')
+    assert.deepEqual(await readFile(destPath), payload, 'file holds decompressed bytes')
+    assert.deepEqual(await readdir(tempDir), ['gzipped.heapsnapshot'])
   })
 
   it('aborts when the whole exchange exceeds the 10-minute deadline', async (t) => {
