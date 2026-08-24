@@ -292,7 +292,10 @@ message may contain an `npx` command as text.
 
 - **GIVEN** a valid runtime provisioned by setup
 - **WHEN** the harness starts an MCP server through the wrapper
-- **THEN** the wrapper validates the runtime's package name, exact version and `dist/proxy.js`, imports it locally, and passes URL/headers as separate arguments
+- **THEN** immediately before import the wrapper canonicalizes the controlled runtime parent, version root, package directory, package manifest and `dist/proxy.js`
+- **AND** the canonical version root remains within the canonical controlled parent, while the package directory, manifest and proxy remain within the canonical version root with their required directory/file types
+- **AND** replacing the whole version root, package directory, manifest or proxy with a symlink or path that escapes its required boundary fails with the repair message before any package code is imported
+- **AND** the wrapper validates the runtime's package name and exact version, imports `dist/proxy.js` locally, and passes URL/headers as separate arguments
 - **AND** an `npx` sentinel on PATH is never executed
 
 #### Scenario: Missing or corrupt runtime fails fast with the version-pinned repair command

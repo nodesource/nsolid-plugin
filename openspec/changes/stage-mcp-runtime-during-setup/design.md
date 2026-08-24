@@ -85,14 +85,16 @@ mutation, no network and no process spawning.
 
 A runtime at `root` is ready iff:
 
-Before reading package metadata, the probe canonicalizes `root`. The
-`mcp-remote` package directory, every transitively resolved package directory,
-each package manifest and `dist/proxy.js` are resolved with `realpath`; each
-canonical target must equal the canonical runtime root or remain below it by a
-path-segment-aware boundary check. Package targets must be directories and
-manifest/proxy targets regular files. A missing canonical target, a broken
-symlink or a symlink whose target escapes the runtime root makes the runtime
-invalid.
+Before reading package metadata, the probe canonicalizes the controlled runtime
+parent and `root`. The canonical root must remain below the canonical parent by
+a path-segment-aware boundary check; replacing the whole version root with a
+symlink outside that parent makes the runtime invalid. The `mcp-remote` package
+directory, every transitively resolved package directory, each package manifest
+and `dist/proxy.js` are resolved with `realpath`; each canonical target must
+equal the canonical runtime root or remain below it by the same boundary rule.
+Package targets must be directories and manifest/proxy targets regular files. A
+missing canonical target, a broken symlink or a symlink whose target escapes its
+required boundary makes the runtime invalid.
 
 1. `root/node_modules/mcp-remote/package.json` parses with
    `name === 'mcp-remote'` and `version === MCP_REMOTE_VERSION` (exact);
@@ -341,10 +343,11 @@ A failed precondition aborts onboarding with the actionable
   built.
 - Resolution order: (1) stable runtime
   `~/.agents/nsolid-plugin/runtime/mcp-remote/<MCP_REMOTE_VERSION>/node_modules/mcp-remote`,
-  validated immediately before import by canonicalizing the runtime root,
-  package directory, `package.json` and `dist/proxy.js`, requiring the expected
-  directory/file types and enforcing segment-aware containment under the
-  canonical managed runtime root; (2) only
+  validated immediately before import by canonicalizing the controlled runtime
+  parent and version root, requiring the canonical root to remain below that
+  parent, then canonicalizing the package directory, `package.json` and
+  `dist/proxy.js`, requiring the expected directory/file types and enforcing
+  segment-aware containment under the canonical managed runtime root; (2) only
   when the explicit internal development mode
   `NSOLID_MCP_RUNTIME_DEV_FALLBACK=1` is set, development fallback
   `createRequire(import.meta.url).resolve('mcp-remote/...')`, accepted only when

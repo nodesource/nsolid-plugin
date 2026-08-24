@@ -23,6 +23,7 @@ proposal (scope/rollback), design (module contract, sequences), specs
 - [ ] `inspectMcpRemoteRuntime()`: read-only readiness probe (name, exact
       version, `dist/proxy.js`, transitive dependency closure with
       per-dependency name identity, semver range satisfaction and
+      canonical runtime root confined to the canonical controlled parent, plus
       canonical package/manifest/proxy targets confined to the runtime root);
       missing optional dependencies are tolerated, peer/development
       dependencies ignored, and missing required dependencies rejected.
@@ -98,9 +99,10 @@ proposal (scope/rollback), design (module contract, sequences), specs
       `NSOLID_MCP_RUNTIME_DEV_FALLBACK=1` is explicitly set, and never executes or spawns
       `npx`, npm, `cmd.exe`, or a shell (the repair message may contain an
       `npx` command as text); immediately before import, canonicalizes the
-      stable root, package directory, manifest and proxy and enforces
-      segment-aware containment, while the explicit dev fallback confines its
-      manifest/proxy to its canonical package directory; thrown import errors
+      controlled runtime parent, stable root, package directory, manifest and
+      proxy, rejects a stable root outside the canonical parent and enforces
+      segment-aware containment under that root, while the explicit dev fallback
+      confines its manifest/proxy to its canonical package directory; thrown import errors
       and surfaced initialization rejections are translated into the repair
       message, while direct imported-code `process.exit` is an explicit
       in-process limitation (no child-process redesign in this change); repair message is
@@ -157,7 +159,7 @@ proposal (scope/rollback), design (module contract, sequences), specs
       modes; fast fail when
       runtime missing / version mismatched even when local `node_modules` has a
       matching package; explicit dev-mode fallback accepts only the pinned
-      package; post-publication package-directory, manifest and proxy
+      package; post-publication whole-runtime-root, package-directory, manifest and proxy
       symlink/replacement escapes are rejected immediately before import for
       both source and generated wrappers, with the dev fallback checked against
       its own canonical package boundary; thrown import errors and surfaced
