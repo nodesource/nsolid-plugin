@@ -8,7 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const CLI_PATH = join(__dirname, '..', '..', 'src', 'cli.ts')
 
 describe('CLI help', () => {
-  it('describes native plugin harnesses and the OpenCode setup/install split', () => {
+  it('describes native plugin harnesses and the one-step OpenCode onboarding', () => {
     const result = spawnSync(process.execPath, ['--import', 'tsx/esm', CLI_PATH, '--help'], {
       encoding: 'utf-8',
     })
@@ -16,8 +16,10 @@ describe('CLI help', () => {
     assert.strictEqual(result.status, 0, `CLI --help failed: ${result.stderr}`)
     const output = result.stdout
     assert.match(output, /Claude\/Codex\/Antigravity: install from the GitHub plugin root/, 'help must group Codex with root native plugin harnesses')
-    assert.match(output, /setup is auth-only/, 'help must identify setup as auth-only for native plugin harnesses')
-    assert.match(output, /OpenCode: setup --harness opencode authenticates AND writes its skills\/MCP config/, 'help must describe OpenCode setup as one-step direct config')
+    assert.match(output, /setup authenticates and prepares the MCP bridge runtime/, 'help must describe setup as auth + bridge runtime for native plugin harnesses')
+    assert.doesNotMatch(output, /setup is auth-only/, 'help must not describe setup as auth-only')
+    assert.match(output, /OpenCode: run setup --harness opencode — it authenticates, prepares the MCP bridge runtime, and installs skills \+ MCP config in one step\./, 'help must describe one-step OpenCode setup')
+    assert.match(output, /provisions the MCP bridge runtime first, then installs assets/, 'help must describe the install runtime precondition')
     assert.doesNotMatch(output, /OpenCode\/Codex/, 'help must not list Codex as a user-level skill harness')
   })
 

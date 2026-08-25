@@ -1,0 +1,4 @@
+# Keep text files LF on every platform. The generated MCP wrapper is compared
+# byte-for-byte against its committed source (wrapper sync test), so Windows
+# CRLF checkouts would break that guarantee.
+* text=auto eol=lf

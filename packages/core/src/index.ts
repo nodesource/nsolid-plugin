@@ -17,6 +17,7 @@ import type {
   Credentials,
   Logger,
 } from './types.js'
+import { PLUGIN_OWNED_HARNESSES, NATIVE_PLUGIN_HARNESSES } from './types.js'
 import { validateBundle } from './validate.js'
 import { ensureAuthenticated, loadCredentials, isExpired, removeCredentials } from './auth/index.js'
 import { resolveMcpUrl } from './auth/mcp-url.js'
@@ -33,6 +34,8 @@ import {
   addTrackedMcps,
   removeTrackedMcps,
   listTrackedMcps,
+  ensureMcpRemoteRuntime,
+  inspectMcpRemoteRuntime,
 } from './mcp/index.js'
 import { getAdapter } from './harnesses/index.js'
 import type { HarnessAdapter } from './harnesses/index.js'
@@ -46,14 +49,6 @@ import { restoreConfigBackup, type BackupEntry } from './utils/backup.js'
 import { toPluginError } from './errors.js'
 
 const KNOWN_MCP_SERVERS = ['ns-benchmark', 'nsolid-console', 'ncm']
-const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
-/**
- * Harnesses that install the nsolid plugin/package natively (owning skills and
- * MCP config themselves) rather than via the shared CLI tracking file. The
- * doctor probes each via `adapter.detectNativePlugin()`. Superset of
- * {@link PLUGIN_OWNED_HARNESSES} plus the package-owned Pi harness.
- */
-const NATIVE_PLUGIN_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity', 'pi'])
 
 function formatBundleSummary (bundle: BundleDescriptor, options: { packageOwnedSkills?: boolean }): string {
   if (options.packageOwnedSkills === true) {
@@ -186,10 +181,33 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     }
   }
 
+  // Provision the shared MCP bridge runtime (mcp-remote) for every harness:
+  // harness startup must never invoke npm/npx. The first run needs network;
+  // once a valid runtime exists this is an offline no-op. Credentials may
+  // already be stored at this point — a runtime failure must finish with
+  // success:false (they remain valid for a retry of this same command).
+  try {
+    const runtime = await ensureMcpRemoteRuntime()
+    progress.step(
+      'Preparing MCP bridge runtime',
+      runtime.installed ? `installed mcp-remote ${runtime.version}` : 'already ready'
+    )
+    logger.info('setup.mcpRuntime.ready', {
+      installed: runtime.installed,
+      version: runtime.version,
+      root: runtime.root,
+    })
+  } catch (err) {
+    result.errors.push(`MCP runtime setup failed: ${(err as Error).message}`)
+    logger.error('setup.mcpRuntime.failed', { message: (err as Error).message })
+    return result
+  }
+
   // For CLI-only/package-owned harnesses, setup also performs the direct
   // fallback install/MCP config so that `nsolid-plugin setup` is a one-step
   // onboarding path. Package-owned harnesses can opt out of user-level skill
-  // copies via packageOwnedSkills while still receiving MCP config.
+  // copies via packageOwnedSkills while still receiving MCP config. The
+  // runtime is already ready at this point (guard above).
   if (!PLUGIN_OWNED_HARNESSES.has(options.harness)) {
     const installResult = await install({
       ...options,
@@ -200,13 +218,13 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     result.errors.push(...installResult.errors)
     result.success = installResult.success
     if (result.success) {
-      progress.done(`Setup complete — credentials ready for ${options.harness}`)
+      progress.done(`Setup complete — credentials and MCP bridge ready for ${options.harness}`)
     }
     return result
   }
 
   result.success = true
-  progress.done(`Setup complete — credentials ready for ${options.harness} plugin MCPs`)
+  progress.done(`Setup complete — credentials and MCP bridge ready for ${options.harness} plugin MCPs`)
   return result
 }
 
@@ -377,6 +395,31 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   }
   logger.info('install.finish', { success: result.success, errors: result.errors.length })
   return result
+}
+
+/**
+ * Dispatcher-level onboarding: satisfies the MCP bridge runtime precondition
+ * (credentials-free) immediately before delegating to `install()`, so paths
+ * that route OpenCode/Pi and fallback installs through `install()` cannot
+ * bypass runtime provisioning. `install()` itself stays offline and
+ * auth-free — the precondition remains the dispatchers' responsibility.
+ */
+export async function installWithRuntime (options: InstallOptions): Promise<InstallResult> {
+  const logger = options.logger ?? createLogger({ verbose: isVerboseEnabled(options.verbose) })
+  try {
+    await ensureMcpRemoteRuntime()
+  } catch (err) {
+    logger.error('install.runtimePrecondition.failed', { harness: options.harness, message: (err as Error).message })
+    return {
+      success: false,
+      skillsInstalled: 0,
+      mcpServersConfigured: [],
+      hadToAuthenticate: false,
+      authSucceeded: false,
+      errors: [`MCP runtime setup failed: ${(err as Error).message}`],
+    }
+  }
+  return await install(options)
 }
 
 export interface LogoutResult {
@@ -661,6 +704,28 @@ export async function doctor (
     }
   }
 
+  // Shared MCP bridge (mcp-remote) runtime. Required only when this
+  // harness's MCP servers are actually served through the generated wrapper
+  // (native plugin installed for claude/codex/antigravity). For native-HTTP
+  // transports (opencode, pi, and direct/fallback installs) the line is
+  // informational: a ready proxy says nothing about remote endpoint health,
+  // and a missing one does not break those configurations.
+  const bridge = inspectMcpRemoteRuntime()
+  const bridgeRequired = nativeOwned && PLUGIN_OWNED_HARNESSES.has(harness)
+  report.bridge = {
+    status: bridge.status,
+    version: bridge.version,
+    root: bridge.root,
+    ...(bridge.proxyPath !== undefined ? { proxyPath: bridge.proxyPath } : {}),
+    ...(bridge.reason !== undefined ? { reason: bridge.reason } : {}),
+    required: bridgeRequired,
+  }
+  if (bridgeRequired && bridge.status !== 'ready') {
+    report.errors.push(
+      `MCP bridge runtime is ${bridge.status}${bridge.reason ? ` (${bridge.reason})` : ''}. Run: nsolid-plugin setup --harness ${harness}`
+    )
+  }
+
   if (!bundle) {
     report.skills.status = 'unknown'
     report.mcpServers.status = 'unknown'
@@ -750,6 +815,7 @@ export async function doctor (
     report.credentials.status === 'ok' &&
     report.skills.status === 'ok' &&
     report.mcpServers.status === 'ok' &&
+    (report.bridge?.required !== true || report.bridge.status === 'ready') &&
     report.errors.length === 0
 
   logger.info('doctor.finish', { healthy: report.healthy })

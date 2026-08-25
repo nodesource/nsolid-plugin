@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, readFileSync as fsReadFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, readFileSync as fsReadFileSync } from 'node:fs'
 import type { HarnessType } from '../types.js'
 import { getConfigBackupDir, resolveHome } from './path.js'
 import { atomicWriteSync } from './fs.js'
@@ -18,7 +18,78 @@ interface BackupMeta {
   harness: HarnessType
   originalPath: string
   createdAt: string
+  /**
+   * Monotonic per-directory sequence, reserved through an exclusive,
+   * immutable marker (see reserveBackupSeq). `createdAt` has millisecond precision
+   * and filesystem mtimes can be coarse (FAT, network mounts), so neither
+   * can guarantee newest-first ordering for back-to-back backups; `seq`
+   * cannot tie.
+   */
+  seq?: number
   reason?: string
+}
+
+const SEQ_RESERVATIONS_DIR = '.seq-reservations'
+
+/** Highest seq persisted in existing backup sidecars (0 when none). */
+function highestMetaSeq (dir: string): number {
+  let max = 0
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.meta.json')) continue
+    const meta = readJsonFile<BackupMeta>(path.join(dir, name))
+    if (meta?.seq !== undefined && meta.seq > max) max = meta.seq
+  }
+  return max
+}
+
+/** Highest immutable sequence reservation (0 when none). */
+function highestReservedSeq (dir: string): number {
+  const reservationsDir = path.join(dir, SEQ_RESERVATIONS_DIR)
+  if (!existsSync(reservationsDir)) return 0
+
+  let max = 0
+  for (const name of readdirSync(reservationsDir)) {
+    if (!/^[1-9]\d*$/.test(name)) continue
+    const seq = Number(name)
+    if (Number.isSafeInteger(seq) && seq > max) max = seq
+  }
+  return max
+}
+
+/** Counter floor written by the previous lock-based implementation. */
+function legacyCounterSeq (dir: string): number {
+  try {
+    const seq = Number(fsReadFileSync(path.join(dir, '.seq'), 'utf8').trim())
+    return Number.isSafeInteger(seq) && seq > 0 ? seq : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Reserve the next backup sequence for a directory, atomically across
+ * processes. Every sequence is an immutable directory created with exclusive
+ * mkdir semantics. Concurrent callers may propose the same number, but only
+ * one can create its marker; losers advance until their own marker succeeds.
+ * Reservations are never removed, so a crashed creator leaves a harmless gap
+ * instead of making the number reusable. Existing sidecars and the counter
+ * from the previous implementation establish the migration floor.
+ */
+function reserveBackupSeq (dir: string): number {
+  const reservationsDir = path.join(dir, SEQ_RESERVATIONS_DIR)
+  mkdirSync(reservationsDir, { recursive: true })
+
+  let seq = Math.max(highestMetaSeq(dir), highestReservedSeq(dir), legacyCounterSeq(dir)) + 1
+  while (Number.isSafeInteger(seq)) {
+    try {
+      mkdirSync(path.join(reservationsDir, String(seq)))
+      return seq
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+      seq++
+    }
+  }
+  throw new Error('Backup sequence space exhausted')
 }
 
 function backupName (originalPath: string, timestamp: number): string {
@@ -44,6 +115,10 @@ export function createConfigBackup (
 
   const timestamp = Date.now()
   const backupPath = path.join(dir, backupName(originalPath, timestamp))
+  // Back-to-back backups can share a millisecond (and coarse filesystems can
+  // share mtimes): reserve a cross-process sequence that cannot tie so
+  // "latest" is always the backup that was created last.
+  const seq = reserveBackupSeq(dir)
 
   try {
     copyFileSync(originalPath, backupPath)
@@ -51,6 +126,7 @@ export function createConfigBackup (
       harness,
       originalPath,
       createdAt: new Date(timestamp).toISOString(),
+      seq,
       reason: options?.reason,
     }
     atomicWriteSync(metaPath(backupPath), JSON.stringify(meta, null, 2) + '\n')
@@ -74,21 +150,40 @@ export function listConfigBackups (harness: HarnessType): BackupEntry[] {
   const dir = getConfigBackupDir(harness)
   if (!existsSync(dir)) return []
 
-  const entries: BackupEntry[] = []
+  const entries: Array<{ entry: BackupEntry; seq: number; metaMtimeMs: number }> = []
   for (const name of readdirSync(dir)) {
     if (name.endsWith('.meta.json')) continue
     const backupPath = path.join(dir, name)
     const meta = readJsonFile<BackupMeta>(metaPath(backupPath))
     if (!meta) continue
+    let metaMtimeMs = 0
+    try {
+      // Legacy tie-break for backups created before the persisted `seq`
+      // existed (sub-millisecond on ext4/NTFS/APFS).
+      metaMtimeMs = statSync(metaPath(backupPath)).mtimeMs
+    } catch {
+      // Meta file vanished mid-scan — order it last among ties.
+    }
     entries.push({
-      harness: meta.harness,
-      originalPath: meta.originalPath,
-      backupPath,
-      createdAt: meta.createdAt,
+      entry: {
+        harness: meta.harness,
+        originalPath: meta.originalPath,
+        backupPath,
+        createdAt: meta.createdAt,
+      },
+      seq: meta.seq ?? 0,
+      metaMtimeMs,
     })
   }
 
-  return entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  // Newest first: createdAt is primary; ties (same millisecond) break by the
+  // persisted seq, which cannot tie. Legacy backups without seq (seq = 0)
+  // fall back to the meta file mtime among themselves.
+  return entries
+    .sort((a, b) =>
+      b.entry.createdAt.localeCompare(a.entry.createdAt) || b.seq - a.seq || b.metaMtimeMs - a.metaMtimeMs
+    )
+    .map(({ entry }) => entry)
 }
 
 export function restoreConfigBackup (

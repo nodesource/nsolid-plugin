@@ -42,9 +42,9 @@ import {
   generateAntigravityPluginJson,
   generateClaudeMcpJson,
   generateClaudePluginJson,
-  generateClaudeWrapper,
   generateCodexMcpJson,
   generateCodexPluginJson,
+  generateMcpWrapper,
   loadBundle,
   stableJson,
 } from './plugin-generators.mjs'
@@ -135,7 +135,9 @@ function buildExpectedFiles () {
   files.set('.mcp.json', generateCodexMcpJson(bundle))
   files.set('plugin.json', generateAntigravityPluginJson(bundle))
   files.set('mcp_config.json', generateAntigravityMcpJson(bundle))
-  files.set('scripts/mcp-wrapper.js', generateSharedWrapper())
+  // The wrapper receives the harness as an explicit argument, so a single
+  // generated artifact serves Claude, Codex, and Antigravity unchanged.
+  files.set('scripts/mcp-wrapper.js', generateMcpWrapper())
 
   return files
 }
@@ -147,14 +149,6 @@ function validateCanonicalSkills () {
       throw new Error(`Missing canonical skill: ${path.relative(ROOT, skillPath)}`)
     }
   }
-}
-
-function generateSharedWrapper () {
-  return generateClaudeWrapper()
-    .replace(
-      "const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness claude'",
-      "const SETUP_COMMAND = 'npx -y nsolid-plugin setup --harness <claude|codex|opencode|antigravity|pi>'"
-    )
 }
 
 function writeFiles (files) {

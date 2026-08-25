@@ -140,10 +140,12 @@ function writeTomlConfig (configPath: string, config: NormalizedMcpConfig): void
   if (Object.keys(config.mcpServers).length > 0) {
     const servers: Record<string, unknown> = {}
     for (const [name, srv] of Object.entries(config.mcpServers)) {
-      servers[name] = {
-        url: srv.url,
-        headers: srv.headers,
-      }
+      // Preserve the full server object. Rebuilding entries from a url/headers
+      // whitelist hollowed out third-party stdio servers (command, args, env,
+      // nested tools.* tables) on every write — the TOML counterpart of the
+      // JSON fix in normalizeFromJson. smol-toml omits undefined-valued keys,
+      // so servers without headers never emit an empty headers table.
+      servers[name] = { ...srv }
     }
     tomlData.mcp_servers = servers
   } else {

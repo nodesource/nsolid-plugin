@@ -5,14 +5,13 @@ import { createInterface } from 'node:readline/promises'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { install, setup, uninstall, logout, doctor, restore, loadCredentials } from './index.js'
+import { installWithRuntime, setup, uninstall, logout, doctor, restore, loadCredentials } from './index.js'
 import type { AuthConfirmation, HarnessType } from './types.js'
-import { HARNESS_VALUES } from './types.js'
+import { HARNESS_VALUES, PLUGIN_OWNED_HARNESSES } from './types.js'
 import { formatPluginError } from './errors.js'
 import { listConfigBackups } from './utils/backup.js'
 import { C, supportsColor } from './utils/format.js'
 import { createConsoleProgress, silentProgress } from './utils/progress.js'
-const PLUGIN_OWNED_HARNESSES = new Set<HarnessType>(['claude', 'codex', 'antigravity'])
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set<HarnessType>(['pi'])
 const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set<HarnessType>(['opencode'])
 
@@ -55,13 +54,13 @@ function printUsage (): void {
   console.log(`Usage: nsolid-plugin <command> [options]
 
 Commands:
-  setup       Authenticate with NodeSource (may open a browser)
-  install     Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; does not open a browser)
-  uninstall   Remove N|Solid Plugin skills for a harness
-  logout      Forget your stored NodeSource login (removes credentials only)
-  switch-org  Force re-authentication to switch NodeSource organizations (opens a browser; affects all harnesses)
-  doctor      Check installation health for a harness
-  restore     Restore a harness MCP config from the latest backup
+  setup      Authenticate with NodeSource and prepare the MCP bridge runtime (may open a browser; first run needs npm access)
+  install    Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; prepares the MCP bridge runtime first; does not open a browser)
+  uninstall  Remove N|Solid Plugin skills for a harness
+  logout     Forget your stored NodeSource login (removes credentials only)
+  switch-org Force re-authentication to switch NodeSource organizations (opens a browser; affects all harnesses)
+  doctor     Check installation health for a harness
+  restore    Restore a harness MCP config from the latest backup
 
 Options:
   --harness <harness>    Target harness (required in non-interactive mode): ${HARNESS_VALUES.join(', ')}
@@ -79,9 +78,10 @@ Options:
   --help                Show this help message
 
 Distribution notes:
-  Claude/Codex/Antigravity: install from the GitHub plugin root; setup is auth-only.
+  Claude/Codex/Antigravity: install from the GitHub plugin root; setup authenticates and prepares the MCP bridge runtime.
   Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
-  OpenCode: setup --harness opencode authenticates AND writes its skills/MCP config; install --harness opencode re-runs that direct config.
+  OpenCode: run setup --harness opencode — it authenticates, prepares the MCP bridge runtime, and installs skills + MCP config in one step.
+  Install: the fallback direct installer provisions the MCP bridge runtime first, then installs assets; it never opens a browser.
   After switch-org, a direct-config harness passed to --harness (OpenCode, Pi, fallback CLI installs) has its MCP config refreshed on the spot; Claude/Codex/Antigravity native plugins must be reconnected, and other direct-config harnesses need a later setup/install to re-bake the new org's token.
   Auth: only setup/switch-org may open a browser.`)
 }
@@ -315,7 +315,7 @@ async function main (): Promise<void> {
         }
 
         const verb = result.hadToAuthenticate ? 'Authenticated' : 'Credentials ready'
-        console.log(`${paint.green('✓')} ${HARNESS_LABELS[setupHarness]} — ${verb}.`)
+        console.log(`${paint.green('✓')} ${HARNESS_LABELS[setupHarness]} — ${verb}; MCP bridge ready.`)
       }
 
       if (failures > 0) process.exit(1)
@@ -330,7 +330,7 @@ async function main (): Promise<void> {
         const installHarness = installHarnesses[i]
         if (i > 0) console.log('') // visual separation between harnesses
 
-        const result = await install({
+        const result = await installWithRuntime({
           harness: installHarness,
           bundlePath,
           skillsSource,

@@ -212,6 +212,41 @@ describe('writeMcpConfig', () => {
     assert.ok('ns-benchmark' in servers)
   })
 
+  it('preserves third-party stdio server fields in TOML writes', async () => {
+    const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+    const { parse: parseToml } = await import('smol-toml')
+
+    const configPath = resolveHome('~/.codex/config.toml')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, [
+      '[mcp_servers.codegraph]',
+      'command = "codegraph"',
+      'args = ["serve", "--mcp"]',
+      'env = { CACHE = "1" }',
+      '',
+      '[mcp_servers.codegraph.tools.search]',
+      'approval_mode = "approve"',
+      '',
+    ].join('\n'))
+
+    await writeMcpConfig('codex', [serverA])
+
+    const content = parseToml(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+    const servers = content.mcp_servers as Record<string, Record<string, unknown>>
+    const codegraph = servers.codegraph
+    // Regression: the TOML writer rebuilt every entry as { url, headers },
+    // hollowing out third-party stdio servers on the first plugin touch.
+    assert.strictEqual(codegraph.command, 'codegraph')
+    assert.deepStrictEqual(codegraph.args, ['serve', '--mcp'])
+    assert.deepStrictEqual(codegraph.env, { CACHE: '1' })
+    assert.deepStrictEqual(codegraph.tools, { search: { approval_mode: 'approve' } })
+    assert.strictEqual(codegraph.url, undefined)
+    assert.strictEqual(servers['ns-benchmark'].url, 'https://benchmark.mcp.saas.nodesource.io/mcp')
+  })
+
   it('writes Pi MCP servers with adapter OAuth auto-detection disabled', async () => {
     const { writeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')
@@ -596,6 +631,43 @@ describe('removeMcpConfig', () => {
     const content = readFileSync(configPath, 'utf-8')
     assert.ok(content.includes('// Top comment'))
     assert.ok(!content.includes('ns-benchmark'))
+  })
+
+  it('TOML round-trip: uninstalling own servers keeps third-party stdio fields intact', async () => {
+    const { writeMcpConfig, removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+    const { parse: parseToml } = await import('smol-toml')
+
+    const configPath = resolveHome('~/.codex/config.toml')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, [
+      '[mcp_servers.codegraph]',
+      'command = "codegraph"',
+      'args = ["serve", "--mcp"]',
+      'env = { CACHE = "1" }',
+      '',
+      '[mcp_servers.codegraph.tools.search]',
+      'approval_mode = "approve"',
+      '',
+    ].join('\n'))
+
+    await writeMcpConfig('codex', [serverA])
+    await removeMcpConfig('codex', ['ns-benchmark'])
+
+    const raw = readFileSync(configPath, 'utf-8')
+    assert.ok(!raw.includes('ns-benchmark'))
+    assert.ok(raw.includes('approval_mode = "approve"'))
+
+    const content = parseToml(raw) as Record<string, unknown>
+    const servers = content.mcp_servers as Record<string, Record<string, unknown>>
+    const codegraph = servers.codegraph
+    assert.strictEqual(codegraph.command, 'codegraph')
+    assert.deepStrictEqual(codegraph.args, ['serve', '--mcp'])
+    assert.deepStrictEqual(codegraph.env, { CACHE: '1' })
+    assert.deepStrictEqual(codegraph.tools, { search: { approval_mode: 'approve' } })
+    assert.strictEqual(Object.keys(servers).length, 1)
   })
 
   it('handles nonexistent config file', async () => {

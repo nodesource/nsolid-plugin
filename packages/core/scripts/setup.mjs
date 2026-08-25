@@ -34,7 +34,7 @@ if (!VALID_HARNESS.includes(harness)) {
   process.exit(1)
 }
 
-const { install, setup, uninstall } = await import('nsolid-plugin')
+const { installWithRuntime, setup, uninstall } = await import('nsolid-plugin')
 
 const PLUGIN_OWNED_HARNESSES = new Set(['claude', 'codex', 'antigravity'])
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set(['pi'])
@@ -49,7 +49,13 @@ try {
     }
     console.log(`N|Solid Plugin skills uninstalled for ${harness}`)
   } else {
-    const installer = PLUGIN_OWNED_HARNESSES.has(harness) ? setup : install
+    // Plugin-owned harnesses onboard through setup() (authentication + runtime
+    // precondition + native plugin assets). OpenCode/Pi route through
+    // installWithRuntime(): the dispatcher satisfies the credentials-free MCP
+    // runtime precondition immediately before install(), so neither harness
+    // can bypass provisioning — while install() itself stays offline and
+    // auth-free.
+    const installer = PLUGIN_OWNED_HARNESSES.has(harness) ? setup : installWithRuntime
     const res = await installer({
       harness,
       bundlePath,
@@ -62,11 +68,11 @@ try {
       process.exit(1)
     }
     if (PLUGIN_OWNED_HARNESSES.has(harness)) {
-      console.log(`N|Solid Plugin credentials ready for ${harness}`)
+      console.log(`N|Solid Plugin credentials and MCP bridge ready for ${harness}`)
     } else if (PACKAGE_OWNED_SKILL_HARNESSES.has(harness)) {
-      console.log(`N|Solid Plugin MCP/auth configured for ${harness}; skills are package-owned`)
+      console.log(`N|Solid Plugin MCP bridge and MCP config ready for ${harness}; skills are package-owned (authenticate with: nsolid-plugin setup --harness ${harness})`)
     } else {
-      console.log(`N|Solid Plugin skills installed for ${harness}: ${res.skillsInstalled} skills`)
+      console.log(`N|Solid Plugin MCP bridge and skills ready for ${harness}: ${res.skillsInstalled} skills (authenticate with: nsolid-plugin setup --harness ${harness})`)
     }
   }
 } catch (err) {

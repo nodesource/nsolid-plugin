@@ -1,4 +1,5 @@
-import type { DoctorReport } from '../types.js'
+import type { DoctorReport, HarnessType } from '../types.js'
+import { NATIVE_PLUGIN_HARNESSES } from '../types.js'
 
 export const C = {
   green: (s: string) => `\x1b[32m${s}\x1b[0m`,
@@ -7,11 +8,8 @@ export const C = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
 }
 
-/** Harnesses that install the plugin/package natively and get a Plugin line. */
-const NATIVE_PLUGIN_HARNESSES = new Set(['claude', 'codex', 'antigravity', 'pi'])
-
 /** Native install command shown when the plugin is missing for a harness. */
-function nativeInstallHint (harness: string): string {
+function nativeInstallHint (harness: HarnessType): string {
   switch (harness) {
     case 'claude':
       return 'claude plugin marketplace add NodeSource/nsolid-plugin && claude plugin install nsolid-plugin@nodesource'
@@ -42,7 +40,7 @@ function credLine (creds: DoctorReport['credentials'], color: boolean): string {
   return line('Credentials', '✗ missing', C.red, 'Run installation to authenticate', color)
 }
 
-function pluginLine (p: DoctorReport['plugin'], harness: string, color: boolean): string | null {
+function pluginLine (p: DoctorReport['plugin'], harness: HarnessType, color: boolean): string | null {
   // Non-native harnesses (e.g. opencode) have no plugin model — no line shown.
   if (!NATIVE_PLUGIN_HARNESSES.has(harness)) return null
   if (p.status === 'ok') {
@@ -69,13 +67,24 @@ function mcpLine (m: DoctorReport['mcpServers'], color: boolean): string {
   return line('MCP servers', '? unknown', C.dim, '', color)
 }
 
+function bridgeLine (b: NonNullable<DoctorReport['bridge']>, harness: string, color: boolean): string {
+  if (b.status === 'ready') return line('MCP bridge', `✓ ready (mcp-remote ${b.version})`, C.green, '', color)
+  const label = b.status === 'missing' ? 'not provisioned' : `invalid${b.reason ? ` (${b.reason})` : ''}`
+  if (b.required) {
+    return line('MCP bridge', `✗ ${label}`, C.red, `Run: nsolid-plugin setup --harness ${harness}`, color)
+  }
+  // Informational for harnesses/configs whose MCP transport is native HTTP:
+  // a missing bridge does not break them, so never paint them red.
+  return line('MCP bridge', `? ${label}`, C.dim, 'not used by this harness configuration', color)
+}
+
 function line (label: string, value: string, pick: (s: string) => string, fix: string, color: boolean): string {
   const v = color ? pick(value) : value
   const tail = fix ? `  ${color ? C.dim('— ' + fix) : '— ' + fix}` : ''
   return `${label.padEnd(13)} ${v}${tail}`
 }
 
-export function formatDoctorReport (report: DoctorReport, harness: string, color: boolean): string {
+export function formatDoctorReport (report: DoctorReport, harness: HarnessType, color: boolean): string {
   const out: string[] = []
   const title = color ? C.dim(`NodeSource plugin health — ${harness}`) : `NodeSource plugin health — ${harness}`
   out.push(title, '─'.repeat(34))
@@ -84,6 +93,7 @@ export function formatDoctorReport (report: DoctorReport, harness: string, color
   if (plugin) out.push(plugin)
   out.push(skillsLine(report.skills, color))
   out.push(mcpLine(report.mcpServers, color))
+  if (report.bridge) out.push(bridgeLine(report.bridge, harness, color))
 
   if (harness === 'pi' && report.mcpServers.status !== 'unknown' && report.mcpServers.reachable.length > 0) {
     const note = 'ℹ Pi needs an MCP adapter extension to use these servers — run: pi install npm:pi-mcp-adapter'

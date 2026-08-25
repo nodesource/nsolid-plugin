@@ -43,11 +43,11 @@ Skills are canonical in the repository-root `skills/` directory. The repo root i
 
 | Harness | Skill owner | Installer responsibility |
 |---|---|---|
-| **Claude** | Root plugin | Native marketplace/plugin install; `setup` for auth |
-| **Codex** | Root plugin | Native marketplace/plugin install; `setup` for auth |
-| **Antigravity** | Root plugin | `agy plugin install <repo-url>`; `setup` for auth |
+| **Claude** | Root plugin | Native marketplace/plugin install; `setup` for auth + bridge |
+| **Codex** | Root plugin | Native marketplace/plugin install; `setup` for auth + bridge |
+| **Antigravity** | Root plugin | `agy plugin install <repo-url>`; `setup` for auth + bridge |
 | **Pi** | Pi npm package (`pi.skills`) | Pi package owns skills; `setup` writes auth/MCP config |
-| **OpenCode** | CLI direct install | `setup` authenticates AND writes MCP config/skills; `install` refreshes the direct config |
+| **OpenCode** | CLI direct install | `setup` authenticates, prepares the bridge, and writes MCP config/skills; `install` refreshes the direct config as a fallback |
 
 
 ## Authentication
@@ -60,17 +60,18 @@ nsolid-plugin setup --harness <harness>
 
 On setup:
 
-1. Your browser opens `accounts.nodesource.com/sign-in` for login.
+1. Your browser opens `accounts.nodesource.com/sign-in` for login (only if credentials are missing or expired).
 2. A local HTTP server starts on port **8765** (fallback: 8766–8770) to receive the callback.
 3. The OAuth callback provides a `serviceToken`, `consoleId`, `saasToken`, and `consoleUrl`.
 4. An `mcpUrl` is derived by combining the callback's `consoleId` (the org UUID) with the trusted environment suffix of `consoleUrl` (e.g. `saas.nodesource.io`, `staging.saas.nodesource.io`), giving `https://<organizationId>.mcp.<suffix>/`.
 5. Credentials are stored at `~/.agents/.nodesource-auth.json` with mode `0600`.
+6. The shared **MCP bridge runtime** (`mcp-remote`, exact pinned version) is provisioned at `~/.agents/nsolid-plugin/runtime/mcp-remote/<version>/` so MCP servers start without touching npm. The first `setup` needs network access for this one-time npm install; subsequent runs detect the valid runtime and skip npm entirely.
 
 If a browser does not open automatically (headless CI, devcontainer, agent host, etc.), the CLI prints the sign-in URL to stderr — open it manually in any browser to complete the flow. Nothing sensitive (no tokens) is printed there.
 
 **What is stored:** `serviceToken`, `organizationId`, `saasToken`, `consoleUrl`, `mcpUrl`, `expiresAt`, `permissions`, and the `accountsUrl` auth origin used to mint/validate the token.
 
-**Token lifecycle:** Expired credentials trigger re-authentication during explicit setup/login. Runtime MCP wrappers fail with an actionable `Run: nsolid-plugin setup --harness <harness>` message if credentials are missing or expired. Credentials are shared across harnesses — which also means there is only ever one authenticated NodeSource org at a time. If you belong to more than one org, use `nsolid-plugin switch-org --harness <harness>` to force a fresh sign-in and pick a different one; see [Switching organizations](#switching-organizations) below.
+**Token lifecycle:** Expired credentials trigger re-authentication during explicit setup/login. Runtime MCP wrappers fail with an actionable, version-pinned `Run: npx -y nsolid-plugin@<plugin-version> setup --harness <harness>` message if credentials are missing/expired **or the MCP bridge runtime is missing/corrupt**. Credentials are shared across harnesses — which also means there is only ever one authenticated NodeSource org at a time. If you belong to more than one org, use `nsolid-plugin switch-org --harness <harness>` to force a fresh sign-in and pick a different one; see [Switching organizations](#switching-organizations) below.
 
 **`mcpUrl` derivation:** Always built from the org's UUID (`consoleId`/`organizationId`), never from `consoleUrl`'s hostname label — a console may be reachable at a friendly display alias (e.g. `homedepot-nucleus-stage-1.saas.nodesource.io`), but the underlying MCP ingress route is only ever provisioned under the org's UUID, so using the alias verbatim produces a dead endpoint. `consoleUrl` is only consulted for its environment suffix (`saas.nodesource.io`, `staging.saas.nodesource.io`, etc.), which must be the exact suffix or a dot-delimited deeper suffix — a hostname where `saas` is merely a substring of a larger label (e.g. `foo-saas.nodesource.io`) is rejected. This gives `https://<organizationId>.mcp.<suffix>/`, always over `https`. Computed and stored on every fresh OAuth completion (`setup`, `switch-org`); a stored/explicit `credentials.mcpUrl` — including a legitimate custom operator override — still always takes priority over re-deriving. If `consoleUrl` doesn't match a recognized NodeSource pattern, fresh OAuth fails with an actionable error and never silently persists a guessed production URL, and any previously stored credentials are left unchanged.
 
@@ -91,11 +92,11 @@ npx -y nsolid-plugin setup --harness <harness>
 npx -y nsolid-plugin install --harness <harness>
 ```
 
-The setup step requires a NodeSource account and writes shared credentials to `~/.agents/.nodesource-auth.json`. The install step is needed only for direct CLI installs such as OpenCode or fallback/repair installs.
+The setup step requires a NodeSource account and writes shared credentials to `~/.agents/.nodesource-auth.json`; it also prepares the shared MCP bridge runtime used by the Claude/Codex/Antigravity wrappers (first run downloads it via npm, later runs are offline and idempotent). For OpenCode and Pi, `setup` alone completes onboarding — auth, bridge runtime, skills, and MCP config in one step. The install step is needed only for fallback/repair installs and satisfies the same runtime precondition before copying assets.
 
 ### Direct CLI install
 
-`nsolid-plugin install --harness <harness>` is not a native harness plugin install. It directly adds N|Solid skills and MCP server config to the selected harness. Run `setup` first so MCP server credentials are available:
+`nsolid-plugin install --harness <harness>` is not a native harness plugin install. It directly adds N|Solid skills and MCP server config to the selected harness, and satisfies the MCP bridge runtime precondition first (same as `setup`). Run `setup` first so MCP server credentials are available:
 
 ```bash
 nsolid-plugin setup --harness <harness>
@@ -227,7 +228,17 @@ nsolid-plugin doctor --harness <harness>
 nsolid-plugin doctor --harness <harness> --json    # machine-readable
 ```
 
-The output shows green/yellow/red status for credentials, skills, and MCP servers.
+The output shows green/yellow/red status for credentials, skills, MCP servers, and the MCP bridge runtime. For harnesses whose MCP servers run through the plugin wrapper (native plugin installed for Claude/Codex/Antigravity), a missing or corrupt bridge makes the report unhealthy; for OpenCode/Pi the bridge line is informational.
+
+### MCP bridge runtime missing or corrupt
+
+Wrapper message:
+
+```text
+[nsolid-plugin] MCP bridge runtime is not ready. Run: npx -y nsolid-plugin@<plugin-version> setup --harness <harness>
+```
+
+Fix: run the suggested `setup` command once. The repair command is pinned to the plugin version that generated the wrapper, so rerunning it repairs exactly the wrapper that printed it. This is different from an expired token (`credentials are expired`): the bridge runtime lives at `~/.agents/nsolid-plugin/runtime/mcp-remote/<version>/` and survives `uninstall`/`logout`. If `setup` itself reports `MCP runtime setup failed`, npm could not install the runtime (network/registry) — stored credentials remain valid, fix network access and rerun the same command. npm is resolved from the Node.js installation that serves the harness (never from PATH, `npm_execpath`, or the project). MCP wrappers never download dependencies during harness startup; there is intentionally no `npx` fallback.
 
 ### Permission denied writing config
 
