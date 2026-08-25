@@ -29,7 +29,7 @@ description: >-
 
 ### Phase 3: Capture the Peak / Leak State
 1. Once you confirm memory has substantially grown from the baseline, trigger a second analysis.
-2. Use advanced `track-heap-objects` only for closure/retainer suspicion; otherwise use `heap-sampling` for 60 seconds. Both require the resolved agent `id`.
+2. Capture the peak with `heap-sampling` for 60 seconds. Requires the resolved agent `id`. Do not use `track-heap-objects`: the resulting `heap-profile` asset is not supported by `asset-summary`. When closure/retainer suspicion exists, correlate the peak sample's allocator call stacks with the source using `runtime-code` (Phase 5) instead.
 3. Wait for the operation to complete:
    ```
    node "<skill-dir>/wait.cjs" 60
@@ -102,3 +102,4 @@ description: >-
 - **Reuse what exists**: Do not capture a new baseline or peak sample if the user already supplied the needed assets.
 - **Wait times**: Memory tools block the thread. Do not spam endpoints while an asset is in progress.
 - Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.
+- **Unsupported asset types**: `asset-summary` does not support `heap-profile` assets (`track-heap-objects`). Never capture them in this workflow — baseline and peak must always be heap samples.

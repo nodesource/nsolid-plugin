@@ -73,7 +73,7 @@ Inspect the summary for these signals:
 - Check `events-historic` with the same `app` or agent `id`, plus `start`/`end`, for near-OOM or process-blocked events at the snapshot time.
 
 **Follow-up recommendation:**
-- If allocation stack traces are insufficient, recommend advanced `track-heap-objects` via `ns-advanced-memory-leak-hunter`.
+- If allocation stack traces are insufficient, recommend a deeper leak hunt (baseline vs peak heap sampling) via `ns-advanced-memory-leak-hunter`.
 - For deeper leak hunting workflows, reference the `ns-advanced-memory-leak-hunter` skill.
 
 ### 4. Correlate with Runtime Context
