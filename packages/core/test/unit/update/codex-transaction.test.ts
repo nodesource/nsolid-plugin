@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os'
 import path from 'node:path'
 import { writeTomlFileSync } from '../../../src/utils/config.js'
+import { restoreCodexUserOwnedFields } from '../../../src/update/codex-config.js'
 import { executeCodexTransaction, readCodexPayloadVersion } from '../../../src/update/codex-transaction.js'
 import type { UpdatePlanItem } from '../../../src/update/types.js'
 
@@ -54,6 +55,46 @@ function item (cachePath?: string): UpdatePlanItem {
 }
 
 describe('Codex update transaction', () => {
+  it('matches equivalent TOML plugin table headers without splitting quoted keys', () => {
+    const variants = [
+      { pluginId: 'nsolid-plugin', header: '[plugins.nsolid-plugin]' },
+      { pluginId: 'nsolid-plugin@nodesource', header: '[ plugins . "nsolid-plugin@nodesource" ]' },
+      { pluginId: 'nsolid-plugin@nodesource', header: "[plugins.'nsolid-plugin@nodesource']" },
+      { pluginId: 'plugin.with.dot', header: '[plugins."plugin.with.dot"]' },
+      { pluginId: 'plugin#with#hash', header: "[plugins.'plugin#with#hash'] # table comment" },
+    ]
+
+    for (const [index, variant] of variants.entries()) {
+      const configPath = path.join(home, '.codex', `config-${index}.toml`)
+      mkdirSync(path.dirname(configPath), { recursive: true })
+      const originalText = [
+        variant.header,
+        'enabled = true',
+        'installPath = "old-path"',
+        '',
+      ].join('\n')
+      writeFileSync(configPath, [
+        `[plugins.${JSON.stringify(variant.pluginId)}]`,
+        'enabled = false',
+        'installPath = "new-path"',
+        '',
+      ].join('\n'))
+
+      const restored = restoreCodexUserOwnedFields(
+        configPath,
+        variant.pluginId,
+        { enabled: true, installPath: 'old-path' },
+        originalText
+      )
+
+      assert.equal(restored, true, variant.header)
+      const updated = readFileSync(configPath, 'utf8')
+      assert.match(updated, /enabled = true/)
+      assert.match(updated, /installPath = "new-path"/)
+      assert.ok(updated.includes(variant.header))
+    }
+  })
+
   it('validates the refreshed cached payload rather than a versionless registration', async () => {
     const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
     mkdirSync(cachePath, { recursive: true })

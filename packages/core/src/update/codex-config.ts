@@ -60,8 +60,7 @@ export function codexUserOwnedFieldsMatch (current: Record<string, unknown>, ori
 
 function patchCodexPluginTable (source: string, pluginId: string, current: Record<string, unknown>): string | undefined {
   const lines = splitTomlLines(source)
-  const header = `[plugins.${JSON.stringify(pluginId)}]`
-  const matchingHeaders = lines.filter((line) => line.text.trim().split('#', 1)[0].trim() === header)
+  const matchingHeaders = lines.filter((line) => isMatchingPluginTableHeader(line.text, pluginId))
   if (matchingHeaders.length !== 1) return undefined
   const headerLine = matchingHeaders[0]!
   const headerIndex = lines.indexOf(headerLine)
@@ -110,6 +109,19 @@ function patchCodexPluginTable (source: string, pluginId: string, current: Recor
   return replacements
     .sort((left, right) => right.start - left.start)
     .reduce((value, replacement) => value.slice(0, replacement.start) + replacement.value + value.slice(replacement.end), source)
+}
+
+function isMatchingPluginTableHeader (line: string, pluginId: string): boolean {
+  const marker = '__nsolid_plugin_header_marker__'
+  try {
+    const parsed = parseToml(`${line}\n${marker} = true\n`) as Record<string, unknown>
+    const plugins = parsed.plugins
+    if (!isRecord(plugins)) return false
+    const plugin = plugins[pluginId]
+    return isRecord(plugin) && plugin[marker] === true
+  } catch {
+    return false
+  }
 }
 
 interface TomlLine { start: number; end: number; text: string; newline: string }
