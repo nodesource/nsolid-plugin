@@ -33,7 +33,7 @@ The updater SHALL compare installed and latest versions without invoking any mut
 **When** the user runs `nsolid-plugin update --check`
 **Then** the command compares the running CLI semantic version with the registry version
 **And** reports `current`, `update-available`, or `newer-than-registry`
-**And** does not invoke a package manager or modify any file
+**And** does not invoke a mutating package-manager or harness command or modify any file
 **And** `--json` returns the current version, latest version, status, and target identifier
 **And** exits successfully, including when the status is `update-available`
 
@@ -128,6 +128,70 @@ The default `nsolid-plugin update` scope SHALL update only a positively identifi
 **And** prints safe exact-version manual commands for npm, pnpm, ephemeral execution, and the detected wrapper/source when known
 **And** the result status is `unsupported`
 **And** a mutating update exits with code `2` while a read-only check exits with code `0`
+
+### Requirement: Cross-platform-safe command execution
+
+The updater SHALL run every external command without a shell and with a resolved, immutable executable identity, and SHALL behave deterministically on Windows shims, PATH/PATHEXT lookup, and timeout tree termination.
+
+#### Scenario: Execute a native or Node-executed manager on Windows
+
+**Given** the CLI self-update manager on Windows resolves to a native `.exe`/`.com` or to `process.execPath` plus a verified immutable JS entrypoint
+**When** the command runner executes the plan step
+**Then** it spawns directly with `shell: false` and `shell: true`/`cmd.exe` are never used
+**And** an unvalidated `.cmd`/`.bat` shim whose format or target cannot be proven npm-generated, or any `.ps1`-only launcher, is `unsupported` instead of executed
+**And** the resolved absolute path and identity evidence are revalidated immediately before `spawn`
+
+#### Scenario: Resolve executables through case-insensitive PATH and PATHEXT
+
+**Given** executable lookup runs on a platform where path/drive casing is case-insensitive (Windows)
+**When** the runner resolves a manager or harness executable
+**Then** it searches `PATH`/`Path` case-insensitively, honours `PATHEXT`, ignores empty and cwd-relative segments, and returns an absolute path with identity evidence
+**And** a bare name, cwd-relative path, or ambiguous match is never used to isolate mutation
+
+#### Scenario: Timeout terminates the whole process tree before rollback
+
+**Given** a package executor or child process exceeds the timeout during a mutating transaction
+**When** timeout handling completes
+**Then** the runner confirms the entire descendant process tree is terminated before any rollback or restore runs
+**And** on Windows it uses controlled tree termination; if termination cannot be confirmed it leaves the journal recoverable or defers rollback, never restoring concurrently
+**And** the result reports the timed-out status and the rollback/recovery plan chosen
+
+### Requirement: Cross-platform-safe filesystem transactions
+
+The updater SHALL treat junctions, cross-volume moves, and Windows file-locking semantics explicitly so rollback and replacement are safe and byte-preserving.
+
+#### Scenario: Junction is never dereferenced for ownership or deletion
+
+**Given** an owned skill or link path on Windows is a junction (reparse point)
+**When** the transaction inventories or replaces that path
+**Then** it records the path kind via `lstat` and treats it as the owned link itself, never dereferencing it to read, relabel, or delete the linked destination
+
+#### Scenario: Staging and backup stay on the same volume
+
+**Given** a replacement or rollback needs a staging or backup directory
+**When** the transaction creates it
+**Then** it creates the staging/backup as a sibling on the same volume as the target so `rename`-into-place is not a cross-volume move
+**And** the destination is absent (or already owned-and-backed-up) before any `rename`-into-place
+
+#### Scenario: Windows file locks fail with bounded revalidation
+
+**Given** a mutation or rollback hits `EPERM`, `EBUSY`, or `ENOTEMPTY` (for example an actively used npm global or a locked junction)
+**When** the transaction retries
+**Then** it retries a bounded number of times with path revalidation between attempts
+**And** if the lock persists it reports a non-mutating failure or leaves a recoverable journal rather than restoring concurrently with a live process
+
+#### Scenario: Config and manifest edits preserve bytes and unrelated entries
+
+**Given** `import_manifest.json`, TOML/JSONC config, or tracking state uses CRLF, comments where supported, or contains unrelated entries
+**When** the transaction mutates its approved owned slice
+**Then** it preserves CRLF line endings, comments, and all unrelated entries and verifies the owned slice after mutation
+**And** a concurrent change after planning is identity drift and blocks mutation or restore instead of being merged implicitly
+
+#### Scenario: Durability and confidentiality are separated
+
+**Given** the durable journal is created
+**When** durability is stated
+**Then** the specification distinguishes fsync durability from ACL confidentiality: journals live under a private user-owned root and staging beside the target, and no `chmod 0600` ACL guarantee is promised where Windows ACLs are not controlled
 
 ### Requirement: Harness-owned update strategies
 
@@ -299,10 +363,20 @@ Fallback mutation SHALL be authorized by an exact parent-owned installation mani
 
 **Given** the parent durably recorded a complete snapshot and marked the fallback journal `mutating`
 **When** npm, pnpm, or the internal refresh process times out, crashes, receives a signal, or exits without a structured rollback result after mutation began
-**Then** the parent restores the selected installation from its own snapshot
+**Then** the parent first confirms the descendant process tree has terminated (controlled tree termination on Windows)
+**And** only then restores the selected installation from its own snapshot
+**And** when termination cannot be confirmed it leaves the journal recoverable or defers rollback instead of restoring concurrently
 **And** records whether parent-owned recovery succeeded
 **And** retains an incomplete journal when automatic restoration cannot be proven complete
 **And** exits with code `1`
+
+#### Scenario: Plan and rollback share normalized path identity
+
+**Given** a fallback plan binds canonical owned paths and a tracking digest
+**When** the parent writes the manifest and the child validates identity
+**Then** both use the same shared path normalization (resolve, separators, Windows drive/root and case-insensitive semantics) across planning, manifest, execution, and rollback
+**And** path equivalence never applies a universal lowercase transform where case-sensitive directories exist
+**And** UNC or remote paths are `unsupported` when their equivalence to local owned paths cannot be guaranteed
 
 #### Scenario: Recover an interrupted fallback transaction on the next run
 
@@ -453,7 +527,7 @@ Update operations SHALL retain all existing setup, installation, authentication,
 **And** update never invokes setup, login, or OAuth
 **And** native strategy failure never silently switches to fallback ownership
 **And** source identity is preserved for every supported native/package-owned update
-**And** all external commands run without a shell and with fixed argument arrays
+**And** all external commands run through the resolved executable identity, without a shell and with fixed argument arrays (native executable, `process.execPath` plus verified JS entrypoint, or a verified npm-generated shim derived to a JS entrypoint); an unverified `.cmd`/`.bat`/`.ps1` shim is never executed
 
 #### Scenario: Preserve the public install contract
 

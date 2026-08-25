@@ -66,6 +66,7 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 `packages/core/src/update/package-manager.ts`
 
 - Detects npm or pnpm only when the real CLI package/entrypoint is contained by that manager's reported global root and the corresponding executable is available; a shim or package-manager environment variable alone is not sufficient evidence.
+- Resolves the manager executable into exactly one supported `ExecutableIdentity` (below): on a non-Windows host a shell-free native/JS entrypoint; on Windows a validated native `.exe`/`.com` or a derived immutable JS entrypoint executed with `process.execPath` and `shell: false`. A bare `npm`/`pnpm` launcher name is never passed to `spawn` with `shell: false`.
 - Produces a fixed executable plus argument array.
 - Downloads only the planned tarball from the planned registry, verifies its integrity before execution, and gives npm/pnpm the verified local tarball rather than re-resolving `name@version` through ambient registry configuration.
 - Verifies post-update package identity against the planned name, version, registry provenance, and integrity/content digest rather than accepting version equality alone.
@@ -73,10 +74,27 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 
 `packages/core/src/update/command-runner.ts`
 
-- Wraps `spawn`/`spawnSync` with `shell: false`.
+- Wraps `spawn`/`spawnSync` with `shell: false` and an immutable `ExecutableIdentity`. `shell: true` and launching through `cmd.exe` are never used.
+- `ExecutableIdentity` is one of: a validated absolute native executable (`.exe`/`.com` on Windows), `process.execPath` plus an absolute, existence/content-verified JS entrypoint, or a Windows shim that is validated to be npm-generated and from which an immutable absolute JS entrypoint is derived and then executed with `process.execPath` under `shell: false`. A `.cmd`/`.bat` shim whose format or target cannot be verified, and any `.ps1`-only launcher, resolve to `unsupported` with manual guidance.
+- Resolves executable/entrypoint paths over `PATH`/`Path` case-insensitively (respecting the Windows `Path` casing), honours `PATHEXT`, ignores empty and cwd-relative path segments, returns an absolute path plus identity evidence, and revalidates that identity immediately before `spawn`.
 - Accepts executable and argument arrays, controlled environment additions, timeout, and output mode.
+- Confirms the termination of the whole descendant process tree before any rollback runs. On Windows it uses controlled tree termination; when termination cannot be confirmed it leaves the journal recoverable (or defers rollback) rather than restoring concurrently.
 - Redacts tokens, authorization headers, and credential paths from captured diagnostics.
-- Is injected in tests so no real package manager or harness command runs.
+- Is injected in unit tests so no real package manager or harness command runs there; targeted platform integration tests exercise the real resolver/spawn boundary with controlled fixture executables and shims.
+
+`packages/core/src/update/path-normalize.ts`
+
+- Provides the single shared path normalization used consistently by planning, tracking digests, plan display, manifests, execution, and rollback: `path.resolve`, platform separators, and Windows drive/root and case-insensitive semantics.
+- Never applies a universal `toLowerCase` to paths that may live on case-sensitive directories; equivalence for Windows compares drive/root and raw segments case-insensitively only where case-insensitive semantics are proven.
+- Rejects UNC or remote paths up front when their equivalence to local owned paths cannot be guaranteed.
+
+`packages/core/src/update/fs-transaction.ts`
+
+- Records each owned path kind via `lstat` as `junction`, `copy`, or `directory` before acting and, on Windows, never dereferences a junction to determine ownership or to delete it.
+- Creates staging and backup targets as siblings on the same volume as each target so `rename`-into-place stays on one volume.
+- Requires the destination to be absent (or already owned-and-backed-up) before `rename`-into-place.
+- Applies bounded retries for `EPERM`, `EBUSY`, and `ENOTEMPTY` with revalidation between attempts and a non-mutating `unsupported`/failure path if the path identity drifts.
+- Edits config and manifest files byte-preserving: CRLF line endings, comments, and unrelated entries are retained; mutation is verified by reloading and comparing only the owned slice.
 
 `packages/core/src/update/strategies/*.ts`
 
@@ -95,17 +113,19 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 `packages/core/src/update/antigravity-transaction.ts`
 
 - Resolves only the two documented global NodeSource layout pairs: shared Antigravity under `~/.gemini/config/` and AGY CLI under `~/.gemini/antigravity-cli/`.
-- Creates a temporary backup before replacement containing the detected staged root and the N|Solid entry in that root's matching `import_manifest.json`.
+- Creates a temporary backup before replacement at a sibling path selected by the shared `fs-transaction` rules on the same volume as the target, containing the detected staged root and the N|Solid entry in that root's matching `import_manifest.json`.
 - Validates the newly staged root by checking `plugin.json`, `bundle.json`, canonical skill presence, and source registration in the import manifest.
-- Restores both the staged root and the saved manifest entry if reinstall or validation fails, preserving unrelated manifest imports.
+- Restores both the staged root and the saved manifest entry if reinstall or validation fails, preserving unrelated manifest imports and retrying bounded `EPERM`/`EBUSY`/`ENOTEMPTY` with revalidation before any restore is declared failed.
+- Edits `import_manifest.json` byte-preserving (CRLF, comments, unrelated imports retained) and verifies the owned slice after mutation.
 
 `packages/core/src/update/fallback-transaction.ts`
 
 - Resolves one available package executor (`npm exec` preferred, otherwise `pnpm dlx`), verifies the planned `nsolid-plugin` tarball integrity, and runs that verified local artifact from a restrictive temporary working directory so workspace binaries/configuration cannot shadow the payload.
-- Before launching the child, the parent creates and fsyncs a restrictive durable journal plus complete snapshot of the selected installation's tracked skill directories, affected MCP fields, links, and tracking state. The journal records `prepared`, `mutating`, and `committed` phases and remains recoverable if the package executor or child times out, crashes, or is killed.
+- Before launching the child, the parent creates and fsyncs a durable journal plus complete snapshot of the selected installation's tracked skill directories, affected MCP fields, links, and tracking state. The journal records `prepared`, `mutating`, and `committed` phases and remains recoverable if the package executor or child times out, crashes, or is killed. Durability (fsync) is stated separately from confidentiality: the journal lives under a private user-owned root and staging sits beside the target; no `chmod 0600` ACL guarantee is promised where Windows ACLs are not controlled.
 - Invokes the exact package's dedicated internal `nsolid-plugin-refresh-owned` binary with a parent-created transaction manifest. The manifest binds `installationId`, harness, canonical owned paths, tracking-file path and digest, and field-level MCP ownership; the regular `nsolid-plugin install` command and programmatic `install()` contract are not changed.
 - The child validates that the live tracking digest, installation identity, canonical paths, and MCP fields still equal the approved manifest before mutation. It refuses stale, sibling, broadened, or ambiguous identity rather than rediscovering a target from `--harness` alone.
-- Reconciles the installed asset set against the new bundle: complete skill directories are replaced, previously tracked skills absent from the new bundle are removed, and untracked/user-owned paths and unrelated MCP entries are preserved.
+- Reconciles the installed asset set against the new bundle: complete skill directories are replaced, previously tracked skills absent from the new bundle are removed, and untracked/user-owned paths and unrelated MCP entries are preserved. Junctions are recorded via `lstat` and never dereferenced for ownership or deletion.
+- On failure the parent first confirms the descendant process tree is terminated, then restores its snapshot; it never restores concurrently with a possibly-live child. When tree termination cannot be confirmed, the parent leaves the journal recoverable/deferred rather than restoring partially.
 - Updates `bundleVersion` only after the new skills, MCP entries, and tracking data validate. The parent marks the journal committed and removes it only after post-update validation; otherwise it restores its snapshot independently of child-process availability.
 - On every later update invocation, the parent recovers or reports any non-committed journal before planning new mutation.
 - Treats direct artifacts without sufficient tracking ownership as `unsupported` rather than deleting paths by name or prefix.
@@ -139,6 +159,7 @@ Release preparation is a separate maintainer-side script. Runtime update code re
 
 - Fallback tracking adds an optional `bundleVersion`, canonical per-installation skill/link paths, and MCP ownership evidence per JSON field/value so shared paths and user-modified fields cannot be claimed by name alone.
 - Readers accept legacy tracking for reporting, but automatic mutation is `unsupported` until the selected installation has complete per-path and field-level ownership evidence; compatibility never authorizes a name-only write or deletion.
+- Tracking paths and digests use the shared `path-normalize` so plan, manifest, execution, and rollback compare identical normalized identities.
 
 ### Release modules
 
@@ -479,8 +500,7 @@ Rules enforced by these contracts:
 
 | Target | Native/package action | Success guidance |
 |---|---|---|
-| CLI npm | verify the planned tarball integrity, then `npm install --global <verified-local-tarball>` | invoke CLI again |
-| CLI pnpm | verify the planned tarball integrity, then `pnpm add --global <verified-local-tarball>` | invoke CLI again |
+| CLI npm/pnpm | verify the planned tarball integrity, then run the manager through its resolved `ExecutableIdentity` (native `.exe`/`.com`, or `process.execPath` + verified JS entrypoint; a bare `npm`/`pnpm` name or unverified `.cmd`/`.bat`/`.ps1` shim is never spawned) with `--global` on the verified local tarball | invoke CLI again |
 | Claude | `claude plugin update <detected-plugin-id> --scope <detected-scope>` | `/reload-plugins` or restart |
 | Codex | `codex plugin marketplace upgrade <detected-marketplace>`, then `codex plugin remove <detected-plugin-id>` and `codex plugin add <detected-plugin-id>` | start a new session |
 | Antigravity | `agy plugin uninstall nsolid-plugin`, then install the canonical repository pinned to the planned full commit | restart AGY |
@@ -636,7 +656,8 @@ sequenceDiagram
 ## Error Handling and Safety
 
 - Network lookups have explicit timeouts and schema validation.
-- Missing executables use a distinct error code from command failure.
+- Missing executables use a distinct error code from command failure. Executables are resolved to an absolute, identity-verified target (see `command-runner`); resolution never trusts a bare name, cwd-relative, or unvalidated `.cmd`/`.bat`/`.ps1` shim.
+- Timeouts confirm descendant-tree termination before rollback; on Windows, controlled tree termination is used and, when termination cannot be confirmed, rollback is deferred/left recoverable rather than restoring concurrently.
 - Process output is bounded before being retained in results.
 - Existing logger redaction is applied to verbose diagnostics.
 - `--all` catches version-lookup, planning, and execution errors at the installation boundary and continues with independent installation records, including native and fallback records for the same harness.
@@ -645,10 +666,11 @@ sequenceDiagram
 - CLI and fallback package execution uses the registry, tarball, and integrity identity from the plan; mutable dist-tags and ambient registry resolution are not used during mutation, and package-manager success without matching on-disk content evidence is a failure.
 - Pi user-only updates pass `--no-approve`; `--approve` is used only when the immutable plan identifies, displays, executes within, and immediately revalidates a project-scoped canonical package root. Canonical entries across both scopes are updated once, while changed/conflicting/pinned entries block automatic mutation.
 - Codex removes the installed plugin only after marketplace refresh and backup succeed. Rollback validates the restored registration and cached payload while preserving unrelated `config.toml` entries.
-- Antigravity accepts only one unambiguous documented layout pair. Backup paths are created with restrictive permissions in an OS temporary directory and always cleaned after success. Rollback validates both the staged root and its matching saved import-manifest registration.
-- OpenCode/fallback replacement mutates only paths and MCP fields bound to the approved installation manifest. The parent-owned durable journal restores overwritten and stale-removed skill directories, config, and tracking after child failure, timeout, signal, or interrupted prior execution.
+- Antigravity accepts only one unambiguous documented layout pair. Backups are staged beside the target on the same volume; `chmod`-based confidentiality is not promised on Windows (ACLs govern there). Rollback validates both the staged root and its matching saved import-manifest registration and retries bounded `EPERM`/`EBUSY`/`ENOTEMPTY` with revalidation.
+- OpenCode/fallback replacement mutates only paths and MCP fields bound to the approved installation manifest. The parent-owned durable journal restores overwritten and stale-removed skill directories, config, and tracking after child failure, timeout, signal, or interrupted prior execution, but only after confirming the child's process tree has terminated.
 - Update does not invoke setup, login, or auth modules.
 - Release scripts snapshot only explicit controlled files; rollback never performs broad Git or recursive workspace resets. Release payload checking includes runtime source inputs that are compiled or copied into both published packages.
+- A read-only `--check` performs no subprocess mutation: only read-only inventory, version resolution, planning, and formatting run.
 
 ## Migration Strategy
 

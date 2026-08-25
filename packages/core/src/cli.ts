@@ -5,21 +5,23 @@ import { createInterface } from 'node:readline/promises'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { installWithRuntime, setup, uninstall, logout, doctor, restore, loadCredentials } from './index.js'
+import { installWithRuntime, setup, uninstall, logout, doctor, restore, loadCredentials, executeUpdatePlan, getVersionInfo, planUpdates } from './index.js'
 import type { AuthConfirmation, HarnessType } from './types.js'
 import { HARNESS_VALUES, PLUGIN_OWNED_HARNESSES } from './types.js'
+import type { UpdateConfirmationContext, UpdatePlan, UpdatePlanItem, UpdateSummary } from './update/types.js'
 import { formatPluginError } from './errors.js'
 import { listConfigBackups } from './utils/backup.js'
 import { C, supportsColor } from './utils/format.js'
 import { createConsoleProgress, silentProgress } from './utils/progress.js'
+import { resolvePackageRoot } from './update/version.js'
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set<HarnessType>(['pi'])
 const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set<HarnessType>(['opencode'])
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-// At runtime the bin is dist/src/cli.js, so __dirname is <pkgroot>/dist/src.
-// bundle.json and skills/ ship at the package root (per package.json "files"),
-// not under dist/ — resolve up two levels to reach the package root.
-const CORE_PKG_ROOT = path.resolve(__dirname, '..', '..')
+// At runtime the bin is dist/src/cli.js and source execution is src/cli.ts.
+// Resolve the nearest directory containing the package and bundle manifests so
+// both layouts use the same package root.
+const CORE_PKG_ROOT = resolvePackageRoot(__dirname)
 const REPO_ROOT = path.resolve(CORE_PKG_ROOT, '..', '..')
 const DEFAULT_SOURCE_ROOT = existsSync(path.join(REPO_ROOT, 'bundle.json')) && existsSync(path.join(REPO_ROOT, 'skills'))
   ? REPO_ROOT
@@ -61,6 +63,8 @@ Commands:
   switch-org Force re-authentication to switch NodeSource organizations (opens a browser; affects all harnesses)
   doctor     Check installation health for a harness
   restore    Restore a harness MCP config from the latest backup
+  version    Report the CLI and bundled plugin versions
+  update     Check or update the CLI and detected harness installations
 
 Options:
   --harness <harness>    Target harness (required in non-interactive mode): ${HARNESS_VALUES.join(', ')}
@@ -74,6 +78,9 @@ Options:
   --no-color            Disable colored output
   --quiet               Suppress step-by-step progress output (setup/install/switch-org)
   --yes                 Skip interactive confirmation prompts
+  --check               Report update status without mutating anything
+  --all                 Include every detected installation (cannot combine with --harness)
+  --version             Print the CLI and bundled plugin versions (alias for version)
   --accounts-url <url>  Explicit origin-only accounts URL override for setup/switch-org
   --help                Show this help message
 
@@ -84,6 +91,91 @@ Distribution notes:
   Install: the fallback direct installer provisions the MCP bridge runtime first, then installs assets; it never opens a browser.
   After switch-org, a direct-config harness passed to --harness (OpenCode, Pi, fallback CLI installs) has its MCP config refreshed on the spot; Claude/Codex/Antigravity native plugins must be reconnected, and other direct-config harnesses need a later setup/install to re-bake the new org's token.
   Auth: only setup/switch-org may open a browser.`)
+}
+
+function printVersion (json: boolean): void {
+  const info = getVersionInfo(CORE_PKG_ROOT)
+  if (json) {
+    console.log(JSON.stringify(info))
+    return
+  }
+  console.log(`nsolid-plugin CLI ${info.cliVersion}`)
+  console.log(`bundled plugin ${info.bundleVersion}`)
+}
+
+async function confirmUpdatePlan (_context: UpdateConfirmationContext, _color: boolean): Promise<boolean> {
+  const rl = createPrompt()
+  try {
+    const answer = (await rl.question('Apply this update plan? [y/N]: ')).trim().toLowerCase()
+    return answer === 'y' || answer === 'yes'
+  } finally {
+    rl.close()
+  }
+}
+
+function printUpdatePlan (plan: UpdatePlan, color: boolean): void {
+  if (plan.items.length === 0) {
+    process.stderr.write('No installations detected.\n')
+    return
+  }
+  process.stderr.write(plan.checkOnly ? 'Update check:\n' : 'Update plan:\n')
+  for (const item of plan.items) printUpdatePlanItem(item, color, process.stderr)
+}
+
+function printUpdatePlanItem (item: UpdatePlanItem, color: boolean, output: NodeJS.WritableStream): void {
+  const paint = (value: string) => color ? C.dim(value) : value
+  output.write(`  ${item.installationId} — ${item.ownership} — ${item.version.status}`)
+  if (item.version.current && item.version.latest) output.write(` (${item.version.current} → ${item.version.latest})`)
+  else if (item.version.current) output.write(` (${item.version.current})`)
+  else if (item.version.latest) output.write(` (latest: ${item.version.latest})`)
+  output.write(`\n    source: ${sourceLabel(item)}\n`)
+  for (const command of item.manualCommands ?? []) output.write(`    ${paint('manual:')} ${command}\n`)
+  if (item.planningError) {
+    output.write(`    error: ${item.planningError.message}\n`)
+    return
+  }
+  for (const step of item.steps) {
+    if (step.kind === 'command') output.write(`    ${paint('run:')} ${formatCommand(step.command.executable, step.command.args)}\n`)
+    if (step.kind === 'filesystem') output.write(`    ${paint(`${step.operation}:`)} ${step.paths.join(', ')}\n`)
+    if (step.kind === 'validation') output.write(`    ${paint('check:')} ${step.checks.join('; ')}\n`)
+  }
+  if (item.rollbackSteps.length > 0) {
+    output.write(`    ${paint('rollback:')}\n`)
+    for (const step of item.rollbackSteps) {
+      if (step.kind === 'command') output.write(`      ${paint('run:')} ${formatCommand(step.command.executable, step.command.args)}\n`)
+      if (step.kind === 'filesystem') output.write(`      ${paint(`${step.operation}:`)} ${step.paths.join(', ')}\n`)
+      if (step.kind === 'validation') output.write(`      ${paint('check:')} ${step.checks.join('; ')}\n`)
+    }
+  }
+}
+
+function printUpdateSummary (summary: UpdateSummary, color: boolean): void {
+  for (const result of summary.results) {
+    const version = result.resultingVersion ?? result.latestVersion ?? result.currentVersion
+    const suffix = version ? ` (${version})` : ''
+    const error = result.error ? ` — ${result.error.message}` : ''
+    console.log(`${result.installationId}: ${result.status}${suffix}${error}`)
+    if (result.rollbackCommand && result.status === 'failed') console.log(`  restore: ${result.rollbackCommand}`)
+    if (result.restartHint && result.status === 'updated') console.log(`  ${result.restartHint}`)
+  }
+  const counts = Object.entries(summary.counts).filter(([, count]) => count > 0).map(([status, count]) => `${status}=${count}`).join(', ')
+  console.log(`${color ? C.dim('Summary:') : 'Summary:'} ${counts || 'none'}`)
+}
+
+function sourceLabel (item: UpdatePlanItem): string {
+  const source = item.source
+  if (source.kind === 'none') return 'none'
+  if (source.kind === 'unsupported') return `${source.reason} (${source.source})`
+  if (source.kind === 'global-package') return `${source.packageManager}: ${source.packageName}`
+  if (source.kind === 'claude-marketplace') return `${source.pluginId} @ ${source.marketplace} (${source.scope})`
+  if (source.kind === 'codex-marketplace') return `${source.pluginId} @ ${source.marketplace}`
+  if (source.kind === 'pi-package') return `${source.spec} (${source.scopes.join(',')})`
+  if (source.kind === 'antigravity-git') return `${source.url} (${source.layout.kind})`
+  return `fallback${source.executor ? ` (${source.executor})` : ''}`
+}
+
+function formatCommand (executable: string, args: readonly string[]): string {
+  return [executable, ...args].map((value) => /[\s"']/.test(value) ? JSON.stringify(value) : value).join(' ')
 }
 
 function isInteractive (): boolean {
@@ -243,9 +335,17 @@ async function main (): Promise<void> {
       'keep-credentials': { type: 'boolean' },
       quiet: { type: 'boolean' },
       yes: { type: 'boolean' },
+      check: { type: 'boolean' },
+      all: { type: 'boolean' },
+      version: { type: 'boolean', short: 'v' },
       help: { type: 'boolean', short: 'H' },
     },
   })
+
+  if (values.version === true) {
+    printVersion(values.json === true)
+    return
+  }
 
   if (values.help || positionals.length === 0) {
     printUsage()
@@ -254,6 +354,11 @@ async function main (): Promise<void> {
 
   const command = positionals[0]
   const harness = values.harness as HarnessType | undefined
+
+  if (values.all === true && harness) {
+    console.error('Error: --all cannot be combined with --harness')
+    process.exit(1)
+  }
 
   const resolveHarnesses = async (multiple: boolean): Promise<HarnessType[]> => {
     if (harness && HARNESS_VALUES.includes(harness)) return [harness]
@@ -283,6 +388,36 @@ async function main (): Promise<void> {
   }
 
   switch (command) {
+    case 'version': {
+      printVersion(values.json === true)
+      break
+    }
+    case 'update': {
+      if (harness && !HARNESS_VALUES.includes(harness)) {
+        console.error(`Error: --harness must be one of: ${HARNESS_VALUES.join(', ')}`)
+        process.exit(1)
+      }
+      const updateOptions = {
+        harness,
+        all: values.all === true,
+        check: values.check === true,
+        yes: values.yes === true,
+        json: values.json === true,
+        verbose: values.verbose === true,
+        noColor: values['no-color'] === true,
+        packageRoot: CORE_PKG_ROOT,
+        confirm: isInteractive() && values.yes !== true
+          ? (context: UpdateConfirmationContext) => confirmUpdatePlan(context, values['no-color'] !== true && supportsColor(process.stderr))
+          : undefined,
+      }
+      const plan = await planUpdates(updateOptions)
+      printUpdatePlan(plan, color)
+      const summary = await executeUpdatePlan(plan, updateOptions)
+      if (values.json === true) console.log(JSON.stringify(summary))
+      else printUpdateSummary(summary, color)
+      process.exitCode = summary.exitCode
+      break
+    }
     case 'setup': {
       if (values['accounts-url']) {
         process.env.NSOLID_ACCOUNTS_URL = values['accounts-url']

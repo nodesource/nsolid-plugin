@@ -1,4 +1,4 @@
-import { symlink, readlink, lstat, rm, rename, cp, access } from 'node:fs/promises'
+import { symlink, readlink, lstat, rm, rename, cp } from 'node:fs/promises'
 import path from 'node:path'
 import type { HarnessType, Logger, SkillRef } from '../types.js'
 import { getSkillsDir } from '../utils/path.js'
@@ -60,7 +60,10 @@ export async function unlinkSkillsFromHarness (
     const safeName = assertSafeSkillName(skill.name)
     const target = path.join(harnessDir, safeName)
     try {
-      await access(target)
+      // lstat also finds dangling symlinks. access() follows the link and
+      // treated a removed shared skill as missing, leaving stale harness links
+      // behind after a fallback refresh.
+      await lstat(target)
       logger?.debug('skills.unlink', { harness, skill: skill.name, target })
       await rm(target, { recursive: true, force: true })
     } catch (err) {

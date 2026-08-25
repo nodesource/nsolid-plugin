@@ -103,6 +103,23 @@ nsolid-plugin setup --harness <harness>
 nsolid-plugin install --harness <harness>
 ```
 
+### Check and update
+
+The updater plans changes before executing them and never starts OAuth. Version reporting is read-only:
+
+```bash
+nsolid-plugin version
+nsolid-plugin --version
+nsolid-plugin update --check
+nsolid-plugin update --all --check --json
+```
+
+The default `update` scope is the globally installed CLI. Use `--harness claude|codex|opencode|antigravity|pi` for one harness or `--all` for the CLI plus every detected installation. Mutating updates require an interactive confirmation or `--yes`; non-interactive automation should use `--yes --json`.
+
+Ownership remains with each tool. Claude uses its detected plugin ID and scope, Codex refreshes the detected marketplace and transactionally removes/adds that same ID, and Antigravity backs up its staged root and matching import manifest before reinstalling the fixed GitHub source. Pi runs its native unpinned package update once for the detected user/project scopes. OpenCode and tracked fallback installs use the exact published package's internal refresh entrypoint; they do not invoke `opencode plugin`.
+
+The updater preserves credentials, user-owned configuration, unrelated MCP entries, and native marketplace identities. It refuses ambiguous or unsupported sources, never silently downgrades a CLI newer than the registry, and rolls back owned fallback/Antigravity/Codex state when validation fails. The public `nsolid-plugin install` command and programmatic `install()` behavior remain unchanged.
+
 Without a global install, use `npx -y nsolid-plugin setup --harness <harness>` and `npx -y nsolid-plugin install --harness <harness>`.
 
 Use direct CLI install as the primary install path for OpenCode. For Claude Code, Codex CLI, and Antigravity CLI, prefer the native plugin commands below and keep `nsolid-plugin install` for fallback or repair. For Pi Agent, skills come from `nsolid-pi-plugin`; the CLI writes Pi MCP config only.
@@ -215,9 +232,16 @@ pnpm plugin:sync                                     # Regenerate manifests/conf
 pnpm plugin:materialize                              # Copy root skills into the Pi package for pack/release
 pnpm plugin:root                                     # Refresh root marketplace/plugin manifests from bundle.json
 pnpm plugin:root:check                               # Fail if committed root manifests drift from bundle.json
+pnpm release:prepare -- patch                         # Prepare the next release version atomically
+pnpm release:check                                    # Check synchronized versions and generated payload
+pnpm release:check --release                          # Also require payload changes to bump the release version
 ```
 
 Run `pnpm plugin:check` in CI and before release. The source tree keeps one canonical skill copy under root `skills/`; package-local `skills/` directories are materialized only for npm package release and cleaned afterward by package sync scripts.
+
+### Release order
+
+`release:prepare` only updates and validates local files; it never publishes or creates Git state. After review, run `pnpm release:check --release`, publish `nsolid-plugin@<version>` first, publish the same-version `nsolid-pi-plugin` second, then commit and push the generated root manifests and the matching semantic Git tag. Run `pnpm plugin:clean` after any interrupted package materialization. The first release that introduces this updater must be bootstrapped manually because an older CLI cannot update itself before the new package and native marketplace payload are published.
 
 ## Troubleshooting
 

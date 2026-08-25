@@ -79,6 +79,7 @@ For maintainers:
 - Native and fallback installations detected for the same harness are represented and updated as separate targets; one ownership never silently replaces the other.
 - Interactive destructive/replacement steps require confirmation; `--yes` enables non-interactive automation.
 - Network, registry, missing-binary, permission, corrupt-state, and partial-update failures are covered by tests and never expose credentials.
+- Windows updates run without `shell: true`/`cmd.exe`: CLI/fallback package managers execute through a resolved executable identity (native `.exe`/`.com` or `process.execPath` + verified JS entrypoint; unverified `.cmd`/`.bat`/`.ps1` shims are `unsupported`), executable lookup is case-insensitive over `PATH`/`Path` with `PATHEXT`, timeouts confirm descendant-tree termination before rollback, junctions are never dereferenced for ownership or deletion, staging/backup stay on one volume, and config/manifest edits preserve CRLF and unrelated entries — with real `windows-latest` CI coverage extending the existing matrix.
 - Release preparation propagates one requested semantic version to every version-bearing source/generated file and never publishes, tags, commits, or pushes.
 - Release checking fails when package, bundle, or generated manifest versions drift.
 - Existing installation, authentication, uninstall, restore, doctor, lint, build, and test behavior remains green.
