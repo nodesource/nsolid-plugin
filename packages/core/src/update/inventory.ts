@@ -226,22 +226,31 @@ function detectPiInstallations (cwd: string): UpdateInstallation[] {
   const matching = allEntries.filter((entry) => isPiPluginName(entry.source))
   const packageRoots: string[] = []
   const invalidScopes = new Set(matching.filter((entry) => !entry.canonical).map((entry) => entry.scope))
-  const hasUserCanonical = !invalidScopes.has('user') && matching.some((entry) => entry.scope === 'user' && entry.canonical)
-  const hasProjectCanonical = !invalidScopes.has('project') && matching.some((entry) => entry.scope === 'project' && entry.canonical)
-  // A cache directory is not source evidence. Only an explicit canonical
-  // settings entry makes a Pi package installation updateable.
-  if (!hasUserCanonical && !hasProjectCanonical) {
-    const invalid = matching.find((entry) => !entry.canonical)
-    if (!invalid) return []
-    return [{
-      installationId: 'pi:package:unsupported',
+  const unsupportedInstallations: UpdateInstallation[] = []
+  for (const scope of ['user', 'project'] as const) {
+    const invalid = matching.find((entry) => entry.scope === scope && !entry.canonical)
+    if (!invalid) continue
+    const settingsPath = scope === 'user' ? userSettings : projectSettings
+    unsupportedInstallations.push({
+      installationId: `pi:package:unsupported:${scope}`,
       target: 'pi',
       ownership: 'package-owned',
       installed: true,
       source: makeUnsupportedSource(invalid.source, invalid.reason),
       version: { status: 'unknown' },
-    }]
+      metadata: {
+        settingsPaths: [settingsPath],
+        settingsDigests: [fileDigest(settingsPath)],
+        projectRoot: scope === 'project' ? cwd : undefined,
+        projectRootIdentity: scope === 'project' ? safeRealpath(cwd) : undefined,
+      },
+    })
   }
+  const hasUserCanonical = !invalidScopes.has('user') && matching.some((entry) => entry.scope === 'user' && entry.canonical)
+  const hasProjectCanonical = !invalidScopes.has('project') && matching.some((entry) => entry.scope === 'project' && entry.canonical)
+  // A cache directory is not source evidence. Only an explicit canonical
+  // settings entry makes a Pi package installation updateable.
+  if (!hasUserCanonical && !hasProjectCanonical) return unsupportedInstallations
 
   const scopes: Array<'user' | 'project'> = []
   if (hasUserCanonical) scopes.push('user')
@@ -282,7 +291,7 @@ function detectPiInstallations (cwd: string): UpdateInstallation[] {
       packageEvidencePaths,
       packageEvidenceDigests: packageEvidencePaths.map(fileDigest),
     },
-  }]
+  }, ...unsupportedInstallations]
 }
 
 async function detectFallbackInstallations (): Promise<UpdateInstallation[]> {

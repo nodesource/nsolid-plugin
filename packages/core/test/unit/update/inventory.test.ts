@@ -85,7 +85,7 @@ describe('update installation inventory', () => {
     }
   })
 
-  it('keeps a canonical Pi scope updateable when the other scope is non-canonical', async () => {
+  it('reports each Pi scope independently when one is non-canonical', async () => {
     const project = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-pi-project-'))
     try {
       const userSettings = path.join(home, '.pi', 'agent', 'settings.json')
@@ -95,24 +95,32 @@ describe('update installation inventory', () => {
       packageRoot(path.join(home, '.pi', 'agent', 'npm', 'node_modules', 'nsolid-pi-plugin'), '1.0.0')
 
       const detected = await detectInstallations({ includeCli: false, cwd: project, commandRunner: runner() })
-      const pi = detected.find((installation) => installation.target === 'pi')
+      const pi = detected.find((installation) => installation.installationId === 'pi:package:user')
+      const unsupportedProject = detected.find((installation) => installation.installationId === 'pi:package:unsupported:project')
 
       assert.equal(pi?.installationId, 'pi:package:user')
       assert.equal(pi?.source.kind, 'pi-package')
       if (pi?.source.kind === 'pi-package') assert.deepEqual(pi.source.scopes, ['user'])
       assert.deepEqual(pi?.metadata?.settingsPaths, [userSettings])
+      assert.equal(unsupportedProject?.source.kind, 'unsupported')
+      if (unsupportedProject?.source.kind === 'unsupported') assert.equal(unsupportedProject.source.reason, 'pinned')
+      assert.deepEqual(unsupportedProject?.metadata?.settingsPaths, [projectSettings])
 
       writeJson(userSettings, { packages: ['npm:nsolid-pi-plugin@1.0.0'] })
       writeJson(projectSettings, { packages: ['npm:nsolid-pi-plugin'] })
       packageRoot(path.join(project, '.pi', 'npm', 'node_modules', 'nsolid-pi-plugin'), '1.0.0')
 
       const inverse = await detectInstallations({ includeCli: false, cwd: project, commandRunner: runner() })
-      const inversePi = inverse.find((installation) => installation.target === 'pi')
+      const inversePi = inverse.find((installation) => installation.installationId === 'pi:package:project')
+      const unsupportedUser = inverse.find((installation) => installation.installationId === 'pi:package:unsupported:user')
 
       assert.equal(inversePi?.installationId, 'pi:package:project')
       assert.equal(inversePi?.source.kind, 'pi-package')
       if (inversePi?.source.kind === 'pi-package') assert.deepEqual(inversePi.source.scopes, ['project'])
       assert.deepEqual(inversePi?.metadata?.settingsPaths, [projectSettings])
+      assert.equal(unsupportedUser?.source.kind, 'unsupported')
+      if (unsupportedUser?.source.kind === 'unsupported') assert.equal(unsupportedUser.source.reason, 'pinned')
+      assert.deepEqual(unsupportedUser?.metadata?.settingsPaths, [userSettings])
     } finally {
       rmSync(project, { recursive: true, force: true })
     }
