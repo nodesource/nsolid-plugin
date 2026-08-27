@@ -45,7 +45,8 @@ Heap snapshot summarization is asynchronous and may not be ready on the first ca
 - Explain the hot path and the most expensive bottleneck.
 - Focus on user-owned code. If the top cost is in Node internals or `node_modules`, explain the nearest relevant user-owned caller instead.
 
-#### Heap Profile or Heap Sample
+#### Heap Sample
+- Only heap samples (from `heap-sampling`, type `heap-sample`) can be summarized. `heap-profile` assets (from `track-heap-objects`) are not supported by `asset-summary`; they can only be downloaded locally via `fetch-asset.cjs` and must never be read raw into context.
 - Identify top allocating constructors by self size and retained size.
 - Call out suspicious allocation patterns (e.g. unusually large arrays, many short-lived objects of the same type).
 
