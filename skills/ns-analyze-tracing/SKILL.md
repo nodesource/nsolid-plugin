@@ -30,7 +30,9 @@ description: >-
 - Compare the expected app names with the app groups in the `tracing` summary or the `app` values in raw tracing rows. Ignore tracing metadata when building the represented-app set.
 - Treat `⚠️ Partial tracing summary` as incomplete evidence. If any expected app is absent from the current global page, do not conclude that it lacks tracing.
 - Re-query `tracing` once for each absent expected app, using the exact app name and preserving the original time range and filters (`durations`, status code, endpoint, and other applicable filters). Use the app-specific result to determine whether that app has matching traces.
-- Only report that an expected app has no tracing after its app-specific query returns no matching traces. If that query is also partial, or reports matching traces through `metadata.total`, report the tracing evidence and its incomplete coverage instead of claiming absence.
+- If the app-specific query returns no matching traces, report only that the app has **no traces matching the requested filters and time range** — zero filtered rows do not prove the app has no tracing (e.g. an app with only 200 ms spans returns nothing under `durations="1000|5000"`).
+- To claim an app has no tracing at all, run one additional query with only the exact app name and the original time range (no `durations`, status code, or endpoint filters). Only a non-partial empty result from this unfiltered query justifies the "no tracing" claim; if it returns traces, report that tracing exists but none matched the filters.
+- If either app-specific query is partial, or reports matching traces through `metadata.total`, report the tracing evidence and its incomplete coverage instead of claiming absence.
 - Do not auto-page every global tracing result. These bounded app-specific checks are the fallback for reconciling the known app inventory.
 
 ### 6. Triage the Trace
