@@ -55,7 +55,7 @@ Run the bundled wait script (use the absolute path of the directory where you re
 
 ### 7. Report or Hand Off for Analysis
 - For capture-only requests, report asset type, asset ID, app name, agent ID, duration/thread ID, and local path.
-- If the user asked to analyze, summarize, interpret, or explain the captured asset, read and follow `../ns-analyze-asset/SKILL.md` after the asset is ready. Do not duplicate its analysis rules here.
+- If the user asked to analyze, summarize, interpret, or explain a CPU profile, heap sample, or heap snapshot, read and follow `../ns-analyze-asset/SKILL.md` after the asset is ready. Do not duplicate its analysis rules here.
 - Pass this handoff payload: `assetId`, `assetType` (`cpuprofile`, `heapprofile`, or `heapsnapshot`), `appName`, `agentId`, `threadId`, `duration`, and local path if downloaded.
 - For heap tracking, report capture metadata and local path. The resulting `heap-profile` asset cannot be summarized by `asset-summary`; do not route it to `ns-analyze-asset` or `ns-advanced-memory-leak-hunter`. The local `.heapprofile` saved via `fetch-asset.cjs` is the deliverable; inspect the raw file only if the user explicitly asks.
 
