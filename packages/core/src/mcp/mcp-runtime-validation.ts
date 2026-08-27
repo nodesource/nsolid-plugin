@@ -22,16 +22,24 @@ export interface RuntimeProbe {
  * (realpath) to `kind` with its canonical path equal to or inside the
  * canonical `boundary` by a path-segment-aware check. A missing canonical
  * target, a broken symlink or a symlink whose target escapes the boundary
- * fails. The `failure` discriminator lets callers map each cause to their own
+ * fails. `containment: 'descendant'` additionally rejects canonical equality
+ * with the boundary, i.e. the target must live strictly underneath it. The
+ * `failure` discriminator lets callers map each cause to their own
  * error wording without re-implementing the probe.
  */
 type CanonicalProbe =
   | { ok: true; canonical: string }
   | { ok: false; failure: 'unreadable'; reason: string }
   | { ok: false; failure: 'type'; reason: string }
+  | { ok: false; failure: 'boundary'; reason: string; canonical: string }
   | { ok: false; failure: 'escape'; reason: string; canonical: string }
 
-function canonicalTargetInside (target: string, boundary: string, kind: 'dir' | 'file'): CanonicalProbe {
+function canonicalTargetInside (
+  target: string,
+  boundary: string,
+  kind: 'dir' | 'file',
+  containment: 'inside' | 'descendant' = 'inside'
+): CanonicalProbe {
   let canonical: string
   try {
     canonical = realpathSync(target)
@@ -50,7 +58,13 @@ function canonicalTargetInside (target: string, boundary: string, kind: 'dir' | 
   if (kind === 'file' && !targetStat.isFile()) {
     return { ok: false, failure: 'type', reason: `${target} is not a regular file` }
   }
-  if (!isInsideBoundary(canonical, boundary)) {
+  // Classify once: only canonical equality maps to the strict-descendant
+  // failure — a target that is merely outside must still fail as an escape.
+  const relation = boundaryRelation(canonical, boundary)
+  if (containment === 'descendant' && relation === 'same') {
+    return { ok: false, failure: 'boundary', reason: `${target} is not strictly below the required boundary (${canonical})`, canonical }
+  }
+  if (relation === 'outside') {
     return { ok: false, failure: 'escape', reason: `${target} resolves outside the runtime root (${canonical})`, canonical }
   }
   return { ok: true, canonical }
@@ -71,8 +85,11 @@ export function validateRuntimeRoot (root: string, expectedVersion: string): Run
     return { ok: false, reason: 'controlled runtime parent is missing or unreadable' }
   }
 
-  const rootProbe = canonicalTargetInside(root, canonicalParent, 'dir')
+  const rootProbe = canonicalTargetInside(root, canonicalParent, 'dir', 'descendant')
   if (!rootProbe.ok) {
+    if (rootProbe.failure === 'boundary') {
+      return { ok: false, reason: `runtime root must resolve strictly below the controlled runtime parent (${rootProbe.canonical})` }
+    }
     if (rootProbe.failure === 'escape') {
       return { ok: false, reason: `runtime root resolves outside the controlled runtime parent (${rootProbe.canonical})` }
     }
@@ -84,7 +101,7 @@ export function validateRuntimeRoot (root: string, expectedVersion: string): Run
   const canonicalRoot = rootProbe.canonical
 
   const mcpRemoteDir = path.join(canonicalRoot, 'node_modules', 'mcp-remote')
-  const packageProbe = canonicalTargetInside(mcpRemoteDir, canonicalRoot, 'dir')
+  const packageProbe = canonicalTargetInside(mcpRemoteDir, canonicalRoot, 'dir', 'descendant')
   if (!packageProbe.ok) return { ok: false, reason: `node_modules/mcp-remote ${packageProbe.reason}` }
 
   const manifestProbe = canonicalTargetInside(path.join(mcpRemoteDir, 'package.json'), canonicalRoot, 'file')
@@ -245,15 +262,31 @@ function resolveWithinRuntime (fromDir: string, name: string, root: string): str
 }
 
 /**
+ * Tri-state path relation, the single place that knows path-segment awareness
+ * and Windows case folding: `same` (target IS the boundary), `descendant`
+ * (strictly underneath it) or `outside`. A lexical prefix such as
+ * `<boundary>-evil` is NOT a descendant.
+ */
+type BoundaryRelation = 'same' | 'descendant' | 'outside'
+
+function boundaryRelation (target: string, boundary: string): BoundaryRelation {
+  const t = path.resolve(target)
+  const b = path.resolve(boundary)
+  const [tt, bb] = process.platform === 'win32' ? [t.toLowerCase(), b.toLowerCase()] : [t, b]
+  if (tt === bb) return 'same'
+  return tt.startsWith(bb + path.sep) ? 'descendant' : 'outside'
+}
+
+/**
  * Path-aware containment: `target` must equal `boundary` or live underneath
  * it. A lexical prefix such as `<boundary>-evil` is NOT a descendant. On
  * Windows the comparison is case-insensitive.
  */
 export function isInsideBoundary (target: string, boundary: string): boolean {
-  const t = path.resolve(target)
-  const b = path.resolve(boundary)
-  if (process.platform === 'win32') {
-    return t.toLowerCase() === b.toLowerCase() || t.toLowerCase().startsWith(b.toLowerCase() + path.sep)
-  }
-  return t === b || t.startsWith(b + path.sep)
+  return boundaryRelation(target, boundary) !== 'outside'
+}
+
+/** Strict containment: `target` must live strictly underneath `boundary`. */
+export function isStrictlyInsideBoundary (target: string, boundary: string): boolean {
+  return boundaryRelation(target, boundary) === 'descendant'
 }

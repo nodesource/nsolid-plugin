@@ -86,9 +86,13 @@ mutation, no network and no process spawning.
 A runtime at `root` is ready iff:
 
 Before reading package metadata, the probe canonicalizes the controlled runtime
-parent and `root`. The canonical root must remain below the canonical parent by
-a path-segment-aware boundary check; replacing the whole version root with a
-symlink outside that parent makes the runtime invalid. The `mcp-remote` package
+parent and `root`. The canonical root must remain strictly below the canonical
+parent by a path-segment-aware boundary relation; canonical equality with the
+parent is rejected, so a root symlink resolving exactly to the parent is
+invalid. The `node_modules/mcp-remote` package directory must also resolve
+strictly below the canonical root, while files inside the root keep inclusive
+containment; replacing the whole version root with a symlink outside that
+parent makes the runtime invalid. The `mcp-remote` package
 directory, every transitively resolved package directory, each package manifest
 and `dist/proxy.js` are resolved with `realpath`; each canonical target must
 equal the canonical runtime root or remain below it by the same boundary rule.
@@ -156,8 +160,14 @@ not been vetted/executed yet).
 
 Only paths created by the current operation are ever deleted: the staging
 directory, the stale-aside directory and the lock file this operation owns.
-Every recursive deletion target is asserted to live inside the validated
-runtime parent.
+Every recursive deletion target is asserted to be a strict descendant of the
+validated runtime parent, lexically and (for non-links) canonically — the
+target may never equal the parent itself. A deletion target that is itself a
+symlink is unlinked lexically and never followed (its referent is never
+touched), which is exactly what lets setup repair an invalid runtime root
+whose symlink points outside the managed runtime parent. Absence (`ENOENT`)
+is the only successful no-op in cleanup; any other I/O error stays visible
+instead of counting as removed.
 
 ### Publication protocol (staging → root)
 
@@ -246,6 +256,9 @@ published, versioned runtimes:
   for staging with a recorded managed process identity, the platform-specific
   check confirms that process group/tree no longer exists. Unknown liveness,
   permission errors, missing/malformed metadata or token mismatch means retain.
+  A staging/stale tree whose path is itself a symlink is reclaimed lexically
+  (the link is removed, its referent untouched) under the same ownership/
+  liveness proofs.
 - A stale-aside tree is reclaimed only after a valid versioned root exists.
   Reclamation never restores or promotes an orphan. Tests use a short injected
   grace period; production uses a fixed conservative grace period documented

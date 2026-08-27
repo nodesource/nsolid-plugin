@@ -394,6 +394,36 @@ describe('MCP wrapper stable runtime', () => {
       })
     }
 
+    it(`${wrapper} wrapper rejects a runtime root symlink that resolves to exactly the runtime parent`, (t) => {
+      // The versioned root must be a strict descendant of the runtime parent:
+      // canonical equality (a root symlink pointing at the parent itself)
+      // must fail before import even when a valid-looking tree lives directly
+      // in the parent.
+      const fixture = createWrapperFixture(wrapper)
+      const runtimeParent = join(fixture.home, '.agents', 'nsolid-plugin', 'runtime', 'mcp-remote')
+      const dir = join(runtimeParent, 'node_modules', 'mcp-remote')
+      mkdirSync(join(dir, 'dist'), { recursive: true })
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'mcp-remote', version: CORE_VERSION }))
+      writeFileSync(join(dir, 'dist', 'proxy.js'), "throw new Error('parent-level proxy imported')\n")
+      const linked = replaceWithSymlink(join(runtimeParent, CORE_VERSION), runtimeParent, 'dir')
+
+      if (!linked) {
+        t.skip('symlinks require additional privileges on this Windows host')
+        return
+      }
+
+      const result = spawnSync(process.execPath, [fixture.wrapperPath, 'ncm', 'claude'], {
+        cwd: fixture.directory,
+        env: wrapperEnvironment(fixture),
+        encoding: 'utf8',
+        timeout: 15000,
+      })
+
+      assert.notStrictEqual(result.status, 0, 'root/parent canonical equality must fail before import')
+      assert.match(result.stderr, repairFor('claude'))
+      assert.doesNotMatch(result.stderr, /parent-level proxy imported/)
+    })
+
     it(`${wrapper} wrapper reports credentials problems before touching the runtime`, () => {
       const fixture = createWrapperFixture(wrapper)
       writeFileSync(join(fixture.home, '.agents', '.nodesource-auth.json'), JSON.stringify({

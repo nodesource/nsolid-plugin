@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, sep } from 'node:path'
 
@@ -56,6 +56,8 @@ function lockPath (): string {
 }
 
 interface SeedOptions {
+  /** Tree root to seed (defaults to the versioned runtime root). */
+  root?: string
   version?: string
   withProxy?: boolean
   /** Packages actually present under node_modules; name/version/deps per package. */
@@ -82,6 +84,7 @@ const EXPECTED_NPM_INSTALL_ARGS = [
 /** Seed a runtime tree directly (no npm). Defaults produce a fully valid runtime. */
 function seedRuntime (options: SeedOptions = {}): void {
   const {
+    root = runtimeRoot(),
     version = MCP_REMOTE_VERSION,
     withProxy = true,
     dependencies = {
@@ -93,7 +96,7 @@ function seedRuntime (options: SeedOptions = {}): void {
     ranges = {},
     declareWithoutInstalling = [],
   } = options
-  const mcpRemoteDir = join(runtimeRoot(), 'node_modules', 'mcp-remote')
+  const mcpRemoteDir = join(root, 'node_modules', 'mcp-remote')
   mkdirSync(mcpRemoteDir, { recursive: true })
   const declared = [...SEED_DECLARED, ...declareWithoutInstalling]
   writeFileSync(
@@ -109,11 +112,11 @@ function seedRuntime (options: SeedOptions = {}): void {
     writeFileSync(join(mcpRemoteDir, 'dist', 'proxy.js'), '// proxy\n')
   }
   for (const [name, pkg] of Object.entries(dependencies)) {
-    const depDir = join(runtimeRoot(), 'node_modules', name)
+    const depDir = join(root, 'node_modules', name)
     mkdirSync(depDir, { recursive: true })
     writeFileSync(join(depDir, 'package.json'), JSON.stringify({ name: pkg.name ?? name, version: pkg.version ?? '1.0.0', ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}) }))
   }
-  writeFileSync(join(runtimeRoot(), 'package.json'), JSON.stringify({ name: 'nsolid-plugin-mcp-remote-runtime', private: true }))
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'nsolid-plugin-mcp-remote-runtime', private: true }))
 }
 
 function runtimeParentEntries (): string[] {
@@ -282,6 +285,18 @@ describe('inspectMcpRemoteRuntime()', () => {
     const status = inspectMcpRemoteRuntime()
     assert.strictEqual(status.status, 'invalid')
     assert.match(status.reason ?? '', /runtime root .*outside the controlled runtime parent/)
+  })
+
+  it('rejects a runtime root symlink that resolves to exactly the controlled parent', () => {
+    // Canonical equality with the parent must not satisfy "below the parent":
+    // the versioned root is a strict descendant, so a tree living directly in
+    // the parent can never stand in for the versioned runtime.
+    seedRuntime({ root: runtimeParent() })
+    symlinkSync(runtimeParent(), runtimeRoot(), process.platform === 'win32' ? 'junction' : 'dir')
+
+    const status = inspectMcpRemoteRuntime()
+    assert.strictEqual(status.status, 'invalid')
+    assert.match(status.reason ?? '', /runtime root must resolve strictly below the controlled runtime parent/)
   })
 
   it('rejects a symlinked mcp-remote package directory whose target escapes the runtime root', () => {
@@ -456,6 +471,28 @@ describe('ensureMcpRemoteRuntime()', () => {
     assert.strictEqual(result.installed, true)
     assert.strictEqual(inspectMcpRemoteRuntime().status, 'ready')
     assert.deepStrictEqual(runtimeParentEntries(), [MCP_REMOTE_VERSION], 'no stale leftovers, lock released')
+  })
+
+  it('repairs a runtime root symlink whose target escapes the controlled parent', async () => {
+    // The invalid root is a symlink pointing outside the managed parent.
+    // Repair must still converge: publish the replacement, remove the
+    // moved-aside link lexically (never following it — the referent must
+    // survive untouched) and leave no stale artifacts behind.
+    const outside = join(tmpHome, 'outside-root-referent')
+    mkdirSync(outside, { recursive: true })
+    const sentinel = join(outside, 'sentinel.txt')
+    writeFileSync(sentinel, 'do not delete\n')
+    mkdirSync(runtimeParent(), { recursive: true })
+    symlinkSync(outside, runtimeRoot(), process.platform === 'win32' ? 'junction' : 'dir')
+    const calls: Array<{ command: string; args: string[]; cwd: string }> = []
+
+    const result = await ensureMcpRemoteRuntime({ runner: createFakeRunner(calls) })
+
+    assert.strictEqual(result.installed, true)
+    assert.strictEqual(inspectMcpRemoteRuntime().status, 'ready')
+    assert.ok(lstatSync(runtimeRoot()).isDirectory(), 'published root is a real directory, not the link')
+    assert.deepStrictEqual(runtimeParentEntries(), [MCP_REMOTE_VERSION], 'stale link and sidecar removed, lock released')
+    assert.strictEqual(readFileSync(sentinel, 'utf8'), 'do not delete\n', 'link referent was never touched')
   })
 
   it('rejects a staging tree that fails validation (wrong version from npm)', async () => {
@@ -1066,6 +1103,34 @@ describe('safe orphan reclamation', () => {
     assert.strictEqual(inspectMcpRemoteRuntime().status, 'ready')
     assert.strictEqual(existsSync(orphan.tree), false, 'stale orphan reclaimed once a valid root exists')
     assert.strictEqual(existsSync(orphan.sidecar), false, 'stale orphan sidecar reclaimed')
+  })
+
+  it('reclaims a stale tree whose path is a symlink resolving outside the runtime parent', async () => {
+    // A symlinked orphan is deleted lexically (its referent is never touched),
+    // so it is reclaimable under the same ownership/liveness proofs even when
+    // the link resolves outside the managed parent.
+    seedRuntime({ version: '0.1.37' }) // invalid root forces the publish path
+    const outside = join(tmpHome, 'outside-stale-referent')
+    mkdirSync(outside, { recursive: true })
+    const sentinel = join(outside, 'sentinel.txt')
+    writeFileSync(sentinel, 'do not delete\n')
+    const tree = join(runtimeParent(), `${MCP_REMOTE_VERSION}.stale-${randomUUID()}`)
+    symlinkSync(outside, tree, process.platform === 'win32' ? 'junction' : 'dir')
+    const sidecar = `${tree}.owner.json`
+    writeFileSync(sidecar, JSON.stringify({
+      token: `stale-token-${randomUUID()}`,
+      pid: deadPid(),
+      createdAt: Date.now() - 120_000,
+      state: 'retained-live',
+    }))
+
+    const result = await ensureMcpRemoteRuntime({ runner: createFakeRunner([]), publish: { reclaimGraceMs: 1 } })
+
+    assert.strictEqual(result.installed, true)
+    assert.strictEqual(inspectMcpRemoteRuntime().status, 'ready')
+    assert.strictEqual(existsSync(tree), false, 'symlinked stale tree reclaimed lexically')
+    assert.strictEqual(existsSync(sidecar), false, 'symlinked stale tree sidecar reclaimed')
+    assert.strictEqual(readFileSync(sentinel, 'utf8'), 'do not delete\n', 'link referent was never touched')
   })
 })
 

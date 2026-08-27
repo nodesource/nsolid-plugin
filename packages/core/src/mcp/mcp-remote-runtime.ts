@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -407,8 +408,10 @@ export async function ensureMcpRemoteRuntime (
     // Clean up only what this operation created; a previously valid runtime
     // is never touched here.
     if (!skipCleanup) {
+      // safeRemove is ENOENT-idempotent; no existsSync precondition (it would
+      // follow a terminal symlink and leak a broken link this operation made).
       for (const target of created) {
-        if (existsSync(target)) safeRemove(target, parent)
+        safeRemove(target, parent)
       }
     }
   }
@@ -732,7 +735,15 @@ function reclaimOrphans (parent: string, root: string, publish: PublishControls)
     if (!isStaleTree && !treeName.startsWith('.staging-')) continue
     try {
       const treePath = path.join(parent, treeName)
-      if (!isInsideBoundary(realpathSync(treePath), canonicalParent)) continue
+      let stat: ReturnType<typeof lstatSync>
+      try {
+        stat = lstatSync(treePath)
+      } catch {
+        continue // vanished — retain its sidecar
+      }
+      // A symlink entry is deleted lexically (its referent is never touched),
+      // so it is reclaimable regardless of where the link resolves.
+      if (!stat.isSymbolicLink() && !isInsideBoundary(realpathSync(treePath), canonicalParent)) continue
       // A stale-aside tree is reclaimed only after a valid versioned root
       // exists: recovery never depends on removing it.
       if (isStaleTree && (!existsSync(root) || !validateRuntimeRoot(root, MCP_REMOTE_VERSION).ok)) continue
@@ -793,10 +804,39 @@ function isManagedTreeProvenAbsent (managedPid: number): boolean {
 }
 
 /**
- * Recursive delete guarded to only accept paths inside the runtime parent.
- * Never call this with an unvalidated or user-supplied path.
+ * Recursive delete guarded to only accept strict descendants of the runtime
+ * parent (lexically and, for non-links, canonically). A deletion target that
+ * is itself a symlink is unlinked lexically — its referent is never touched —
+ * which is what makes an invalid root whose link points outside the parent
+ * repairable. Absence is the only successful no-op; every other failure stays
+ * visible. Never call this with an unvalidated or user-supplied path.
  */
 function safeRemove (target: string, parent: string): void {
+  // Lexical guard first: `target` must name a strict descendant of `parent`.
+  // This helper is the security boundary — never rely on caller discipline,
+  // and never accept the parent itself (recursive delete of the whole parent).
+  const lexicalTarget = path.resolve(target)
+  const lexicalParent = path.resolve(parent)
+  if (lexicalTarget === lexicalParent || !isInsideBoundary(lexicalTarget, lexicalParent)) {
+    throw new McpRemoteRuntimeError(`Refusing to remove a path outside the runtime directory: ${target}`)
+  }
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(target)
+  } catch (err) {
+    // Absence is the only successful no-op (rmSync `force` semantics);
+    // EACCES/EPERM/EIO stay visible instead of becoming silent no-ops.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw err
+  }
+  if (stat.isSymbolicLink()) {
+    try {
+      unlinkSync(target)
+    } catch {
+      rmdirSync(target) // junction/dir-symlink fallback for platforms where unlink refuses
+    }
+    return
+  }
   const canonicalTarget = realpathSync(target)
   const canonicalParent = realpathSync(parent)
   if (!isInsideBoundary(canonicalTarget, canonicalParent)) {

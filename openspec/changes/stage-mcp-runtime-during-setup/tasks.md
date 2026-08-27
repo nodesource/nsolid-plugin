@@ -202,3 +202,9 @@ proposal (scope/rollback), design (module contract, sequences), specs
 - [x] `git diff --check`, `git status --short` clean of drift.
 - [x] Atomic conventional commit: `fix(mcp): provision bridge runtime during
       setup`. No push/PR.
+
+## 9. Review follow-ups (PR #63)
+
+- [x] safeRemove: lexical strict-descendant guard (rejects the parent itself), ENOENT-only idempotence, lexical unlink of symlink targets; created-loop existsSync precondition dropped; reclaimOrphans treats symlink entries as lexically reclaimable
+- [x] validation: shared tri-state boundary relation; version root and node_modules/mcp-remote must resolve strictly below their boundaries (canonical equality rejected) while inner files stay inclusive — core + both wrapper copies
+- [x] regressions: outside-target root symlink repair (referent untouched), equality-boundary root rejection (core inspect + wrapper source/generated), symlinked stale-tree reclamation

@@ -170,7 +170,10 @@ function validateMcpRemote (dir, boundary, parentBoundary) {
       ? canonicalTargetInside(boundary, canonicalParent, 'dir')
       : canonicalParent
     if (!canonicalBoundary) return null
-    const canonicalDir = canonicalTargetInside(dir, canonicalBoundary, 'dir')
+    // Strict on the stable path (the package dir must sit strictly below the
+    // versioned root); the dev fallback validates the checkout itself, where
+    // dir === boundary by construction.
+    const canonicalDir = canonicalTargetInside(dir, canonicalBoundary, 'dir', !parentBoundary)
     if (!canonicalDir) return null
     const manifestPath = canonicalTargetInside(path.join(dir, 'package.json'), canonicalDir, 'file')
     if (!manifestPath) return null
@@ -182,10 +185,14 @@ function validateMcpRemote (dir, boundary, parentBoundary) {
   }
 }
 
-function canonicalTargetInside (target, boundary, kind) {
+function canonicalTargetInside (target, boundary, kind, allowSelf = false) {
   const canonical = realpathSync(target)
   const relative = path.relative(boundary, canonical)
-  if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) return null
+  // `relative === ''` means the target IS the boundary: rejected unless the
+  // caller explicitly allows it (the dev fallback validates the checkout
+  // itself, where dir === boundary by construction). The versioned runtime
+  // root must be a strict descendant of the runtime parent.
+  if (relative === '' ? !allowSelf : (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative))) return null
   const targetStat = statSync(canonical)
   if (kind === 'dir' ? !targetStat.isDirectory() : !targetStat.isFile()) return null
   return canonical

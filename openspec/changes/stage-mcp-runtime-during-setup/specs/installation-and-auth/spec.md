@@ -118,6 +118,7 @@ runtime root — so every state called `ready` is loadable by the wrapper.
 - **WHEN** readiness is evaluated
 - **THEN** the runtime is reported invalid before package code is imported
 - **AND** the same canonical boundary rule applies to package directories, manifests and the proxy file
+- **AND** a runtime root whose canonical path equals the controlled runtime parent (e.g. a root symlink resolving to the parent itself) is rejected; the versioned root must be a strict descendant
 
 #### Scenario: Dependency kinds follow runtime-install semantics
 
@@ -141,6 +142,14 @@ renames of an invalid-runtime replacement.
 - **WHEN** setup re-provisions the runtime and the staging tree validates
 - **THEN** the invalid runtime is replaced under the publication lock by the validated staging tree
 - **AND** readiness reports the runtime as ready afterwards
+
+#### Scenario: Outside-target root symlinks are repaired lexically
+
+- **GIVEN** the versioned root is a symlink whose target lies outside the runtime parent
+- **WHEN** setup runs
+- **THEN** the replacement runtime is published and the moved-aside link is removed lexically without ever touching its referent
+- **AND** no stale tree, sidecar or lock remains
+- **AND** the operation succeeds instead of failing containment cleanup
 
 #### Scenario: Interrupted installation never publishes a partial runtime
 
@@ -177,6 +186,12 @@ renames of an invalid-runtime replacement.
 - **WHEN** a later setup holds the publication lock and a valid versioned root exists
 - **THEN** the stale tree may be removed only after the creator is proven dead and no live lock carries its operation token
 - **AND** missing or malformed metadata, unknown liveness, permission errors or token mismatch retain the tree instead of guessing ownership
+
+#### Scenario: Symlinked orphan trees are reclaimed lexically
+
+- **GIVEN** a stale/staging tree path is a symlink resolving outside the runtime parent with otherwise valid aged ownership metadata from a dead creator
+- **WHEN** a later setup holds the publication lock and applies the reclamation proof
+- **THEN** the orphan is reclaimed by removing the link while its referent is untouched, under the same ownership/liveness proofs as any other orphan
 
 #### Scenario: Concurrent setups converge on a valid runtime
 
@@ -293,7 +308,7 @@ message may contain an `npx` command as text.
 - **GIVEN** a valid runtime provisioned by setup
 - **WHEN** the harness starts an MCP server through the wrapper
 - **THEN** immediately before import the wrapper canonicalizes the controlled runtime parent, version root, package directory, package manifest and `dist/proxy.js`
-- **AND** the canonical version root remains within the canonical controlled parent, while the package directory, manifest and proxy remain within the canonical version root with their required directory/file types
+- **AND** the canonical version root remains strictly within the canonical controlled parent (canonical equality with the parent is rejected), while the package directory, manifest and proxy remain within the canonical version root with their required directory/file types
 - **AND** replacing the whole version root, package directory, manifest or proxy with a symlink or path that escapes its required boundary fails with the repair message before any package code is imported
 - **AND** the wrapper validates the runtime's package name and exact version, imports `dist/proxy.js` locally, and passes URL/headers as separate arguments
 - **AND** an `npx` sentinel on PATH is never executed
