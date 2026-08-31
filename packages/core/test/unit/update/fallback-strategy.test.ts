@@ -65,7 +65,6 @@ describe('fallback update strategy', () => {
     process.env.PATH = ''
     process.env.HOME = home
     process.env.USERPROFILE = home
-    let manifestDirectory: string | undefined
     try {
       const planned = await fallbackStrategy.plan({
         ...item(),
@@ -75,10 +74,7 @@ describe('fallback update strategy', () => {
       assert.equal(planned.planningError, undefined)
       assert.equal(planned.source.kind, 'unsupported')
       assert.equal(planned.manualCommands?.length, 2)
-      assert.ok(planned.manualCommands?.every((command) => command.includes(' --transaction ') && !command.includes(' --harness ')))
-      const manifestPath = planned.manualCommands?.[0]?.split(' --transaction ')[1]
-      assert.ok(manifestPath && existsSync(manifestPath))
-      manifestDirectory = manifestPath ? path.dirname(manifestPath) : undefined
+      assert.ok(planned.manualCommands?.every((command) => command.includes(' update --harness opencode --yes') && !command.includes(' --transaction ')))
     } finally {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
@@ -86,7 +82,6 @@ describe('fallback update strategy', () => {
       else process.env.HOME = previousHome
       if (previousUserProfile === undefined) delete process.env.USERPROFILE
       else process.env.USERPROFILE = previousUserProfile
-      if (manifestDirectory) rmSync(manifestDirectory, { recursive: true, force: true })
       rmSync(home, { recursive: true, force: true })
     }
   })

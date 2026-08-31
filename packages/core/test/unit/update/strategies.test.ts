@@ -9,20 +9,25 @@ import { codexStrategy } from '../../../src/update/strategies/codex.js'
 import { piStrategy } from '../../../src/update/strategies/pi.js'
 import { antigravityStrategy } from '../../../src/update/strategies/antigravity.js'
 import type { UpdateInstallation, UpdateSource } from '../../../src/update/types.js'
+import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 
 let previousPath: string | undefined
 let previousPathExt: string | undefined
 let previousHome: string | undefined
 let previousUserProfile: string | undefined
+let evidenceRoot: string
+let evidenceSequence = 0
 
 beforeEach(() => {
   previousPath = process.env.PATH
   previousPathExt = process.env.PATHEXT
   previousHome = process.env.HOME
   previousUserProfile = process.env.USERPROFILE
+  evidenceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-evidence-'))
 })
 
 afterEach(() => {
+  rmSync(evidenceRoot, { recursive: true, force: true })
   if (previousPath === undefined) delete process.env.PATH
   else process.env.PATH = previousPath
   if (previousPathExt === undefined) delete process.env.PATHEXT
@@ -34,6 +39,9 @@ afterEach(() => {
 })
 
 function installation (target: UpdateInstallation['target'], source: UpdateSource): UpdateInstallation {
+  const evidencePath = path.join(evidenceRoot, `${target}-${evidenceSequence++}.json`)
+  const evidence = JSON.stringify({ target, source })
+  writeFileSync(evidencePath, evidence)
   return {
     installationId: `${target}:native:nsolid-plugin@nodesource`,
     target,
@@ -41,6 +49,9 @@ function installation (target: UpdateInstallation['target'], source: UpdateSourc
     installed: true,
     source,
     version: { current: undefined, latest: '1.0.1', status: 'update-available' },
+    metadata: {
+      nativeEvidence: [{ path: evidencePath, digest: createHash('sha256').update(evidence).digest('hex') }],
+    },
   }
 }
 
@@ -130,7 +141,7 @@ function piInstallation (root: string, source: UpdateSource): UpdateInstallation
       },
     },
   }))
-  candidate.metadata = { packageRoots: [packageRoot], packageEvidencePaths: [evidencePath] }
+  candidate.metadata = { ...candidate.metadata, packageRoots: [packageRoot], packageEvidencePaths: [evidencePath] }
   return candidate
 }
 
@@ -170,12 +181,116 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
     }
   })
 
+  it('native strategies refuse to plan when no immutable artifact pins the source', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-no-artifact-'))
+    writeVerifiedLauncher(root, 'claude')
+    writeVerifiedLauncher(root, 'codex')
+    process.env.PATH = root
+    try {
+      for (const [strategy, target, source] of [
+        [claudeStrategy, 'claude', claudeSource()],
+        [codexStrategy, 'codex', codexSource()],
+      ] as const) {
+        const candidate = installation(target, source)
+        // No resolved artifact at all: a marketplace mutation must never be
+        // authorized without one.
+        const item = await strategy.plan(candidate, context())
+        assert.equal(item.steps.length, 0, target)
+        assert.equal(item.planningError?.code, 'NATIVE_SOURCE_NOT_PINNED', target)
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('native strategies refuse to plan for an unsupported artifact class', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-bad-artifact-'))
+    writeVerifiedLauncher(root, 'claude')
+    process.env.PATH = root
+    try {
+      const candidate = installation('claude', claudeSource())
+      candidate.artifact = { kind: 'tarball', url: 'https://example.com/x.tgz' } as never
+      const item = await claudeStrategy.plan(candidate, context())
+      assert.equal(item.steps.length, 0)
+      assert.equal(item.planningError?.code, 'NATIVE_SOURCE_NOT_PINNED')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses native execution when marketplace records changed after planning', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-drift-'))
+    writeVerifiedLauncher(root, 'claude')
+    process.env.PATH = root
+    try {
+      const candidate = installation('claude', claudeSource())
+      // The source is legitimately pinned: only the evidence drifts below.
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: 'planned-content',
+      }
+      const item = await claudeStrategy.plan(candidate, context())
+      writeFileSync(candidate.metadata!.nativeEvidence![0].path, '{"revision":"main"}')
+      let commands = 0
+      const result = await claudeStrategy.execute(item, {
+        options: {},
+        commandRunner: { run: async () => { commands++; return { exitCode: 0, stdout: '', stderr: '', timedOut: false } } },
+      })
+
+      assert.equal(result.status, 'failed')
+      assert.equal(result.error?.code, 'NATIVE_SOURCE_DRIFT')
+      assert.equal(commands, 0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('native execution refuses to run commands when the planned item lost its artifact', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-execute-unpinned-'))
+    writeVerifiedLauncher(root, 'claude')
+    process.env.PATH = root
+    try {
+      const candidate = installation('claude', claudeSource())
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: 'planned-content',
+      }
+      const item = await claudeStrategy.plan(candidate, context())
+      assert.equal(item.planningError, undefined)
+      // Simulate an item reaching execution without its immutable identity.
+      const unpinned = { ...item, artifact: undefined }
+      let commands = 0
+      const result = await claudeStrategy.execute(unpinned, {
+        options: {},
+        commandRunner: { run: async () => { commands++; return { exitCode: 0, stdout: '', stderr: '', timedOut: false } } },
+      })
+
+      assert.equal(result.status, 'failed')
+      assert.equal(result.error?.code, 'NATIVE_SOURCE_NOT_PINNED')
+      assert.equal(commands, 0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('claude: plans a spawn-safe command with embedded identity for a verified launcher', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-claude-'))
     const exe = writeVerifiedLauncher(root, 'claude')
     process.env.PATH = root
     try {
-      const item = await claudeStrategy.plan(installation('claude', claudeSource()), context())
+      const candidate = installation('claude', claudeSource())
+      // A pinned marketplace plan carries the resolved immutable artifact.
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: 'planned-content',
+      }
+      const item = await claudeStrategy.plan(candidate, context())
       assert.equal(item.planningError, undefined)
       const commands = item.steps.filter((step) => step.kind === 'command')
       assert.equal(commands.length, 2)
@@ -198,7 +313,14 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
     writeFileSync(path.join(root, 'claude'), 'not executable\n', { mode: 0o644 })
     process.env.PATH = root
     try {
-      const item = await claudeStrategy.plan(installation('claude', claudeSource()), context())
+      const candidate = installation('claude', claudeSource())
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: 'planned-content',
+      }
+      const item = await claudeStrategy.plan(candidate, context())
       assert.equal(item.steps.length, 0)
       assert.equal(item.planningError?.code, 'UNSAFE_HARNESS_LAUNCHER')
       assert.deepEqual(item.manualCommands, [
@@ -231,12 +353,12 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
     process.env.USERPROFILE = root
     try {
       const candidate = installation('claude', claudeSource())
-      candidate.metadata = { packageRoot: oldPayload, configPath: installedPath }
+      candidate.metadata = { ...candidate.metadata, packageRoot: oldPayload, configPath: installedPath }
       candidate.artifact = {
         kind: 'git',
         repository: 'https://github.com/NodeSource/nsolid-plugin.git',
         commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
-        contentDigest: createHash('sha256').update(newBundle).digest('hex'),
+        contentDigest: nativePayloadDigest(newPayload)!,
       }
       const item = await claudeStrategy.plan(candidate, context())
       const result = await claudeStrategy.execute(item, {
@@ -279,12 +401,12 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
       process.env.USERPROFILE = root
       try {
         const candidate = installation('claude', claudeSource())
-        candidate.metadata = { configPath: installedPath }
+        candidate.metadata = { ...candidate.metadata, configPath: installedPath }
         candidate.artifact = {
           kind: 'git',
           repository: 'https://github.com/NodeSource/nsolid-plugin.git',
           commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
-          contentDigest: createHash('sha256').update(newBundle).digest('hex'),
+          contentDigest: nativePayloadDigest(newPayload)!,
         }
         const item = await claudeStrategy.plan(candidate, context())
         const result = await claudeStrategy.execute(item, {
@@ -321,7 +443,13 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
       const cachePath = path.join(root, 'plugins', 'cache', 'nodesource', 'nsolid-plugin')
       mkdirSync(cachePath, { recursive: true })
       writeFileSync(configPath, '')
-      candidate.metadata = { configPath, packageRoot: cachePath }
+      candidate.metadata = { ...candidate.metadata, configPath, packageRoot: cachePath }
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: 'planned-content',
+      }
       const item = await codexStrategy.plan(candidate, context())
       assert.equal(item.planningError, undefined)
       const commands = item.steps.filter((step) => step.kind === 'command')
@@ -346,7 +474,14 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
     writeFileSync(path.join(root, 'codex'), 'not executable\n', { mode: 0o644 })
     process.env.PATH = root
     try {
-      const item = await codexStrategy.plan(installation('codex', codexSource()), context())
+      const candidate = installation('codex', codexSource())
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: 'planned-content',
+      }
+      const item = await codexStrategy.plan(candidate, context())
       assert.equal(item.steps.length, 0)
       assert.equal(item.planningError?.code, 'UNSAFE_HARNESS_LAUNCHER')
       assert.deepEqual(item.manualCommands, [

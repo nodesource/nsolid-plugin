@@ -2,7 +2,7 @@ import path from 'node:path'
 import type { UpdateContext, UpdateInstallation, UpdatePlanItem, UpdateResult, UpdateStrategy } from '../types.js'
 import { DEFAULT_COMMAND_TIMEOUT_MS, resolveExecutableIdentity } from '../command-runner.js'
 import { managerArgsForIdentity } from '../package-manager.js'
-import { nativeSourceHonorsArtifact } from '../native-evidence.js'
+import { nativeExecutionGuard } from '../native-evidence.js'
 import { executeCodexTransaction, resolveCodexPluginCachePath } from '../codex-transaction.js'
 import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
 import { resolveHome } from '../../utils/path.js'
@@ -14,9 +14,8 @@ export const codexStrategy: UpdateStrategy = {
   async plan (installation: UpdateInstallation): Promise<UpdatePlanItem> {
     const source = installation.source
     if (source.kind !== 'codex-marketplace' || !isMutableVersion(installation)) return planItem(installation)
-    if (!nativeSourceHonorsArtifact(source, installation.artifact)) {
-      return planItem(installation, [], [], undefined, { code: 'NATIVE_SOURCE_NOT_PINNED', message: 'Codex marketplace source cannot honor the resolved immutable commit during execution' })
-    }
+    const planGuard = nativeExecutionGuard(installation, 'Codex')
+    if (planGuard) return planItem(installation, [], [], undefined, planGuard)
     if (!/^nsolid-plugin@[A-Za-z0-9][A-Za-z0-9._-]*$/.test(source.pluginId)) {
       return planItem(installation, [], [], undefined, { code: 'INVALID_PLUGIN_ID', message: 'Detected Codex plugin identity is ambiguous' })
     }
@@ -93,9 +92,8 @@ export const codexStrategy: UpdateStrategy = {
 
   async execute (item: UpdatePlanItem, context: UpdateContext): Promise<UpdateResult> {
     if (item.planningError) return failedResult(item, item.planningError)
-    if (!nativeSourceHonorsArtifact(item.source, item.artifact)) {
-      return failedResult(item, { code: 'NATIVE_SOURCE_NOT_PINNED', message: 'Codex marketplace source no longer proves the planned immutable identity' })
-    }
+    const guard = nativeExecutionGuard(item, 'Codex')
+    if (guard) return failedResult(item, guard)
     if (item.steps.length === 0) return resultFromPlan(item, item.source.kind === 'unsupported' ? 'unsupported' : noMutationStatus(item.version))
     const transaction = await executeCodexTransaction(item, context.commandRunner)
     if (!transaction.success) {

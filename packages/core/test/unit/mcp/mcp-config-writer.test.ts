@@ -670,6 +670,45 @@ describe('removeMcpConfig', () => {
     assert.strictEqual(Object.keys(servers).length, 1)
   })
 
+  it('migrates the legacy mcpServers container away when writing the mcp block', async () => {
+    const { writeAdapterMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+    const { parseJsonc } = await import('../../../src/utils/config.js')
+
+    const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '{\n  // user notes\n  "mcpServers": {\n    "stale-nsolid": { "url": "https://stale" }\n  }\n}\n')
+
+    writeAdapterMcpConfig('opencode', { mcpServers: { 'nsolid-console': { type: 'remote', url: 'https://fresh', enabled: true, headers: {} } } })
+
+    const content = readFileSync(configPath, 'utf-8')
+    assert.ok(content.includes('// user notes'))
+    assert.ok(!content.includes('mcpServers'))
+    assert.ok(!content.includes('stale-nsolid'))
+    const parsed = parseJsonc(content) as { mcp: Record<string, { url: string }> }
+    assert.equal(parsed.mcp['nsolid-console'].url, 'https://fresh')
+  })
+
+  it('removes the legacy mcpServers container during uninstall-style cleanup', async () => {
+    const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
+    const { resolveHome } = await import('../../../src/utils/path.js')
+    const { mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+
+    const configPath = resolveHome('~/.config/opencode/opencode.jsonc')
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, '{\n  "mcpServers": {\n    "stale-nsolid": { "url": "https://stale" }\n  },\n  "mcp": {\n    "ns-benchmark": { "type": "remote", "url": "https://a", "headers": {} }\n  }\n}\n')
+
+    await removeMcpConfig('opencode', ['ns-benchmark'])
+
+    const content = readFileSync(configPath, 'utf-8')
+    assert.ok(!content.includes('mcpServers'))
+    assert.ok(!content.includes('stale-nsolid'))
+    assert.ok(!content.includes('ns-benchmark'))
+  })
+
   it('handles nonexistent config file', async () => {
     const { removeMcpConfig } = await import('../../../src/mcp/mcp-config-writer.js')
     const { resolveHome } = await import('../../../src/utils/path.js')

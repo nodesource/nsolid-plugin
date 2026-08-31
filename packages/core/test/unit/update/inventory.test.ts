@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import os from 'node:os'
 import path from 'node:path'
 import { detectInstallations } from '../../../src/update/inventory.js'
+import { resolveMarketplaceVersion } from '../../../src/update/version-source.js'
+import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 import { checkUpdates, planUpdates, update } from '../../../src/update/coordinator.js'
 
 let home: string
@@ -236,6 +238,45 @@ describe('update installation inventory', () => {
     const codex = detected.find((installation) => installation.target === 'codex')
     assert.equal(codex?.version.current, '1.0.1')
     assert.equal(codex?.metadata?.packageRoot, cacheRoot)
+  })
+
+  it('narrows a nested local-snapshot manifest to its payload root and basename', async () => {
+    const snapshotRoot = path.join(home, 'marketplace-repo')
+    const payloadRoot = path.join(snapshotRoot, 'plugins', 'nsolid')
+    mkdirSync(path.join(payloadRoot, 'skills', 'example'), { recursive: true })
+    writeFileSync(path.join(payloadRoot, 'plugin.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.1' }))
+    writeFileSync(path.join(payloadRoot, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.1' }))
+    writeFileSync(path.join(payloadRoot, 'skills', 'example', 'SKILL.md'), '# example\n')
+    writeJson(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), {
+      plugins: {
+        'nsolid-plugin@nodesource': [{
+          scope: 'user',
+          version: '1.0.1',
+          installPath: snapshotRoot,
+          relativeManifestPath: 'plugins/nsolid/plugin.json',
+          freshness: 'verified',
+        }],
+      },
+    })
+
+    const detected = await detectInstallations({ includeCli: false, cwd: home, commandRunner: runner() })
+    const claude = detected.find((installation) => installation.target === 'claude')
+    const versionSource = claude?.source.kind === 'claude-marketplace' ? claude.source.versionSource : undefined
+    assert.equal(versionSource?.kind, 'local-snapshot')
+    if (versionSource?.kind !== 'local-snapshot') return
+    // The root is the payload subdirectory and the manifest is relative to it.
+    assert.equal(versionSource.root, payloadRoot)
+    assert.equal(versionSource.manifestPath, 'plugin.json')
+    assert.equal(versionSource.contentDigest, nativePayloadDigest(payloadRoot))
+
+    // The narrowed source resolves: root and digest describe the same bytes.
+    const resolved = await resolveMarketplaceVersion({ ...versionSource }, { requireImmutable: false })
+    assert.equal(resolved.version, '1.0.1')
+    assert.equal(resolved.artifact?.kind, 'local-snapshot')
+    if (resolved.artifact?.kind === 'local-snapshot') {
+      assert.equal(resolved.artifact.root, payloadRoot)
+      assert.equal(resolved.artifact.contentDigest, versionSource.contentDigest)
+    }
   })
 
   it('classifies a Claude registration without marketplace metadata as unsupported', async () => {

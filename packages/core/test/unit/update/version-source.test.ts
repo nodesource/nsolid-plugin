@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { isSafeManifestPath, resolveMarketplaceVersion, resolveRegistryVersion, sanitizeRepository } from '../../../src/update/version-source.js'
+import { isSafeManifestPath, readArchiveWithLimit, resolveMarketplaceVersion, resolveRegistryVersion, sanitizeRepository } from '../../../src/update/version-source.js'
 
 describe('update version sources', () => {
   it('redacts repository credentials and rejects traversal paths', () => {
@@ -199,5 +199,56 @@ describe('update version sources', () => {
 
     assert.ok(!(registry.error?.message ?? '').includes(secretBody))
     assert.ok(!(marketplace.error?.message ?? '').includes(secretBody))
+  })
+})
+
+describe('archive download limit', () => {
+  const encode = (text: string): Uint8Array => new TextEncoder().encode(text)
+
+  function syntheticBody (chunks: Uint8Array[]): { body: unknown, state: () => { pulls: number, cancelled: boolean } } {
+    let pulls = 0
+    let cancelled = false
+    const body = {
+      getReader: () => ({
+        read: async (): Promise<{ done: boolean, value: Uint8Array | undefined }> => {
+          pulls++
+          if (pulls <= chunks.length) return { done: false, value: chunks[pulls - 1] }
+          return { done: true, value: undefined }
+        },
+        cancel: async (): Promise<void> => { cancelled = true },
+      }),
+    }
+    return { body, state: () => ({ pulls, cancelled }) }
+  }
+
+  it('rejects an oversized declared length before reading the body', async () => {
+    const { body, state } = syntheticBody([encode('never')])
+    await assert.rejects(
+      readArchiveWithLimit({ headers: new Headers({ 'content-length': '65' }), body } as unknown as Parameters<typeof readArchiveWithLimit>[0], 64),
+      /exceeds the maximum allowed size/
+    )
+    assert.equal(state().pulls, 0, 'the body must not be consumed when the header already exceeds the limit')
+  })
+
+  it('cancels the stream as soon as the accumulated bytes cross the limit', async () => {
+    const { body, state } = syntheticBody([encode('a'.repeat(6)), encode('b'.repeat(6))])
+    await assert.rejects(
+      readArchiveWithLimit({ headers: new Headers(), body } as unknown as Parameters<typeof readArchiveWithLimit>[0], 10),
+      /exceeds the maximum allowed size/
+    )
+    assert.equal(state().cancelled, true, 'the reader must be cancelled when the limit is exceeded')
+  })
+
+  it('accepts a stream that exactly reaches the limit', async () => {
+    const { body } = syntheticBody([encode('a'.repeat(5)), encode('b'.repeat(5))])
+    const bytes = await readArchiveWithLimit({ headers: new Headers(), body } as unknown as Parameters<typeof readArchiveWithLimit>[0], 10)
+    assert.equal(bytes.length, 10)
+    assert.equal(bytes.toString('utf8'), 'a'.repeat(5) + 'b'.repeat(5))
+  })
+
+  it('accepts a small valid archive with an unparseable content-length header', async () => {
+    const { body } = syntheticBody([encode('tiny')])
+    const bytes = await readArchiveWithLimit({ headers: new Headers({ 'content-length': 'not-a-number' }), body } as unknown as Parameters<typeof readArchiveWithLimit>[0], 64)
+    assert.equal(bytes.toString('utf8'), 'tiny')
   })
 })

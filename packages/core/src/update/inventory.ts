@@ -20,6 +20,7 @@ import { readClaudePluginScope } from './claude-record.js'
 import { detectGlobalPackageOwnership, readPackageVersion as readNamedPackageVersion } from './package-manager.js'
 import { readCodexPayloadVersion, resolveCodexPluginCachePath } from './codex-transaction.js'
 import { classifyVersionSet, classifyVersions, isStableVersion, readRunningVersionInfo, resolvePackageRoot } from './version.js'
+import { nativePayloadTreeDigest } from './native-payload.js'
 
 export interface InventoryOptions {
   commandRunner: CommandRunner
@@ -106,8 +107,9 @@ export async function detectCliInstallation (options: InventoryOptions, probeOwn
 
 function detectClaudeInstallations (): UpdateInstallation[] {
   const installedPath = resolveHome('~/.claude/plugins/installed_plugins.json')
+  const knownMarketplacesPath = resolveHome('~/.claude/plugins/known_marketplaces.json')
   const data = safeReadJson(installedPath)
-  const knownMarketplaces = safeReadJson(resolveHome('~/.claude/plugins/known_marketplaces.json')) ?? {}
+  const knownMarketplaces = safeReadJson(knownMarketplacesPath) ?? {}
   const records = extractPluginRecords(data)
   const output: UpdateInstallation[] = []
 
@@ -115,7 +117,14 @@ function detectClaudeInstallations (): UpdateInstallation[] {
     if (!isNsolidPluginId(id)) continue
     const parsed = PLUGIN_ID.exec(id)
     const scope = readClaudePluginScope(record)
-    const metadata = { ...(recordMetadata(record) ?? {}), configPath: installedPath }
+    const metadata = {
+      ...(recordMetadata(record) ?? {}),
+      configPath: installedPath,
+      nativeEvidence: [
+        { path: installedPath, digest: fileDigest(installedPath) },
+        { path: knownMarketplacesPath, digest: fileDigest(knownMarketplacesPath) },
+      ].filter((entry) => entry.digest.length > 0),
+    }
     const marketplaceRecord = parsed && isRecord(knownMarketplaces[parsed[1]]) ? knownMarketplaces[parsed[1]] as Record<string, unknown> : {}
     const enrichedRecord = { ...marketplaceRecord, ...record }
     const source = parsed && scope
@@ -170,7 +179,12 @@ function detectCodexInstallations (): UpdateInstallation[] {
     const cacheRoot = parsed
       ? resolveCodexPluginCachePath(configPath, id, parsed[1], recordedMetadata?.packageRoot)
       : recordedMetadata?.packageRoot
-    const metadata = { ...(recordedMetadata ?? {}), ...(cacheRoot ? { packageRoot: cacheRoot } : {}), configPath }
+    const metadata = {
+      ...(recordedMetadata ?? {}),
+      ...(cacheRoot ? { packageRoot: cacheRoot } : {}),
+      configPath,
+      nativeEvidence: [{ path: configPath, digest: fileDigest(configPath) }].filter((entry) => entry.digest.length > 0),
+    }
     const version = readRecordVersion(record, cacheRoot) ?? (cacheRoot ? readCodexPayloadVersion(cacheRoot, id) : undefined)
     output.push({
       installationId: `codex:native:${id}`,
@@ -449,12 +463,17 @@ function sourceFromRecord (record: Record<string, unknown>, metadata?: UpdateIns
       const freshness = freshnessValue === 'verified' || freshnessValue === 'stale' || freshnessValue === 'unknown'
         ? freshnessValue
         : 'unknown'
+      // The artifact root is the resolved payload subdirectory that contains
+      // the manifest; the manifest path narrows to its payload-relative
+      // basename so planning resolves the same bytes.
+      const segments = inferredManifest.replace(/\\/g, '/').split('/')
+      const payloadRoot = path.resolve(root, ...segments.slice(0, -1).filter((segment) => segment && segment !== '.'))
       return {
         kind: 'local-snapshot',
-        root,
-        manifestPath: inferredManifest,
+        root: payloadRoot,
+        manifestPath: segments[segments.length - 1],
         freshness,
-        contentDigest: contentDigestForSnapshot(root, inferredManifest),
+        contentDigest: contentDigestForSnapshot(payloadRoot),
       }
     }
   }
@@ -560,8 +579,8 @@ function safeRealpath (filePath: string): string {
   try { return realpathSync(filePath) } catch { return path.resolve(filePath) }
 }
 
-function contentDigestForSnapshot (root: string, manifestPath: string): string | undefined {
-  try { return createHash('sha256').update(readFileSync(path.resolve(root, manifestPath))).digest('hex') } catch { return undefined }
+function contentDigestForSnapshot (root: string): string | undefined {
+  return nativePayloadTreeDigest(root)
 }
 
 function compareInstallations (a: UpdateInstallation, b: UpdateInstallation): number {

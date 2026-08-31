@@ -6,6 +6,7 @@ import type { MarketplaceVersionSource, NpmArtifactIdentity, UpdateError, Versio
 import { isStableVersion } from './version.js'
 import { bytesMatchIntegrity } from './integrity.js'
 import { redactSecrets } from './redaction.js'
+import { gitArchivePayloadDigest, nativePayloadTreeDigest } from './native-payload.js'
 
 export interface VersionSourceOptions {
   fetchImpl?: typeof fetch
@@ -184,9 +185,13 @@ export async function resolveMarketplaceVersion (
     const manifestPath = path.resolve(source.root, source.manifestPath)
     const result = await readManifestVersion(manifestPath)
     if (result.version) {
-      const contentDigest = await digestFile(manifestPath)
+      // The installable payload is the subtree that contains the manifest;
+      // the artifact root is that resolved subdirectory, never the snapshot
+      // directory above it.
+      const payloadRoot = path.resolve(source.root, payloadDirectory(source.manifestPath))
+      const contentDigest = nativePayloadTreeDigest(payloadRoot)
       if (source.contentDigest && contentDigest && source.contentDigest !== contentDigest) return { error: lookupError('SOURCE_CONTENT_MISMATCH', 'Marketplace snapshot content changed after discovery') }
-      if (contentDigest) result.artifact = { kind: 'local-snapshot', root: path.resolve(source.root), contentDigest }
+      if (contentDigest) result.artifact = { kind: 'local-snapshot', root: payloadRoot, contentDigest }
     }
     return result
   }
@@ -211,10 +216,16 @@ export async function resolveMarketplaceVersion (
     const responseCommit = response.headers.get('x-commit-sha') ?? response.headers.get('x-git-commit') ?? undefined
     const commit = isFullCommit(responseCommit) ? responseCommit : isFullCommit(source.commit) ? source.commit : isFullCommit(revision) ? revision : undefined
     if (options.requireImmutable && !commit) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Marketplace response did not identify an immutable commit') }
-    const contentDigest = sha256(body)
+    const manifestDigest = sha256(body)
+    const payloadPath = payloadDirectory(source.manifestPath)
+    const payloadManifest = payloadPath ? source.manifestPath.slice(payloadPath.length + 1) : source.manifestPath
+    const contentDigest = commit && options.requireImmutable
+      ? await resolveGitPayloadDigest(repository, commit, payloadPath, payloadManifest, options)
+      : manifestDigest
+    if (commit && options.requireImmutable && !contentDigest) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Marketplace payload could not be captured from the immutable commit') }
     if (source.contentDigest && source.contentDigest !== contentDigest) return { error: lookupError('SOURCE_CONTENT_MISMATCH', 'Marketplace content changed after discovery') }
     return commit
-      ? { version, artifact: { kind: 'git', repository, commit, contentDigest } }
+      ? { version, artifact: { kind: 'git', repository, commit, contentDigest: contentDigest ?? manifestDigest, payloadPath: payloadPath || undefined } }
       : { version }
   } catch (error) {
     return { error: lookupError('MARKETPLACE_LOOKUP_FAILED', sanitizeLookupMessage(error)) }
@@ -242,8 +253,12 @@ export async function resolveFixedGitBundleVersion (
     if (!isStableVersion(version)) throw new Error('fixed source version is invalid')
     const commit = response.headers.get('x-commit-sha') ?? response.headers.get('x-git-commit') ?? effectiveRevision
     if (options.requireImmutable && !isFullCommit(commit)) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Fixed source response did not identify an immutable commit') }
+    const contentDigest = isFullCommit(commit) && options.requireImmutable
+      ? await resolveGitPayloadDigest(repository, commit, '', '', options)
+      : sha256(body)
+    if (isFullCommit(commit) && options.requireImmutable && !contentDigest) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Fixed source payload could not be captured from the immutable commit') }
     return isFullCommit(commit)
-      ? { version, artifact: { kind: 'git', repository, commit, contentDigest: sha256(body) } }
+      ? { version, artifact: { kind: 'git', repository, commit, contentDigest: contentDigest! } }
       : { version }
   } catch (error) {
     return { error: lookupError('FIXED_SOURCE_LOOKUP_FAILED', sanitizeLookupMessage(error)) }
@@ -377,12 +392,66 @@ async function resolveGitCommit (repository: string, revision: string, options: 
   } catch { return undefined }
 }
 
-function sha256 (value: string | Uint8Array): string {
-  return createHash('sha256').update(value).digest('hex')
+/** Hard cap for downloaded archives: 64 MiB. */
+export const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+
+export interface LimitedBodyResponse {
+  headers: { get(name: string): string | null }
+  body: {
+    getReader(): {
+      read(): Promise<{ done: boolean, value: Uint8Array | undefined }>
+      cancel(): Promise<void>
+    }
+  } | null
 }
 
-async function digestFile (filePath: string): Promise<string | undefined> {
-  try { return sha256(await readFile(filePath)) } catch { return undefined }
+/**
+ * Stream a response body under a strict size cap. An oversized declared
+ * Content-Length rejects before the body is consumed; a missing or lying
+ * header cannot bypass the cap because the reader is cancelled as soon as the
+ * accumulated bytes exceed the limit.
+ */
+export async function readArchiveWithLimit (response: LimitedBodyResponse, limit: number = MAX_ARCHIVE_BYTES): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > limit) throw new Error('downloaded archive exceeds the maximum allowed size')
+  if (!response.body) return Buffer.alloc(0)
+  const reader = response.body.getReader()
+  const chunks: Buffer[] = []
+  let total = 0
+  for (;;) {
+    const next = await reader.read()
+    if (next.done || next.value === undefined) break
+    total += next.value.byteLength
+    if (total > limit) {
+      await reader.cancel().catch(() => {})
+      throw new Error('downloaded archive exceeds the maximum allowed size')
+    }
+    chunks.push(Buffer.from(next.value))
+  }
+  return Buffer.concat(chunks)
+}
+
+async function resolveGitPayloadDigest (repository: string, commit: string, payloadPath: string, payloadManifest: string, options: VersionSourceOptions): Promise<string | undefined> {
+  try {
+    const parsed = new URL(repository)
+    if (parsed.hostname.toLowerCase() !== 'github.com') return undefined
+    const segments = parsed.pathname.replace(/\.git$/, '').split('/').filter(Boolean)
+    if (segments.length !== 2 || !isFullCommit(commit)) return undefined
+    const response = await fetchWithTimeout(`https://codeload.github.com/${segments[0]}/${segments[1]}/tar.gz/${commit}`, options)
+    if (!response.ok) return undefined
+    return gitArchivePayloadDigest(await readArchiveWithLimit(response), { payloadPath, manifestPath: payloadManifest })
+  } catch { return undefined }
+}
+
+/** Repo-relative POSIX directory of a manifest path ('' when it sits at the root). */
+function payloadDirectory (manifestPath: string): string {
+  const normalized = manifestPath.replace(/\\/g, '/')
+  const index = normalized.lastIndexOf('/')
+  return index > 0 ? normalized.slice(0, index) : ''
+}
+
+function sha256 (value: string | Uint8Array): string {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 async function downloadAndVerifyTarball (
@@ -392,7 +461,7 @@ async function downloadAndVerifyTarball (
 ): Promise<{ path: string; directory: string; contentDigest: string }> {
   const response = await fetchWithTimeout(url, options)
   if (!response.ok) throw new Error(`registry tarball returned ${response.status}`)
-  const bytes = new Uint8Array(await response.arrayBuffer())
+  const bytes = await readArchiveWithLimit(response)
   if (!bytesMatchIntegrity(bytes, integrity)) throw new Error('registry tarball integrity mismatch')
   const directory = await mkdtemp(path.join(os.tmpdir(), 'nsolid-plugin-artifact-'))
   const tarballPath = path.join(directory, 'package.tgz')

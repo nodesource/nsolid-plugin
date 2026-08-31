@@ -178,9 +178,7 @@ export async function executeCodexTransaction (
         }
       }
       if (item.artifact && (item.artifact.kind === 'git' || item.artifact.kind === 'local-snapshot')) {
-        const versionSource = item.source.kind === 'codex-marketplace' ? item.source.versionSource : undefined
-        const manifestPath = versionSource && versionSource.kind !== 'unknown' ? versionSource.manifestPath : undefined
-        const digest = selectedPayload ? nativePayloadDigest(selectedPayload, manifestPath) : undefined
+        const digest = selectedPayload ? nativePayloadDigest(selectedPayload) : undefined
         if (!selectedPayload || !digest || digest !== item.artifact.contentDigest) {
           rollbackAttempted = true
           const rollbackSucceeded = await restoreFiles(backupSnapshot())

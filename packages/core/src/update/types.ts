@@ -87,6 +87,8 @@ export interface GitArtifactIdentity {
   repository: string
   commit: string
   contentDigest: string
+  /** Repo-relative POSIX subdirectory holding the installable payload ('' = repository root). */
+  payloadPath?: string
 }
 
 export interface LocalArtifactIdentity {
@@ -102,6 +104,8 @@ export interface FallbackTransactionIdentity {
   harness: HarnessType
   trackingPath: string
   trackingDigest: string
+  /** Shared secret authenticating the child transaction (never authorizing restores). */
+  nonce?: string
   ownedSkillPaths: readonly string[]
   ownedLinkPaths: readonly string[]
   ownedMcpFields: readonly {
@@ -110,6 +114,10 @@ export interface FallbackTransactionIdentity {
     field: string
     expectedDigest: string
   }[]
+  /** Union of tracked MCP config paths and the adapter canonical path, fixed at planning. */
+  ownedMcpConfigPaths: readonly string[]
+  /** Canonical roots under which the new bundle's skills/links may be created; the child may only journal new destinations directly inside one of these roots. */
+  approvedDestinationRoots: readonly string[]
 }
 
 export type AntigravityLayout =
@@ -153,6 +161,12 @@ export type UpdateSource =
   }
   | { kind: 'fallback'; bundleVersion?: string; executor?: FallbackPackageExecutor }
 
+/** Exact byte evidence binding a native record to its planned content. */
+export interface NativeEvidence {
+  path: string
+  digest: string
+}
+
 /** Additional read-only evidence used by strategies. It never reaches CLI output verbatim. */
 export interface UpdateInstallationMetadata {
   /** Exact native configuration path approved during planning. */
@@ -184,6 +198,8 @@ export interface UpdateInstallationMetadata {
   cacheDigests?: readonly string[]
   packageEvidencePaths?: readonly string[]
   packageEvidenceDigests?: readonly string[]
+  /** Native marketplace records whose exact bytes must still match at execution. */
+  nativeEvidence?: readonly NativeEvidence[]
 }
 
 export interface UpdateInstallation {

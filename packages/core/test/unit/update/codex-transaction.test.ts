@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { writeTomlFileSync } from '../../../src/utils/config.js'
 import { restoreCodexUserOwnedFields } from '../../../src/update/codex-config.js'
 import { executeCodexTransaction, readCodexPayloadVersion } from '../../../src/update/codex-transaction.js'
+import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 import type { UpdatePlanItem } from '../../../src/update/types.js'
 
 let home: string
@@ -123,12 +123,16 @@ describe('Codex update transaction', () => {
     mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
     writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
     writeFileSync(path.join(oldPayload, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+    mkdirSync(newPayload, { recursive: true })
+    writeFileSync(path.join(newPayload, 'bundle.json'), newBundle)
+    const plannedDigest = nativePayloadDigest(newPayload)!
+    rmSync(newPayload, { recursive: true, force: true })
     const candidate = item(cachePath)
     candidate.artifact = {
       kind: 'git',
       repository: 'https://github.com/NodeSource/nsolid-plugin.git',
       commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
-      contentDigest: createHash('sha256').update(newBundle).digest('hex'),
+      contentDigest: plannedDigest,
     }
 
     const result = await executeCodexTransaction(candidate, {

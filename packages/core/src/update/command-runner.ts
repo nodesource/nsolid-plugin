@@ -388,7 +388,7 @@ async function terminateTree (pid: number): Promise<boolean> {
     // `taskkill /T` includes descendants. Do not report success until taskkill
     // itself exits successfully and the original pid is no longer observable.
     const exitCode = await new Promise<number | null>((resolve) => {
-      const killer = spawn('taskkill.exe', ['/pid', String(pid), '/T', '/F'], {
+      const killer = spawn(windowsTaskkillPath(process.env.SystemRoot), ['/pid', String(pid), '/T', '/F'], {
         shell: false,
         windowsHide: true,
         stdio: 'ignore',
@@ -417,6 +417,11 @@ async function terminateTree (pid: number): Promise<boolean> {
   if (await waitForProcessGroupExit(pid, 500)) return true
   try { process.kill(-pid, 'SIGKILL') } catch { /* group may already be gone */ }
   return await waitForProcessGroupExit(pid, 500)
+}
+
+export function windowsTaskkillPath (systemRoot = 'C:\\Windows'): string {
+  if (!path.win32.isAbsolute(systemRoot) || /^[\\/]{2}/.test(systemRoot)) return 'C:\\Windows\\System32\\taskkill.exe'
+  return path.win32.join(path.win32.normalize(systemRoot), 'System32', 'taskkill.exe')
 }
 
 async function waitForProcessExit (pid: number, timeoutMs = 1_000): Promise<boolean> {

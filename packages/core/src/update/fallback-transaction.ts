@@ -1,20 +1,25 @@
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { existsSync, lstatSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { BundleDescriptor, Credentials, HarnessType } from '../types.js'
+import type { BundleDescriptor, Credentials, HarnessType, McpServerRef } from '../types.js'
 import { validateBundle } from '../validate.js'
-import { readJsonFile, readJsoncFile, readTomlFile } from '../utils/config.js'
+import { readJsonFile } from '../utils/config.js'
 import { resolveHome, getSkillsDir, getAuthFilePath } from '../utils/path.js'
 import { deriveMcpUrlFromConsoleUrl } from '../auth/mcp-url.js'
-import { removeMcpConfig, writeMcpConfig } from '../mcp/mcp-config-writer.js'
+import { expandVariables } from '../mcp/mcp-config-merger.js'
+import { applyHarnessWriteFormat } from '../mcp/mcp-config-writer.js'
 import { readTrackingFile, writeTrackingFile, type SkillTrackingEntry, type TrackingData } from '../skills/skill-tracker.js'
 import { installSkillsToDirectory } from '../skills/skill-copier.js'
-import { getHarnessSkillsPath, linkSkillsToHarness, unlinkSkillsFromHarness } from '../skills/skill-linker.js'
+import { getHarnessSkillsPath, linkSkillsToHarness, materializeSkillLink, unlinkSkillsFromHarness } from '../skills/skill-linker.js'
 import { assertSafeSkillName } from '../utils/skill-name.js'
 import { getAdapter } from '../harnesses/index.js'
 import type { FallbackTransactionIdentity, UpdateError } from './types.js'
-import { trackingDigest, valueDigest } from './fallback-journal.js'
+import { appendFallbackJournalEntries, applyFallbackEntry, claimFallbackJournalMutation, fallbackJournalPath, registerFallbackStage, trackingDigest, valueDigest, pathDigest, pathKind, type FallbackJournal } from './fallback-journal.js'
+import { planMcpReconciliation, type McpConfigPlanEntry } from './mcp-reconciliation.js'
+import { detectJsonMcpKey, editMcpJsonBytes, McpEditError } from './mcp-edit.js'
+import { editMcpTomlBytes, McpTomlEditError } from './mcp-toml-edit.js'
+import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerField, readMcpServerRecord } from './mcp-lookup.js'
 import { readPackageVersion } from './package-manager.js'
 import { isStableVersion } from './version.js'
 import { isCanonicalPath, matchesTrackedOwnership } from './fallback-ownership.js'
@@ -91,14 +96,18 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
 
   const backupDir = await mkdtemp(path.join(os.tmpdir(), 'nsolid-plugin-fallback-'))
   const trackingBackup = path.join(backupDir, 'tracking.json')
-  const configPath = previousMcps[0]?.configPath ?? getAdapter(options.harness).getMcpConfigPath()
-  const configExisted = configPath ? existsSync(configPath) : false
-  const configBackup = configPath ? path.join(backupDir, 'mcp-config') : undefined
+  const previousConfigPaths = [...new Set(previousMcps.map((entry) => path.resolve(entry.configPath)))]
+  // The child uses the canonical path transported by the transaction; the
+  // environment is only consulted to validate it has not moved.
+  const adapterCanonical = getAdapter(options.harness).getMcpConfigPath()
+  const canonicalConfigPath = options.transaction && adapterCanonical
+    ? options.transaction.ownedMcpConfigPaths.find((value) => path.resolve(value) === path.resolve(adapterCanonical))
+    : adapterCanonical
+  const allConfigPaths = [...new Set([...previousConfigPaths, canonicalConfigPath].filter((value): value is string => typeof value === 'string'))]
+  const configBackups = new Map<string, { backup: string; existed: boolean }>()
   const skillsBackup = path.join(backupDir, 'skills')
   const linkPaths = linkDir ? [...new Set([...previousSkills, ...bundle.skills].map((skill) => path.join(linkDir, skill.name)))] : []
   const linksBackup = path.join(backupDir, 'links')
-  const sharedNewPaths = newPaths.filter((value) => existsSync(value) && trackedPathSet.has(path.resolve(value)))
-  const backupPaths = [...new Set([...oldPaths, ...sharedNewPaths])]
   const previousSkillNames = new Set(previousSkills.map((entry) => entry.name))
 
   // linkSkillsToHarness historically renamed any regular destination to a
@@ -115,8 +124,13 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
     }
   }
 
+  let backupSkillPaths: string[] = []
+  let stagedSkillsRoot: string | undefined
+  let linksStageRoot: string | undefined
   let backupsComplete = false
   let mutationStarted = false
+  let journal: FallbackJournal | undefined
+  let preserveRecoveryArtifacts = false
   try {
     // Keep backup creation outside the mutation catch. A partial backup is
     // never safe input to rollback: deleting the live paths and restoring the
@@ -124,7 +138,11 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
     try {
       await writeFile(trackingBackup, JSON.stringify(tracking, null, 2) + '\n', { mode: 0o600 })
       await mkdir(skillsBackup, { recursive: true, mode: 0o700 })
-      for (const oldPath of backupPaths) {
+      backupSkillPaths = [...new Set([
+        ...oldPaths,
+        ...newPaths.filter((value) => existsSync(value) && trackedPathSet.has(path.resolve(value))),
+      ])]
+      for (const oldPath of backupSkillPaths) {
         if (pathExists(oldPath)) {
           const target = path.join(skillsBackup, encodeURIComponent(oldPath))
           await cp(oldPath, target, { recursive: true, force: true })
@@ -136,7 +154,12 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
           if (pathExists(linkPath)) await cp(linkPath, path.join(linksBackup, encodeURIComponent(linkPath)), { recursive: true, force: true })
         }
       }
-      if (configPath && configBackup && existsSync(configPath)) await writeFile(configBackup, await readFile(configPath), { mode: 0o600 })
+      for (const configPath of allConfigPaths) {
+        if (!existsSync(configPath)) continue
+        const backup = path.join(backupDir, `mcp-config-${encodeURIComponent(configPath)}`)
+        await writeFile(backup, await readFile(configPath), { mode: 0o600 })
+        configBackups.set(configPath, { backup, existed: true })
+      }
       backupsComplete = true
     } catch {
       return {
@@ -147,26 +170,6 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
     }
 
     try {
-      mutationStarted = true
-      const newNames = new Set(bundle.skills.map((skill) => skill.name))
-      const pathsToReplace = previousSkills
-        .filter((entry) => newNames.has(entry.name))
-        .map((entry) => entry.paths?.[options.harness] ?? entry.path)
-      const pathsToRemove = previousSkills
-        .filter((entry) => !newNames.has(entry.name) && canRemoveOwnedPath(entry, options.harness))
-        .map((entry) => entry.paths?.[options.harness] ?? entry.path)
-      for (const ownedPath of [...pathsToReplace, ...pathsToRemove, ...sharedNewPaths]) {
-        await rm(ownedPath, { recursive: true, force: true })
-      }
-
-      await installSkillsToDirectory(bundle.skills, options.skillsSource, destination)
-      for (const oldEntry of previousSkills) {
-        if (!newNames.has(oldEntry.name)) {
-          if (linkSkills) await unlinkSkillsFromHarness(options.harness, [{ name: oldEntry.name, path: oldEntry.name, description: '' }])
-        }
-      }
-      if (linkSkills) await linkSkillsToHarness(options.harness, bundle.skills)
-
       const credentials = readValidCredentials()
       const canReconcileMcp = credentials !== null
       const previousMcpNames = previousMcps.map((entry) => entry.name)
@@ -174,31 +177,225 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
       if (!canReconcileMcp && !sameNameSet(previousMcpNames, desiredMcpNames)) {
         throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', 'Fallback MCP state changed but valid credentials are unavailable')
       }
-      const newMcpNames = canReconcileMcp
-        ? new Set(desiredMcpNames)
-        : new Set(previousMcpNames)
-      const staleMcpNames = previousMcps
-        .filter((entry) => !newMcpNames.has(entry.name))
-        .filter((entry) => !tracking.mcpServers.some((other) => other !== entry && other.name === entry.name && path.resolve(other.configPath) === path.resolve(configPath)))
-        .map((entry) => entry.name)
-      if (configPath && staleMcpNames.length > 0) {
-        await removeMcpConfig(options.harness, [...new Set(staleMcpNames)], { configPath })
-      }
+
+      // Plan every MCP change grouped by owning file before anything is
+      // staged or written.
       const configuredMcpServers = canReconcileMcp ? bundle.mcpServers : []
-      if (credentials && bundle.mcpServers.length > 0) {
-        const variables = await mcpVariables(credentials)
-        await writeMcpConfig(options.harness, bundle.mcpServers, variables, { configPath })
+      const plan = canReconcileMcp && credentials
+        ? planMcpReconciliation({
+          previousServers: previousMcps.map((entry) => ({ name: entry.name, configPath: path.resolve(entry.configPath), fields: entry.fields })),
+          desiredServers: bundle.mcpServers,
+          desiredValues: Object.fromEntries(bundle.mcpServers.map((server) => [server.name, harnessServerValue(options.harness, server, credentials)])),
+          canonicalConfigPath: canonicalConfigPath ?? undefined,
+        })
+        : { kind: 'planned' as const, entries: [] as McpConfigPlanEntry[], destinations: {} }
+      if (plan.kind === 'reconciliation-required') {
+        throw new FallbackTransactionError(plan.code, plan.message)
+      }
+      const staleByName = new Map(previousMcps
+        .filter((entry) => !desiredMcpNames.includes(entry.name))
+        .map((entry) => [entry.name, entry]))
+      for (const planEntry of plan.entries) {
+        for (const name of planEntry.removeServers) {
+          const entry = staleByName.get(name)
+          if (!entry || !mcpRecordIsExclusivelyOwned(entry.configPath, entry.name, entry.fields, harnessMcpKey(options.harness))) {
+            throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', 'Fallback MCP cleanup would remove fields that are not proven NodeSource-owned')
+          }
+        }
       }
 
-      const updated = reconcileTracking(tracking, options.harness, destination, bundle.skills, configPath, configuredMcpServers, staleMcpNames)
-      updated.bundleVersion = bundle.version
-      updated.bundleVersions = { ...(updated.bundleVersions ?? {}), [options.harness]: bundle.version }
-      await writeTrackingFile(updated)
+      // Render preflight: compute every final MCP byte from the observed
+      // source bytes BEFORE the journal is claimed or any live path changes.
+      // Parse or editor failures here abort with zero mutation. Source
+      // digests are retained and revalidated right before staging/applying so
+      // the drift gates keep working at mutation time.
+      const plannedMcpBytes = new Map<string, { bytes: Buffer; sourceDigest: string | null }>()
+      for (const planEntry of plan.entries) {
+        // A missing config file is a legitimate preflight state (fresh
+        // installs): null revalidates as still-missing at mutation time.
+        const sourceDigest = existsSync(planEntry.configPath) ? await pathDigest(planEntry.configPath) : null
+        const finalBytes = await renderConfigBytes(planEntry, harnessMcpKey(options.harness))
+        if (finalBytes === undefined) continue
+        if (sourceDigest === undefined) {
+          throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} could not be hashed for the transaction`)
+        }
+        plannedMcpBytes.set(path.resolve(planEntry.configPath), { bytes: finalBytes, sourceDigest })
+      }
+
+      if (options.transaction && !await claimFallbackJournalMutation(options.transaction)) {
+        return failure('FALLBACK_JOURNAL_CLAIM_FAILED', 'Fallback mutation journal could not be claimed safely')
+      }
+      mutationStarted = true
+
+      if (options.transaction) {
+        journal = await loadJournalForChild(options.transaction)
+        // The bundle's brand-new destinations were unknown to the parent at
+        // journal time. Journal their original state durably BEFORE any live
+        // path is touched, so recovery can undo a crash mid-install.
+        const newTargets = [
+          ...bundle.skills.map((skill) => path.join(destination, skill.name)),
+          ...(linkDir ? bundle.skills.map((skill) => path.join(linkDir, skill.name)) : []),
+        ]
+        journal = await appendFallbackJournalEntries(journal, newTargets)
+      }
+
+      // ---- STAGE: skills, links, MCP bytes, and tracking bytes are prepared
+      // completely before any live path is touched.
+      {
+        const skillsStage = await mkdtemp(path.join(path.dirname(destination), `.${path.basename(destination)}.nsolid-stage-`))
+        stagedSkillsRoot = skillsStage
+        await installSkillsToDirectory(bundle.skills, options.skillsSource, skillsStage)
+        if (journal) {
+          for (const skill of bundle.skills) {
+            const livePath = path.join(destination, skill.name)
+            if (isJournalEntry(journal, livePath)) {
+              journal = await registerFallbackStage(journal, livePath, { directory: path.join(skillsStage, skill.name) })
+            }
+          }
+          if (linkDir) {
+            const linksStage = await mkdtemp(path.join(path.dirname(linkDir), `.${path.basename(linkDir)}.nsolid-stage-`))
+            linksStageRoot = linksStage
+            for (const skill of bundle.skills) {
+              const linkPath = path.join(linkDir, skill.name)
+              if (!isJournalEntry(journal, linkPath)) continue
+              const stagedLink = path.join(linksStage, skill.name)
+              // Staged links follow the same Windows-safe policy as normal
+              // harness linking: the junction/symlink references the final
+              // live shared skill path, and the copy fallback comes from the
+              // newly prepared staged bytes, never the old live content.
+              await materializeSkillLink({
+                linkSource: path.join(destination, skill.name),
+                copySource: path.join(skillsStage, skill.name),
+                target: stagedLink,
+                alwaysCopy: options.harness === 'pi',
+              })
+              journal = await registerFallbackStage(journal, linkPath, { directory: stagedLink })
+            }
+          }
+          const stagedMcpBytes = new Map<string, Buffer>()
+          for (const planEntry of plan.entries) {
+            const planned = plannedMcpBytes.get(path.resolve(planEntry.configPath))
+            if (planned === undefined) continue
+            // The staged bytes were rendered from an earlier observation:
+            // revalidate the source digest so drift between preflight and
+            // staging is rejected before anything is registered.
+            const currentDigest = existsSync(planEntry.configPath) ? await pathDigest(planEntry.configPath) : null
+            if (currentDigest === undefined || currentDigest !== planned.sourceDigest) {
+              throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} changed after the render preflight`)
+            }
+            if (!isJournalEntry(journal, planEntry.configPath)) {
+              throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} is not part of the approved transaction`)
+            }
+            journal = await registerFallbackStage(journal, planEntry.configPath, { bytes: planned.bytes })
+            stagedMcpBytes.set(planEntry.configPath, planned.bytes)
+          }
+          if (isJournalEntry(journal, options.transaction!.trackingPath)) {
+            // Field evidence must describe the bytes that will exist after the
+            // swap, not the pre-update files.
+            const preferredKey = harnessMcpKey(options.harness)
+            const resolveFieldDigests = (configPath: string, name: string): Record<string, string> | undefined => {
+              const staged = stagedMcpBytes.get(configPath)
+              if (staged !== undefined) return mcpFieldDigestsFromBytes(configPath, staged, name, { preferredKey })
+              return readMcpFieldDigests(configPath, name, { preferredKey })
+            }
+            const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName, resolveFieldDigests)
+            journal = await registerFallbackStage(journal, options.transaction!.trackingPath, { bytes: Buffer.from(JSON.stringify(updatedTracking, null, 2) + '\n', 'utf8') })
+          }
+        }
+      }
+
+      // ---- APPLY: same-volume swaps, one entry at a time; deletions are
+      // quarantined until the parent commits.
+      const newNames = new Set(bundle.skills.map((skill) => skill.name))
+      const pathsToReplace = previousSkills
+        .filter((entry) => newNames.has(entry.name))
+        .map((entry) => entry.paths?.[options.harness] ?? entry.path)
+      const pathsToRemove = previousSkills
+        .filter((entry) => !newNames.has(entry.name) && canRemoveOwnedPath(entry, options.harness))
+        .map((entry) => entry.paths?.[options.harness] ?? entry.path)
+      for (const ownedPath of [...pathsToReplace, ...pathsToRemove]) {
+        if (journal && isJournalEntry(journal, ownedPath)) {
+          journal = await applyFallbackEntry(journal, ownedPath)
+        } else {
+          await rm(ownedPath, { recursive: true, force: true })
+        }
+      }
+      // Fresh installs (new skills and shared destinations) come from the
+      // staged tree; already-swapped entries are left untouched.
+      if (stagedSkillsRoot) {
+        for (const skill of bundle.skills) {
+          const livePath = path.join(destination, skill.name)
+          if (journal && isJournalEntry(journal, livePath)) {
+            if (!journal.entries.some((entry) => path.resolve(entry.path) === path.resolve(livePath) && entry.applied)) {
+              journal = await applyFallbackEntry(journal, livePath)
+            }
+            continue
+          }
+          const staged = path.join(stagedSkillsRoot, skill.name)
+          if (!existsSync(staged)) continue
+          await rm(livePath, { recursive: true, force: true })
+          await cp(staged, livePath, { recursive: true, force: true })
+        }
+      }
+
+      if (linkDir) {
+        for (const oldEntry of previousSkills) {
+          if (newNames.has(oldEntry.name)) continue
+          const staleLink = path.join(linkDir, oldEntry.name)
+          if (journal && isJournalEntry(journal, staleLink)) {
+            journal = await applyFallbackEntry(journal, staleLink)
+          } else if (linkSkills) {
+            await unlinkSkillsFromHarness(options.harness, [{ name: oldEntry.name, path: oldEntry.name, description: '' }])
+          }
+        }
+        for (const skill of bundle.skills) {
+          const linkPath = path.join(linkDir, skill.name)
+          if (journal && isJournalEntry(journal, linkPath)) {
+            if (!journal.entries.some((entry) => path.resolve(entry.path) === path.resolve(linkPath) && entry.applied)) {
+              journal = await applyFallbackEntry(journal, linkPath)
+            }
+          } else {
+            await linkSkillsToHarness(options.harness, [skill])
+          }
+        }
+      }
+
+      for (const planEntry of plan.entries) {
+        if (!planHasByteChanges(planEntry)) continue
+        if (journal && isJournalEntry(journal, planEntry.configPath)) {
+          journal = await applyFallbackEntry(journal, planEntry.configPath)
+        } else {
+          const planned = plannedMcpBytes.get(path.resolve(planEntry.configPath))
+          if (planned === undefined) continue
+          // Revalidate the preflight source digest before writing: a file
+          // changed between preflight and apply must abort, not overwrite.
+          const currentDigest = existsSync(planEntry.configPath) ? await pathDigest(planEntry.configPath) : null
+          if (currentDigest === undefined || currentDigest !== planned.sourceDigest) {
+            throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} changed after the render preflight`)
+          }
+          await atomicWriteFile(planEntry.configPath, planned.bytes)
+        }
+      }
+
+      if (journal && isJournalEntry(journal, options.transaction!.trackingPath)) {
+        // The staged tracking bytes were built from the staged MCP bytes; the
+        // swap installs exactly those.
+        journal = await applyFallbackEntry(journal, options.transaction!.trackingPath)
+      } else {
+        const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName)
+        await writeTrackingFile(updatedTracking)
+      }
       return { success: true }
     } catch (error) {
+      // Preflight rejection: the failure happened before the journal was
+      // claimed, so nothing was mutated and there is nothing to roll back.
+      if (!mutationStarted && error instanceof FallbackTransactionError) {
+        return failure(error.code, error.message)
+      }
       const rollback = backupsComplete && mutationStarted
-        ? await rollbackFallback({ trackingBackup, configBackup, configPath, configExisted, skillsBackup, backupPaths, newPaths, linksBackup, linkPaths })
+        ? await rollbackFallback({ backupDir, trackingBackup, configBackups, skillsBackup, backupPaths: backupSkillPaths, newPaths, linksBackup, linkPaths, journal })
         : false
+      preserveRecoveryArtifacts = !rollback
       if (error instanceof FallbackTransactionError && rollback) {
         return failure(error.code, error.message, { attempted: true, succeeded: true })
       }
@@ -207,8 +404,126 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
         : failure('FALLBACK_ROLLBACK_FAILED', 'Owned fallback refresh failed and rollback was incomplete', { attempted: true, succeeded: false })
     }
   } finally {
-    await rm(backupDir, { recursive: true, force: true }).catch(() => {})
+    if (!preserveRecoveryArtifacts) {
+      await rm(backupDir, { recursive: true, force: true }).catch(() => {})
+    }
+    // Staging containers are transaction-owned scratch. The journal-owned
+    // stage copies live beside each target and survive for recovery.
+    if (stagedSkillsRoot) await rm(stagedSkillsRoot, { recursive: true, force: true }).catch(() => {})
+    if (linksStageRoot) await rm(linksStageRoot, { recursive: true, force: true }).catch(() => {})
   }
+}
+
+function isJournalEntry (journal: FallbackJournal, target: string): boolean {
+  const resolved = path.resolve(target)
+  return journal.entries.some((entry) => path.resolve(entry.path) === resolved)
+}
+
+async function loadJournalForChild (transaction: FallbackTransactionIdentity): Promise<FallbackJournal> {
+  const journalPath = fallbackJournalPath(transaction.trackingPath)
+  const parsed = JSON.parse(await readFile(journalPath, 'utf8')) as FallbackJournal
+  if (parsed.version !== 2 || JSON.stringify(parsed.manifest) !== JSON.stringify(transaction)) {
+    throw new FallbackTransactionError('FALLBACK_JOURNAL_CLAIM_FAILED', 'The fallback mutation journal does not match the approved transaction')
+  }
+  return parsed
+}
+
+function harnessServerValue (harness: HarnessType, server: BundleDescriptor['mcpServers'][number], credentials: Credentials): Record<string, unknown> {
+  const mcpUrl = credentials.mcpUrl || deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
+  if (!mcpUrl) throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', 'MCP URL could not be derived')
+  const expanded = expandVariables([server as unknown as McpServerRef], {
+    AUTH_TOKEN: credentials.serviceToken,
+    AUTH_ORG_ID: credentials.organizationId,
+    MCP_URL: mcpUrl,
+  })
+  const formatted = applyHarnessWriteFormat(harness, { mcpServers: { [server.name]: expanded[0] } as unknown as Record<string, never> })
+  return formatted.mcpServers[server.name] as unknown as Record<string, unknown>
+}
+
+/**
+ * Render the final bytes of one configuration file from its plan entry.
+ * Owned-field digests are validated against the live file before the patch is
+ * generated; foreign records and unowned fields are never touched.
+ */
+async function renderConfigBytes (planEntry: McpConfigPlanEntry, preferredKey: 'mcp' | 'mcpServers'): Promise<Buffer | undefined> {
+  if (!planHasByteChanges(planEntry)) return undefined
+  const raw = existsSync(planEntry.configPath) ? await readFile(planEntry.configPath, 'utf8') : ''
+  for (const owned of planEntry.ownedFieldDigests) {
+    const current = readMcpServerField(planEntry.configPath, owned.server, owned.field, { preferredKey })
+    if (valueDigest(current) !== owned.expectedDigest) {
+      throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `Owned MCP field ${owned.server}.${owned.field} changed in ${planEntry.configPath} after planning`)
+    }
+  }
+  for (const name of planEntry.removeServers) {
+    if (!existsSync(planEntry.configPath)) continue
+    if (!readMcpServerRecord(planEntry.configPath, name, { preferredKey })) {
+      throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `Owned MCP server ${name} disappeared from ${planEntry.configPath} after planning`)
+    }
+  }
+  for (const upsert of planEntry.upsertServers) {
+    if (existsSync(planEntry.configPath) && readMcpServerRecord(planEntry.configPath, upsert.name, { preferredKey })) {
+      throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', `A server named ${upsert.name} that is not NodeSource-owned already exists in ${planEntry.configPath}`)
+    }
+  }
+  const ownedFields = new Set(planEntry.ownedFieldDigests.map((owned) => `${owned.server}\0${owned.field}`))
+  for (const update of planEntry.updateFields) {
+    if (ownedFields.has(`${update.server}\0${update.field}`)) continue
+    const record = existsSync(planEntry.configPath) ? readMcpServerRecord(planEntry.configPath, update.server, { preferredKey }) : undefined
+    if (record && Object.hasOwn(record, update.field) && valueDigest(record[update.field]) !== valueDigest(update.value)) {
+      throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', `Field ${update.server}.${update.field} in ${planEntry.configPath} is not NodeSource-owned`)
+    }
+  }
+  const upserts = Object.fromEntries(planEntry.upsertServers.map((upsert) => [upsert.name, upsert.value]))
+  if (planEntry.configPath.endsWith('.toml')) {
+    // Byte-localized TOML editing: only the owned server/field ranges are
+    // rewritten, so user comments, CRLF endings, unrelated tables, and
+    // credentials survive verbatim. Editor ambiguity or parse failure maps to
+    // the existing non-mutating fallback error contract.
+    let next: string
+    try {
+      next = editMcpTomlBytes(raw, {
+        upsertServers: upserts,
+        removeServers: planEntry.removeServers,
+        setFields: planEntry.updateFields,
+        removeFields: planEntry.removeFields,
+      })
+    } catch (error) {
+      if (error instanceof McpTomlEditError) throw new FallbackTransactionError(error.code, error.message)
+      throw error
+    }
+    if (next === raw) return undefined
+    return Buffer.from(next, 'utf8')
+  }
+  // Edit the container that really exists in this file: the harness-preferred
+  // key when present, the legacy key when it is the only one, and the preferred
+  // key for brand-new destinations. This keeps foreign content byte-identical
+  // and never creates a duplicate container.
+  let next: string
+  try {
+    next = editMcpJsonBytes(raw, {
+      upsertServers: upserts,
+      removeServers: planEntry.removeServers,
+      setFields: planEntry.updateFields,
+      removeFields: planEntry.removeFields,
+    }, { mcpKey: detectJsonMcpKey(raw, preferredKey) })
+  } catch (error) {
+    // JSON editor failures use the same non-mutating fallback error contract
+    // as TOML failures: every render error is a FallbackTransactionError.
+    if (error instanceof McpEditError) throw new FallbackTransactionError(error.code, error.message)
+    throw error
+  }
+  if (next === raw) return undefined
+  return Buffer.from(next, 'utf8')
+}
+
+function planHasByteChanges (planEntry: McpConfigPlanEntry): boolean {
+  return planEntry.removeServers.length > 0 || planEntry.upsertServers.length > 0 || planEntry.updateFields.length > 0 || planEntry.removeFields.length > 0
+}
+
+async function atomicWriteFile (targetPath: string, bytes: Buffer): Promise<void> {
+  const temporary = `${targetPath}.nsolid-${process.pid}.tmp`
+  await writeFile(temporary, bytes, { mode: 0o600 })
+  await rename(temporary, targetPath)
 }
 
 function validateTransactionIdentity (identity: FallbackTransactionIdentity): UpdateError | undefined {
@@ -219,25 +534,39 @@ function validateTransactionIdentity (identity: FallbackTransactionIdentity): Up
   if (identity.ownedLinkPaths.some((value) => !isCanonicalPath(value))) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe link path' }
   for (const field of identity.ownedMcpFields) {
     if (!isCanonicalPath(field.configPath) || !existsSync(field.configPath)) return { code: 'FALLBACK_MCP_DRIFT', message: 'Owned MCP configuration changed after planning' }
-    const current = readMcpField(field.configPath, field.server, field.field)
+    const current = readMcpServerField(field.configPath, field.server, field.field, { preferredKey: harnessMcpKey(identity.harness) })
     if (field.expectedDigest && valueDigest(current) !== field.expectedDigest) return { code: 'FALLBACK_MCP_DRIFT', message: 'Owned MCP field changed after planning' }
   }
+  // The canonical MCP path is part of the approved manifest. If the adapter or
+  // environment resolves a different path between planning and execution,
+  // that is drift: block before any mutation.
+  const allowedConfigPaths = new Set(identity.ownedMcpConfigPaths.map((value) => path.resolve(value)))
+  if (identity.ownedMcpConfigPaths.some((value) => !isCanonicalPath(value))) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe MCP config path' }
+  if (identity.ownedMcpFields.some((field) => !allowedConfigPaths.has(path.resolve(field.configPath)))) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction MCP fields are outside the approved config paths' }
+  const canonical = getAdapter(identity.harness).getMcpConfigPath()
+  if (canonical && !allowedConfigPaths.has(path.resolve(canonical))) {
+    return { code: 'FALLBACK_MCP_DRIFT', message: 'Owned MCP canonical path changed after planning' }
+  }
+  // Destination roots are approved at planning time. If the environment now
+  // resolves a skill or link destination outside those roots, the manifest no
+  // longer describes this machine: block before any mutation.
+  const approvedRoots = (identity.approvedDestinationRoots ?? []).map((value) => path.resolve(value))
+  if (approvedRoots.length === 0 || approvedRoots.some((value) => !isCanonicalPath(value))) {
+    return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe destination root' }
+  }
+  const destination = identity.harness === 'opencode'
+    ? path.resolve(process.env.NSOLID_OPENCODE_SKILLS_DIR ?? resolveHome('~/.config/opencode/skills'))
+    : getSkillsDir()
+  if (!approvedRoots.includes(path.resolve(destination))) {
+    return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'The harness skill destination is outside the approved destination roots' }
+  }
+  if (identity.harness !== 'opencode') {
+    const linkRoot = path.resolve(getHarnessSkillsPath(identity.harness))
+    if (!approvedRoots.includes(linkRoot)) {
+      return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'The harness link destination is outside the approved destination roots' }
+    }
+  }
   return undefined
-}
-
-function readMcpField (configPath: string, server: string, field: string): unknown {
-  try {
-    const parsed = readMcpConfig(configPath)
-    const servers = parsed?.mcpServers ?? parsed?.mcp_servers ?? parsed?.mcp
-    const record = servers && typeof servers === 'object' ? (servers as Record<string, unknown>)[server] : undefined
-    return record && typeof record === 'object' && !Array.isArray(record) ? (record as Record<string, unknown>)[field] : undefined
-  } catch { return undefined }
-}
-
-function readMcpConfig (configPath: string): Record<string, unknown> | null {
-  if (configPath.endsWith('.toml')) return readTomlFile<Record<string, unknown>>(configPath)
-  if (configPath.endsWith('.jsonc')) return readJsoncFile<Record<string, unknown>>(configPath)
-  return readJsonFile<Record<string, unknown>>(configPath)
 }
 
 function readValidCredentials (): Credentials | null {
@@ -248,38 +577,47 @@ function readValidCredentials (): Credentials | null {
   } catch { return null }
 }
 
-async function mcpVariables (credentials: Credentials): Promise<Record<string, string>> {
-  const mcpUrl = credentials.mcpUrl || deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
-  if (!mcpUrl) throw new Error('MCP URL could not be derived')
-  return { AUTH_TOKEN: credentials.serviceToken, AUTH_ORG_ID: credentials.organizationId, MCP_URL: mcpUrl }
-}
-
 async function rollbackFallback (options: {
+  backupDir: string
   trackingBackup: string
-  configBackup?: string
-  configPath?: string
-  configExisted: boolean
+  configBackups: Map<string, { backup: string; existed: boolean }>
   skillsBackup: string
   backupPaths: string[]
   newPaths: string[]
   linksBackup: string
   linkPaths: string[]
+  journal?: FallbackJournal
 }): Promise<boolean> {
   try {
+    // A journal-based transaction can only roll back while every live byte is
+    // still exactly what this transaction last wrote (applied stage digests)
+    // or what it found (registered originals). Concurrent drift blocks the
+    // child rollback; the parent's strict recovery takes over and preserves
+    // the artifacts.
+    if (options.journal) {
+      for (const entry of options.journal.entries) {
+        const kind = await pathKind(entry.path)
+        const current = kind !== 'missing' ? await pathDigest(entry.path) : null
+        if (current === undefined) return false
+        if (entry.applied && entry.stageDigest && current !== entry.stageDigest) return false
+        if (!entry.applied) {
+          const expected = entry.expectedCurrentDigest !== undefined ? entry.expectedCurrentDigest : entry.digest ?? null
+          if (current !== expected) return false
+        }
+      }
+    }
     for (const newPath of options.newPaths) await rm(newPath, { recursive: true, force: true })
+    for (const linkPath of options.linkPaths) await rm(linkPath, { recursive: true, force: true })
     for (const oldPath of options.backupPaths) {
       const backup = path.join(options.skillsBackup, encodeURIComponent(oldPath))
       if (existsSync(backup)) await cp(backup, oldPath, { recursive: true, force: true })
     }
-    for (const linkPath of options.linkPaths) await rm(linkPath, { recursive: true, force: true })
     for (const linkPath of options.linkPaths) {
       const backup = path.join(options.linksBackup, encodeURIComponent(linkPath))
       if (existsSync(backup)) await cp(backup, linkPath, { recursive: true, force: true })
     }
-    if (options.configPath && options.configBackup && existsSync(options.configBackup)) {
-      await writeFile(options.configPath, await readFile(options.configBackup), { mode: 0o600 })
-    } else if (options.configPath && !options.configExisted) {
-      await rm(options.configPath, { force: true })
+    for (const [configPath, backup] of options.configBackups) {
+      if (existsSync(backup.backup)) await writeFile(configPath, await readFile(backup.backup), { mode: 0o600 })
     }
     const tracking = JSON.parse(await readFile(options.trackingBackup, 'utf8')) as TrackingData
     await writeTrackingFile(tracking)
@@ -300,17 +638,20 @@ function canRemoveOwnedPath (entry: SkillTrackingEntry, harness: HarnessType): b
   return !remainingPaths.some((value) => path.resolve(value) === path.resolve(ownedPath))
 }
 
-function reconcileTracking (
+function buildTrackingUpdate (
   original: TrackingData,
   harness: HarnessType,
   destination: string,
-  skills: BundleDescriptor['skills'],
-  configPath: string | undefined,
+  bundle: BundleDescriptor,
+  plan: { destinations: Readonly<Record<string, string>> },
   mcpServers: BundleDescriptor['mcpServers'],
-  staleMcpNames: string[]
+  staleByName: Map<string, TrackingData['mcpServers'][number]>,
+  resolveFieldDigests: (configPath: string, name: string) => Record<string, string> | undefined = (configPath, name) => readMcpFieldDigests(configPath, name, { preferredKey: harnessMcpKey(harness) })
 ): TrackingData {
   const tracking = JSON.parse(JSON.stringify(original)) as TrackingData
+  const skills = bundle.skills
   const newNames = new Set(skills.map((skill) => skill.name))
+  const stale = new Set(staleByName.keys())
 
   for (const entry of tracking.skills) {
     if (!entry.harnesses.includes(harness)) continue
@@ -345,32 +686,33 @@ function reconcileTracking (
     }
   }
 
-  const stale = new Set(staleMcpNames)
   tracking.mcpServers = tracking.mcpServers.filter((entry) => !(entry.harness === harness && stale.has(entry.name)))
-  if (configPath) {
-    const now = new Date().toISOString()
-    for (const server of mcpServers) {
-      const existing = tracking.mcpServers.find((entry) => entry.harness === harness && entry.name === server.name)
-      if (existing) {
-        existing.configPath = path.resolve(configPath)
-        existing.configuredAt = now
-        existing.fields = readMcpRecord(configPath, server.name)
-      } else {
-        tracking.mcpServers.push({ name: server.name, configPath: path.resolve(configPath), harness, configuredAt: now, fields: readMcpRecord(configPath, server.name) })
-      }
+  const now = new Date().toISOString()
+  for (const server of mcpServers) {
+    const configPath = plan.destinations[server.name]
+    if (!configPath) continue
+    const existing = tracking.mcpServers.find((entry) => entry.harness === harness && entry.name === server.name)
+    if (existing) {
+      existing.configPath = path.resolve(configPath)
+      existing.configuredAt = now
+      existing.fields = resolveFieldDigests(configPath, server.name)
+    } else {
+      tracking.mcpServers.push({ name: server.name, configPath: path.resolve(configPath), harness, configuredAt: now, fields: resolveFieldDigests(configPath, server.name) })
     }
   }
+  tracking.bundleVersion = bundle.version
+  tracking.bundleVersions = { ...(tracking.bundleVersions ?? {}), [harness]: bundle.version }
   return tracking
 }
 
-function readMcpRecord (configPath: string, name: string): Record<string, string> | undefined {
-  try {
-    const parsed = readMcpConfig(configPath)
-    const servers = parsed?.mcpServers ?? parsed?.mcp_servers ?? parsed?.mcp
-    const record = servers && typeof servers === 'object' ? (servers as Record<string, unknown>)[name] : undefined
-    if (!record || typeof record !== 'object' || Array.isArray(record)) return undefined
-    return Object.fromEntries(Object.entries(record as Record<string, unknown>).map(([field, value]) => [field, valueDigest(value)]))
-  } catch { return undefined }
+function mcpRecordIsExclusivelyOwned (configPath: string, name: string, ownedFields: Record<string, string> | undefined, preferredKey: 'mcp' | 'mcpServers'): boolean {
+  if (!ownedFields || Object.keys(ownedFields).length === 0) return false
+  const current = readMcpFieldDigests(configPath, name, { preferredKey })
+  if (!current) return false
+  const ownedNames = Object.keys(ownedFields).sort()
+  const currentNames = Object.keys(current).sort()
+  return ownedNames.length === currentNames.length && ownedNames.every((field, index) =>
+    field === currentNames[index] && ownedFields[field] === current[field])
 }
 
 function failure (code: string, message: string, rollback?: { attempted: boolean; succeeded: boolean }): FallbackRefreshResult {

@@ -28,6 +28,7 @@ export type {
   UpdateError,
   UpdateInstallation,
   UpdateInstallationMetadata,
+  NativeEvidence,
   UpdateOptions,
   UpdateOwnership,
   UpdatePlan,

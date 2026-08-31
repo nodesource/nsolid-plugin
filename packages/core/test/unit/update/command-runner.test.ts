@@ -3,9 +3,15 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { deriveShimEntrypoint, resolveExecutableIdentity, runCommand } from '../../../src/update/command-runner.js'
+import { deriveShimEntrypoint, resolveExecutableIdentity, runCommand, windowsTaskkillPath } from '../../../src/update/command-runner.js'
 
 describe('update command runner', () => {
+  it('resolves taskkill from an absolute local System32 path', () => {
+    assert.equal(windowsTaskkillPath('D:\\Windows'), 'D:\\Windows\\System32\\taskkill.exe')
+    assert.equal(windowsTaskkillPath('\\\\attacker\\share'), 'C:\\Windows\\System32\\taskkill.exe')
+    assert.equal(path.win32.isAbsolute(windowsTaskkillPath()), true)
+  })
+
   it('preserves ENOENT as a structured missing-executable error', async () => {
     const result = await runCommand({
       executable: 'nsolid-plugin-command-that-does-not-exist',

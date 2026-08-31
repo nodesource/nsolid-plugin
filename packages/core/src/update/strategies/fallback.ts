@@ -1,18 +1,20 @@
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { UpdateContext, UpdateInstallation, UpdatePlanItem, UpdateResult, UpdateStrategy } from '../types.js'
 import type { HarnessType } from '../../types.js'
 import { DEFAULT_COMMAND_TIMEOUT_MS, resolveExecutableIdentity, isCommandSuccessful } from '../command-runner.js'
 import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
-import { getTrackingFilePath } from '../../utils/path.js'
+import { getTrackingFilePath, getSkillsDir, resolveHome } from '../../utils/path.js'
+import { getAdapter } from '../../harnesses/index.js'
 import { getHarnessSkillsPath } from '../../skills/skill-linker.js'
-import { beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, markFallbackJournalMutating, recoverFallbackJournal, trackingDigest, valueDigest, restoreFallbackJournal, type FallbackJournal } from '../fallback-journal.js'
+import { beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, markFallbackJournalMutating, recoverFallbackJournal, reloadFallbackJournal, restoreFallbackJournal, trackingDigest, type FallbackJournal } from '../fallback-journal.js'
 import { cleanupNpmArtifact } from '../version-source.js'
 import { managerArgsForIdentity, verifyLocalArtifact } from '../package-manager.js'
 import { readTrackingFile } from '../../skills/skill-tracker.js'
-import { readJsonFile, readJsoncFile, readTomlFile } from '../../utils/config.js'
+import { harnessMcpKey, readMcpFieldDigests } from '../mcp-lookup.js'
 
 export const fallbackStrategy: UpdateStrategy = {
   target: 'opencode',
@@ -46,7 +48,6 @@ export const fallbackStrategy: UpdateStrategy = {
     }
     const executor = installation.source.executor ?? detectExecutor()
     if (!executor) {
-      const manifestPath = await createManifest(identity)
       const unsupportedInstallation = {
         ...installation,
         source: {
@@ -58,8 +59,8 @@ export const fallbackStrategy: UpdateStrategy = {
       return {
         ...planItem(unsupportedInstallation),
         manualCommands: [
-          `npm exec --yes --package=nsolid-plugin@${installation.version.latest ?? '<resolved-version>'} -- nsolid-plugin-refresh-owned --transaction ${manifestPath}`,
-          `pnpm --package=nsolid-plugin@${installation.version.latest ?? '<resolved-version>'} dlx nsolid-plugin-refresh-owned --transaction ${manifestPath}`,
+          `npm exec --yes --package=nsolid-plugin@${installation.version.latest ?? '<resolved-version>'} -- nsolid-plugin update --harness ${installation.target} --yes`,
+          `pnpm --package=nsolid-plugin@${installation.version.latest ?? '<resolved-version>'} dlx nsolid-plugin update --harness ${installation.target} --yes`,
         ],
       }
     }
@@ -141,6 +142,7 @@ export const fallbackStrategy: UpdateStrategy = {
           }, { attempted: false })
         }
         const rollback = parseRollbackState(`${result.stdout}\n${result.stderr}`)
+        if (journal) journal = await reloadFallbackJournal(journal)
         const parentRecovered = journal ? await restoreFallbackJournal(journal) : undefined
         return failedResult(
           item,
@@ -194,18 +196,31 @@ function createFallbackIdentity (installation: UpdateInstallation) {
   const names = installation.metadata?.trackedMcpNames ?? []
   const trackedFields = installation.metadata?.trackedMcpFields ?? []
   if (names.length > 0 && installation.metadata?.trackedMcpOwnershipComplete === false) return undefined
+  const harness = installation.target as HarnessType
+  const trackedConfigPaths = [...new Set(trackedFields.map((field) => path.resolve(field.configPath)))]
+  if (configPath) trackedConfigPaths.push(path.resolve(configPath))
+  const canonical = getAdapter(harness).getMcpConfigPath()
+  const ownedMcpConfigPaths = [...new Set([...trackedConfigPaths, ...(canonical ? [path.resolve(canonical)] : [])])]
   return {
     installationId: installation.installationId,
-    harness: installation.target as HarnessType,
+    harness,
     trackingPath,
     trackingDigest: digest,
+    nonce: randomUUID(),
     ownedSkillPaths: skills.map((skill) => path.resolve(skill.path)),
-    ownedLinkPaths: skills.map((skill) => path.join(getHarnessSkillsPath(installation.target as HarnessType), skill.name)),
+    ownedLinkPaths: skills.map((skill) => path.join(getHarnessSkillsPath(harness), skill.name)),
     ownedMcpFields: trackedFields.length > 0
       ? trackedFields.map((field) => ({ ...field, configPath: path.resolve(field.configPath) }))
       : configPath
-        ? names.flatMap((name) => Object.entries(readMcpRecord(configPath, name) ?? {}).map(([field, value]) => ({ configPath: path.resolve(configPath), server: name, field, expectedDigest: valueDigest(value) })))
+        ? names.flatMap((name) => Object.entries(readMcpFieldDigests(configPath, name, { preferredKey: harnessMcpKey(harness) }) ?? {}).map(([field, expectedDigest]) => ({ configPath: path.resolve(configPath), server: name, field, expectedDigest })))
         : [],
+    ownedMcpConfigPaths,
+    approvedDestinationRoots: [
+      harness === 'opencode'
+        ? path.resolve(process.env.NSOLID_OPENCODE_SKILLS_DIR ?? resolveHome('~/.config/opencode/skills'))
+        : getSkillsDir(),
+      ...(harness !== 'opencode' ? [path.resolve(getHarnessSkillsPath(harness))] : []),
+    ],
   } as const
 }
 
@@ -214,19 +229,6 @@ async function createManifest (identity: NonNullable<ReturnType<typeof createFal
   const manifestPath = path.join(directory, 'transaction.json')
   await writeFile(manifestPath, JSON.stringify(identity, null, 2) + '\n', { mode: 0o600 })
   return manifestPath
-}
-
-function readMcpRecord (configPath: string, name: string): Record<string, unknown> | undefined {
-  try {
-    const value = configPath.endsWith('.toml')
-      ? readTomlFile<Record<string, unknown>>(configPath)
-      : configPath.endsWith('.jsonc')
-        ? readJsoncFile<Record<string, unknown>>(configPath)
-        : readJsonFile<Record<string, unknown>>(configPath)
-    const servers = value?.mcpServers ?? value?.mcp_servers ?? value?.mcp
-    const record = servers && typeof servers === 'object' ? (servers as Record<string, unknown>)[name] : undefined
-    return record && typeof record === 'object' && !Array.isArray(record) ? record as Record<string, unknown> : undefined
-  } catch { return undefined }
 }
 
 function parseRollbackState (output: string): UpdateResult['rollback'] | undefined {
