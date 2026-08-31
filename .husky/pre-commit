@@ -1,3 +1,5 @@
+set -e
+
 pnpm lint
 pnpm typecheck
 pnpm test

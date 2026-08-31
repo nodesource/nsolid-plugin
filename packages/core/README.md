@@ -52,10 +52,9 @@ Lifecycle and guarantees:
   concurrent setups converge on one valid runtime.
 - **Idempotent**: with a valid runtime present, `setup` never invokes npm.
 - **Safe**: npm runs with `shell: false`, separated argv,
-  `--ignore-scripts`, no audit/fund, resolved from `npm_execpath` (only when
-  it is npm's own CLI — pnpm/yarn lifecycle scripts set it to their own
-  binary, which is ignored) or next to `process.execPath` — never from
-  `PATH`/project `node_modules/.bin`. No
+  `--ignore-scripts`, and no audit/fund. It is resolved only from canonical
+  candidates next to the running Node.js installation — never from `PATH`,
+  `npm_execpath`, the current directory, or project `node_modules/.bin`. No
   credentials are read, stored, or logged by the runtime module; the runtime
   directory contains no secrets.
 - **Shared and durable**: `uninstall --harness <harness>` and `logout` never

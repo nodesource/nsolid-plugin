@@ -15,12 +15,14 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const MCP_REMOTE_VERSION = '0.1.38'
-const PLUGIN_VERSION = '1.0.3'
+const MCP_REMOTE_VERSION = "0.1.38"
+const PLUGIN_VERSION = "1.0.3"
 const STARTUP_FAILURE_WINDOW_MS = 15000
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
-const SERVER_NAMES = new Set(['nsolid-console', 'ns-benchmark', 'ncm'])
-const HARNESS_NAMES = new Set(['claude', 'codex', 'opencode', 'antigravity', 'pi'])
+const SERVER_DEFINITIONS = {"nsolid-console":{"url":"${MCP_URL}","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ns-benchmark":{"url":"https://benchmark.mcp.saas.nodesource.io/mcp","headers":{"X-Nsolid-Org-Id":"${AUTH_ORG_ID}","X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ncm":{"url":"https://mcp.ncm.nodesource.com","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}}}
+const SERVER_NAMES = new Set(Object.keys(SERVER_DEFINITIONS))
+const VARIABLE_PATTERN = new RegExp("\\$\\{(\\w+)\\}", 'g')
+const HARNESS_NAMES = new Set(["claude", "codex", "opencode", "antigravity", "pi"])
 const serverName = process.argv[2]
 const harness = process.argv[3]
 
@@ -62,40 +64,42 @@ function readCredentials () {
 }
 
 function resolveServer (name, credentials) {
-  switch (name) {
-    case 'nsolid-console': {
-      const storedUrl = credentials.mcpUrl && !isLegacyAliasMcpUrl(credentials.mcpUrl, credentials.consoleUrl, credentials.organizationId)
-        ? credentials.mcpUrl
-        : null
-      const url = storedUrl || deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
-      if (!url) {
-        fail(`Could not derive NodeSource console MCP URL from stored credentials. Run: ${SETUP_COMMAND()}`)
-      }
-      return {
-        url,
-        headers: {
-          'X-Nsolid-Service-Token': credentials.serviceToken,
-        },
-      }
-    }
-    case 'ns-benchmark':
-      return {
-        url: 'https://benchmark.mcp.saas.nodesource.io/mcp',
-        headers: {
-          'X-Nsolid-Org-Id': credentials.organizationId,
-          'X-Nsolid-Service-Token': credentials.serviceToken,
-        },
-      }
-    case 'ncm':
-      return {
-        url: 'https://mcp.ncm.nodesource.com',
-        headers: {
-          'X-Nsolid-Service-Token': credentials.serviceToken,
-        },
-      }
-    default:
-      fail(`Unknown NodeSource MCP server: ${name}`)
+  const definition = SERVER_DEFINITIONS[name]
+  if (!definition) fail(`Unknown NodeSource MCP server: ${name}`)
+  if (typeof definition.url !== 'string') {
+    fail(`Invalid URL for NodeSource MCP server: ${name}`)
   }
+
+  const storedMcpUrl = credentials.mcpUrl && !isLegacyAliasMcpUrl(credentials.mcpUrl, credentials.consoleUrl, credentials.organizationId)
+    ? credentials.mcpUrl
+    : null
+  const mcpUrl = storedMcpUrl || deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
+  const variables = {
+    AUTH_TOKEN: credentials.serviceToken,
+    AUTH_ORG_ID: credentials.organizationId,
+    MCP_URL: mcpUrl ?? ('$' + '{MCP_URL}'),
+  }
+  const mcpUrlPlaceholder = '$' + '{MCP_URL}'
+  if (!mcpUrl && definition.url.includes(mcpUrlPlaceholder)) {
+    fail(`Could not derive NodeSource console MCP URL from stored credentials. Run: ${SETUP_COMMAND()}`)
+  }
+  const url = expandTemplate(definition.url, variables)
+  if (url.length === 0) fail(`Invalid URL for NodeSource MCP server: ${name}`)
+
+  const headers = Object.fromEntries(Object.entries(definition.headers ?? {}).map(([key, value]) => {
+    if (typeof value !== 'string') fail(`Invalid header for NodeSource MCP server: ${name}`)
+    if (!mcpUrl && value.includes(mcpUrlPlaceholder)) {
+      fail(`Could not derive NodeSource console MCP URL from stored credentials. Run: ${SETUP_COMMAND()}`)
+    }
+    return [key, expandTemplate(value, variables)]
+  }))
+  return { url, headers }
+}
+
+function expandTemplate (value, variables) {
+  return value.replace(VARIABLE_PATTERN, (placeholder, name) =>
+    Object.hasOwn(variables, name) ? variables[name] : placeholder
+  )
 }
 
 function deriveMcpUrlFromConsoleUrl (consoleUrl, organizationId) {
@@ -142,7 +146,7 @@ function SETUP_COMMAND () {
 
 function resolveProxyPath () {
   // 1. Stable shared runtime provisioned by `nsolid-plugin setup`.
-  const runtimeParent = path.join(os.homedir(), '.agents', 'nsolid-plugin', 'runtime', 'mcp-remote')
+  const runtimeParent = path.join(os.homedir(), ".agents", "nsolid-plugin", "runtime", "mcp-remote")
   const runtimeRoot = path.join(runtimeParent, MCP_REMOTE_VERSION)
   const stable = validateMcpRemote(path.join(runtimeRoot, 'node_modules', 'mcp-remote'), runtimeRoot, runtimeParent)
   if (stable) return stable

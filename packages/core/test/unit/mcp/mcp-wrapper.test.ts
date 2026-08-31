@@ -2,12 +2,12 @@ import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
 // @ts-expect-error The repository's JavaScript generator intentionally has no TypeScript declarations.
-import { generateMcpWrapper, MCP_REMOTE_VERSION as GENERATOR_VERSION, PLUGIN_VERSION as GENERATOR_PLUGIN_VERSION, HARNESS_VALUES as GENERATOR_HARNESS_VALUES } from '../../../../../scripts/plugin-generators.mjs'
-import { MCP_REMOTE_VERSION as CORE_VERSION } from '../../../src/mcp/mcp-remote-runtime.js'
+import { CODEX_MCP_STARTUP_TIMEOUT_SEC, generateCodexMcpJson, generateMcpWrapper, HARNESS_VALUES as GENERATOR_HARNESS_VALUES, MCP_REMOTE_RUNTIME_PARENT_SEGMENTS, MCP_REMOTE_VERSION as GENERATOR_VERSION, PLUGIN_VERSION as GENERATOR_PLUGIN_VERSION } from '../../../../../scripts/plugin-generators.mjs'
+import { getMcpRemoteRuntimeParent, MCP_REMOTE_VERSION as CORE_VERSION } from '../../../src/mcp/mcp-remote-runtime.js'
 import { HARNESS_VALUES as CORE_HARNESS_VALUES, PLUGIN_OWNED_HARNESSES, NATIVE_PLUGIN_HARNESSES } from '../../../src/types.js'
 
 const repoRoot = join(import.meta.dirname, '..', '..', '..', '..', '..')
@@ -138,7 +138,7 @@ describe('MCP wrapper runtime contract', () => {
     assert.strictEqual(GENERATOR_VERSION, CORE_VERSION)
     assert.strictEqual(rootPackageJson.dependencies?.['mcp-remote'], CORE_VERSION)
     // The generated wrapper embeds the version for its stable-path resolution.
-    assert.ok(generateMcpWrapper().includes(`'${CORE_VERSION}'`))
+    assert.ok(generateMcpWrapper().includes(`const MCP_REMOTE_VERSION = ${JSON.stringify(CORE_VERSION)}`))
   })
 
   it('pins the repair command to the generating release', () => {
@@ -147,11 +147,102 @@ describe('MCP wrapper runtime contract', () => {
     // exactly X's pinned runtime version.
     assert.strictEqual(GENERATOR_PLUGIN_VERSION, corePackageJson.version)
     const generated = generateMcpWrapper()
-    assert.ok(generated.includes(`const PLUGIN_VERSION = '${GENERATOR_PLUGIN_VERSION}'`))
+    assert.ok(generated.includes(`const PLUGIN_VERSION = ${JSON.stringify(GENERATOR_PLUGIN_VERSION)}`))
     // The wrapper builds the command at runtime from the embedded release.
     assert.ok(generated.includes('npx -y nsolid-plugin@'))
     const interpolation = '${'
     assert.ok(generated.includes(`nsolid-plugin@${interpolation}PLUGIN_VERSION} setup --harness ${interpolation}harness}`))
+  })
+
+  it('executes custom bundle servers and safely escapes generated strings', () => {
+    const customServerName = "custom'server\\path\nnext"
+    const placeholder = (name: string) => '$' + '{' + name + '}'
+    const customUrlTemplate = `https://${placeholder('AUTH_ORG_ID')}.custom.example.test/mcp`
+    const customUrl = 'https://org.custom.example.test/mcp'
+    const customHeader = "value'\\path\nnext"
+    const inheritedPlaceholder = placeholder('constructor')
+    const customHeaderTemplate = `Bearer ${placeholder('AUTH_TOKEN')}; ${placeholder('MCP_URL')}; ${inheritedPlaceholder}; ${customHeader}`
+    const customVersion = "9.9.9-'test"
+    const generated = generateMcpWrapper({
+      version: customVersion,
+      mcpServers: [{
+        name: customServerName,
+        url: customUrlTemplate,
+        headers: { 'X-Custom': customHeaderTemplate },
+      }],
+    })
+    const fixture = createWrapperFixture('generated')
+    writeFileSync(fixture.wrapperPath, generated)
+    seedRuntime(fixture.home)
+    const credentialToken = placeholder('AUTH_ORG_ID')
+    const authPath = join(fixture.home, '.agents', '.nodesource-auth.json')
+    const credentials = JSON.parse(readFileSync(authPath, 'utf8'))
+    credentials.serviceToken = credentialToken
+    writeFileSync(authPath, JSON.stringify(credentials))
+
+    const result = spawnSync(process.execPath, [fixture.wrapperPath, customServerName, 'codex'], {
+      cwd: fixture.directory,
+      env: wrapperEnvironment(fixture),
+      encoding: 'utf8',
+      timeout: 15000,
+    })
+
+    assert.strictEqual(result.status, 0, result.stderr)
+    assert.ok(generated.includes(`const PLUGIN_VERSION = ${JSON.stringify(customVersion)}`))
+    assert.deepEqual(JSON.parse(readFileSync(fixture.output, 'utf8')), [
+      customUrl,
+      '--header',
+      `X-Custom:Bearer ${credentialToken}; ${url}; ${inheritedPlaceholder}; ${customHeader}`,
+      '--transport',
+      'http-first',
+      '--silent',
+    ])
+  })
+
+  it('rejects an unresolved MCP_URL placeholder in a custom header', () => {
+    const mcpUrlPlaceholder = '$' + '{MCP_URL}'
+    const generated = generateMcpWrapper({
+      version: '9.9.9-test',
+      mcpServers: [{
+        name: 'custom-server',
+        url: 'https://custom.example.test/mcp',
+        headers: { 'X-MCP-URL': `endpoint=${mcpUrlPlaceholder}` },
+      }],
+    })
+    const fixture = createWrapperFixture('generated')
+    writeFileSync(fixture.wrapperPath, generated)
+    const authPath = join(fixture.home, '.agents', '.nodesource-auth.json')
+    const credentials = JSON.parse(readFileSync(authPath, 'utf8'))
+    credentials.mcpUrl = ''
+    credentials.consoleUrl = 'https://example.test'
+    writeFileSync(authPath, JSON.stringify(credentials))
+
+    const result = spawnSync(process.execPath, [fixture.wrapperPath, 'custom-server', 'codex'], {
+      cwd: fixture.directory,
+      env: wrapperEnvironment(fixture),
+      encoding: 'utf8',
+      timeout: 15000,
+    })
+
+    assert.notStrictEqual(result.status, 0)
+    assert.match(result.stderr, /Could not derive NodeSource console MCP URL/)
+  })
+
+  it('keeps the generated runtime parent equal to the core runtime parent', () => {
+    assert.strictEqual(
+      join(homedir(), ...MCP_REMOTE_RUNTIME_PARENT_SEGMENTS),
+      getMcpRemoteRuntimeParent()
+    )
+  })
+
+  it('keeps the committed Codex startup timeout in sync with the generator', () => {
+    const generated = JSON.parse(generateCodexMcpJson())
+    const committed = JSON.parse(readFileSync(join(repoRoot, '.mcp.json'), 'utf8'))
+
+    assert.deepEqual(committed, generated)
+    for (const server of Object.values(generated.mcpServers) as Array<{ startup_timeout_sec: number }>) {
+      assert.strictEqual(server.startup_timeout_sec, CODEX_MCP_STARTUP_TIMEOUT_SEC)
+    }
   })
 
   it('keeps the harness lists in sync across core, generator and the generated wrapper', () => {
@@ -161,10 +252,7 @@ describe('MCP wrapper runtime contract', () => {
     const generated = generateMcpWrapper()
     const harnessNames = generated.match(/const HARNESS_NAMES = new Set\(\[([^\]]*)\]\)/)?.[1]
     assert.ok(harnessNames, 'generated wrapper embeds a HARNESS_NAMES set')
-    assert.deepEqual(
-      harnessNames.split(',').map((s: string) => s.trim().replaceAll("'", '')),
-      CORE_HARNESS_VALUES
-    )
+    assert.deepEqual(JSON.parse(`[${harnessNames}]`), CORE_HARNESS_VALUES)
     // Ownership semantics: opencode belongs to neither set; pi is native
     // (package-owned) but not plugin-owned.
     assert.deepEqual([...PLUGIN_OWNED_HARNESSES], ['claude', 'codex', 'antigravity'])
@@ -558,7 +646,7 @@ describe('MCP wrapper stable runtime', () => {
       mkdirSync(hostile)
       for (const name of process.platform === 'win32' ? ['npm.cmd', 'node.exe'] : ['npm', 'node']) {
         const p = join(hostile, name)
-        writeFileSync(p, process.platform === 'win32' ? '@echo off\r\necho pwned > "%SENTINEL%"\r\n' : `#!/bin/sh\necho pwned > "${sentinel}"\n`)
+        writeFileSync(p, process.platform === 'win32' ? `@echo off\r\necho pwned > "${sentinel}"\r\n` : `#!/bin/sh\necho pwned > "${sentinel}"\n`)
         if (process.platform !== 'win32') chmodSync(p, 0o755)
       }
       // Runtime missing: the wrapper must fail with the repair message
@@ -717,10 +805,10 @@ describe('MCP wrapper stable runtime', () => {
     const generated = generateMcpWrapper()
     const oldVersion = '0.0.1-old-release'
     const oldWrapper = generated.replace(
-      new RegExp(`const PLUGIN_VERSION = '${GENERATOR_PLUGIN_VERSION.replace(/\./g, '\\.')}'`),
-      `const PLUGIN_VERSION = '${oldVersion}'`
+      `const PLUGIN_VERSION = ${JSON.stringify(GENERATOR_PLUGIN_VERSION)}`,
+      `const PLUGIN_VERSION = ${JSON.stringify(oldVersion)}`
     )
-    assert.ok(oldWrapper.includes(`const PLUGIN_VERSION = '${oldVersion}'`), 'fixture rewrote the embedded version')
+    assert.ok(oldWrapper.includes(`const PLUGIN_VERSION = ${JSON.stringify(oldVersion)}`), 'fixture rewrote the embedded version')
 
     const fixture = createWrapperFixture('source')
     writeFileSync(fixture.wrapperPath, oldWrapper)

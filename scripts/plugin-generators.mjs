@@ -31,6 +31,7 @@ export const skillNamesSet = new Set(skillNames)
  * package.json dependency (guarded by a unit test).
  */
 export const MCP_REMOTE_VERSION = '0.1.38'
+export const MCP_REMOTE_RUNTIME_PARENT_SEGMENTS = ['.agents', 'nsolid-plugin', 'runtime', 'mcp-remote']
 
 /**
  * The plugin release that generates the wrapper. The wrapper's repair message
@@ -43,7 +44,7 @@ export const PLUGIN_VERSION = defaultBundle.version
 // Keep in sync with packages/core/src/types.ts (guarded by a unit test).
 export const HARNESS_VALUES = ['claude', 'codex', 'opencode', 'antigravity', 'pi']
 
-const CODEX_MCP_STARTUP_TIMEOUT_SEC = 60
+export const CODEX_MCP_STARTUP_TIMEOUT_SEC = 60
 
 function getBundle (bundle) {
   return bundle ?? defaultBundle
@@ -157,10 +158,14 @@ export function generateMcpConfig (wrapperPath, bundle, harness) {
   return stableJson({ mcpServers })
 }
 
-export function generateMcpWrapper () {
-  const serverNames = [...defaultBundle.mcpServers.map((s) => s.name)]
-  const serverNamesLiteral = serverNames.map((name) => `'${name}'`).join(', ')
-  const harnessLiteral = HARNESS_VALUES.map((name) => `'${name}'`).join(', ')
+export function generateMcpWrapper (bundle) {
+  const b = getBundle(bundle)
+  const serverDefinitionsLiteral = JSON.stringify(Object.fromEntries(
+    b.mcpServers.map((server) => [server.name, { url: server.url, headers: server.headers ?? {} }])
+  ))
+  const harnessLiteral = HARNESS_VALUES.map((name) => JSON.stringify(name)).join(', ')
+  const runtimeParentSegmentsLiteral = MCP_REMOTE_RUNTIME_PARENT_SEGMENTS.map((segment) => JSON.stringify(segment)).join(', ')
+  const variablePatternLiteral = JSON.stringify('\\$\\{(\\w+)\\}')
   return `#!/usr/bin/env node
 
 // STDIO→HTTP bridge for the NodeSource MCP servers. Resolves mcp-remote
@@ -178,11 +183,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const MCP_REMOTE_VERSION = '${MCP_REMOTE_VERSION}'
-const PLUGIN_VERSION = '${PLUGIN_VERSION}'
+const MCP_REMOTE_VERSION = ${JSON.stringify(MCP_REMOTE_VERSION)}
+const PLUGIN_VERSION = ${JSON.stringify(b.version)}
 const STARTUP_FAILURE_WINDOW_MS = 15000
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
-const SERVER_NAMES = new Set([${serverNamesLiteral}])
+const SERVER_DEFINITIONS = ${serverDefinitionsLiteral}
+const SERVER_NAMES = new Set(Object.keys(SERVER_DEFINITIONS))
+const VARIABLE_PATTERN = new RegExp(${variablePatternLiteral}, 'g')
 const HARNESS_NAMES = new Set([${harnessLiteral}])
 const serverName = process.argv[2]
 const harness = process.argv[3]
@@ -225,40 +232,42 @@ function readCredentials () {
 }
 
 function resolveServer (name, credentials) {
-  switch (name) {
-    case 'nsolid-console': {
-      const storedUrl = credentials.mcpUrl && !isLegacyAliasMcpUrl(credentials.mcpUrl, credentials.consoleUrl, credentials.organizationId)
-        ? credentials.mcpUrl
-        : null
-      const url = storedUrl || deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
-      if (!url) {
-        fail(\`Could not derive NodeSource console MCP URL from stored credentials. Run: \${SETUP_COMMAND()}\`)
-      }
-      return {
-        url,
-        headers: {
-          'X-Nsolid-Service-Token': credentials.serviceToken,
-        },
-      }
-    }
-    case 'ns-benchmark':
-      return {
-        url: 'https://benchmark.mcp.saas.nodesource.io/mcp',
-        headers: {
-          'X-Nsolid-Org-Id': credentials.organizationId,
-          'X-Nsolid-Service-Token': credentials.serviceToken,
-        },
-      }
-    case 'ncm':
-      return {
-        url: 'https://mcp.ncm.nodesource.com',
-        headers: {
-          'X-Nsolid-Service-Token': credentials.serviceToken,
-        },
-      }
-    default:
-      fail(\`Unknown NodeSource MCP server: \${name}\`)
+  const definition = SERVER_DEFINITIONS[name]
+  if (!definition) fail(\`Unknown NodeSource MCP server: \${name}\`)
+  if (typeof definition.url !== 'string') {
+    fail(\`Invalid URL for NodeSource MCP server: \${name}\`)
   }
+
+  const storedMcpUrl = credentials.mcpUrl && !isLegacyAliasMcpUrl(credentials.mcpUrl, credentials.consoleUrl, credentials.organizationId)
+    ? credentials.mcpUrl
+    : null
+  const mcpUrl = storedMcpUrl || deriveMcpUrlFromConsoleUrl(credentials.consoleUrl, credentials.organizationId)
+  const variables = {
+    AUTH_TOKEN: credentials.serviceToken,
+    AUTH_ORG_ID: credentials.organizationId,
+    MCP_URL: mcpUrl ?? ('$' + '{MCP_URL}'),
+  }
+  const mcpUrlPlaceholder = '$' + '{MCP_URL}'
+  if (!mcpUrl && definition.url.includes(mcpUrlPlaceholder)) {
+    fail(\`Could not derive NodeSource console MCP URL from stored credentials. Run: \${SETUP_COMMAND()}\`)
+  }
+  const url = expandTemplate(definition.url, variables)
+  if (url.length === 0) fail(\`Invalid URL for NodeSource MCP server: \${name}\`)
+
+  const headers = Object.fromEntries(Object.entries(definition.headers ?? {}).map(([key, value]) => {
+    if (typeof value !== 'string') fail(\`Invalid header for NodeSource MCP server: \${name}\`)
+    if (!mcpUrl && value.includes(mcpUrlPlaceholder)) {
+      fail(\`Could not derive NodeSource console MCP URL from stored credentials. Run: \${SETUP_COMMAND()}\`)
+    }
+    return [key, expandTemplate(value, variables)]
+  }))
+  return { url, headers }
+}
+
+function expandTemplate (value, variables) {
+  return value.replace(VARIABLE_PATTERN, (placeholder, name) =>
+    Object.hasOwn(variables, name) ? variables[name] : placeholder
+  )
 }
 
 function deriveMcpUrlFromConsoleUrl (consoleUrl, organizationId) {
@@ -305,7 +314,7 @@ function SETUP_COMMAND () {
 
 function resolveProxyPath () {
   // 1. Stable shared runtime provisioned by \`nsolid-plugin setup\`.
-  const runtimeParent = path.join(os.homedir(), '.agents', 'nsolid-plugin', 'runtime', 'mcp-remote')
+  const runtimeParent = path.join(os.homedir(), ${runtimeParentSegmentsLiteral})
   const runtimeRoot = path.join(runtimeParent, MCP_REMOTE_VERSION)
   const stable = validateMcpRemote(path.join(runtimeRoot, 'node_modules', 'mcp-remote'), runtimeRoot, runtimeParent)
   if (stable) return stable

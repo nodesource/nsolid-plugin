@@ -1067,10 +1067,11 @@ describe('dispatcher scripts (setup.mjs and the CLI install command)', () => {
   const cliEntry = join(repoRoot, 'packages', 'core', 'src', 'cli.ts')
 
   before(() => {
-    // setup.mjs resolves `nsolid-plugin` via package self-reference, so the
-    // dispatcher tests run against the built package. Always rebuild here:
-    // an existing dist may belong to an older branch and silently omit newer
-    // exports, making local/pre-commit results depend on checkout history.
+    // CI may attest that a clean repository build completed immediately before
+    // the test run. Standalone/local runs still rebuild because an existing
+    // dist may belong to an older branch and silently omit newer exports.
+    if (process.env.NSOLID_TEST_CORE_ALREADY_BUILT === '1') return
+
     const build = spawnSync('pnpm', ['--filter', './packages/core', 'build'], {
       cwd: repoRoot,
       encoding: 'utf8',

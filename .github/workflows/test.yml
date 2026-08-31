@@ -33,4 +33,6 @@ jobs:
       - run: pnpm lint
       - run: pnpm build
       - run: pnpm test
+        env:
+          NSOLID_TEST_CORE_ALREADY_BUILT: '1'
       - run: node scripts/test-marketplace-install.js

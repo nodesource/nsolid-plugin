@@ -137,7 +137,7 @@ function buildExpectedFiles () {
   files.set('mcp_config.json', generateAntigravityMcpJson(bundle))
   // The wrapper receives the harness as an explicit argument, so a single
   // generated artifact serves Claude, Codex, and Antigravity unchanged.
-  files.set('scripts/mcp-wrapper.js', generateMcpWrapper())
+  files.set('scripts/mcp-wrapper.js', generateMcpWrapper(bundle))
 
   return files
 }

@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, readFileSync as fsReadFileSync } from 'node:fs'
-import type { HarnessType } from '../types.js'
+import { HARNESS_VALUES, type HarnessType } from '../types.js'
 import { getConfigBackupDir, resolveHome } from './path.js'
 import { atomicWriteSync } from './fs.js'
 import { readJsonFile } from './config.js'
@@ -31,12 +31,45 @@ interface BackupMeta {
 
 const SEQ_RESERVATIONS_DIR = '.seq-reservations'
 
+function normalizeBackupMeta (value: unknown): BackupMeta | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+
+  const candidate = value as Record<string, unknown>
+  const createdAtMs = typeof candidate.createdAt === 'string' ? Date.parse(candidate.createdAt) : Number.NaN
+  if (
+    typeof candidate.harness !== 'string' ||
+    !HARNESS_VALUES.includes(candidate.harness as HarnessType) ||
+    typeof candidate.originalPath !== 'string' ||
+    !Number.isFinite(createdAtMs)
+  ) return null
+
+  const seq = typeof candidate.seq === 'number' &&
+    Number.isSafeInteger(candidate.seq) &&
+    candidate.seq > 0 &&
+    candidate.seq < Number.MAX_SAFE_INTEGER
+    ? candidate.seq
+    : undefined
+
+  return {
+    harness: candidate.harness as HarnessType,
+    originalPath: candidate.originalPath,
+    createdAt: new Date(createdAtMs).toISOString(),
+    seq,
+    reason: typeof candidate.reason === 'string' ? candidate.reason : undefined,
+  }
+}
+
 /** Highest seq persisted in existing backup sidecars (0 when none). */
 function highestMetaSeq (dir: string): number {
   let max = 0
   for (const name of readdirSync(dir)) {
     if (!name.endsWith('.meta.json')) continue
-    const meta = readJsonFile<BackupMeta>(path.join(dir, name))
+    let meta: BackupMeta | null
+    try {
+      meta = normalizeBackupMeta(readJsonFile<unknown>(path.join(dir, name)))
+    } catch {
+      continue
+    }
     if (meta?.seq !== undefined && meta.seq > max) max = meta.seq
   }
   return max
@@ -115,12 +148,11 @@ export function createConfigBackup (
 
   const timestamp = Date.now()
   const backupPath = path.join(dir, backupName(originalPath, timestamp))
-  // Back-to-back backups can share a millisecond (and coarse filesystems can
-  // share mtimes): reserve a cross-process sequence that cannot tie so
-  // "latest" is always the backup that was created last.
-  const seq = reserveBackupSeq(dir)
-
   try {
+    // Back-to-back backups can share a millisecond (and coarse filesystems can
+    // share mtimes): reserve a cross-process sequence that cannot tie so
+    // "latest" is always the backup that was created last.
+    const seq = reserveBackupSeq(dir)
     copyFileSync(originalPath, backupPath)
     const meta: BackupMeta = {
       harness,
@@ -154,8 +186,13 @@ export function listConfigBackups (harness: HarnessType): BackupEntry[] {
   for (const name of readdirSync(dir)) {
     if (name.endsWith('.meta.json')) continue
     const backupPath = path.join(dir, name)
-    const meta = readJsonFile<BackupMeta>(metaPath(backupPath))
-    if (!meta) continue
+    let meta: BackupMeta | null
+    try {
+      meta = normalizeBackupMeta(readJsonFile<unknown>(metaPath(backupPath)))
+    } catch {
+      continue
+    }
+    if (!meta || meta.harness !== harness) continue
     let metaMtimeMs = 0
     try {
       // Legacy tie-break for backups created before the persisted `seq`

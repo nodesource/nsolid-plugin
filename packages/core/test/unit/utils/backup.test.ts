@@ -77,6 +77,24 @@ describe('createConfigBackup', () => {
     const meta = JSON.parse(readFileSync(`${entry.backupPath}.meta.json`, 'utf8'))
     assert.strictEqual(meta.seq, 42)
   })
+
+  it('ignores malformed sidecars when reserving a sequence', () => {
+    const configPath = join(tmpDir, '.claude.json')
+    writeFileSync(configPath, 'v1', 'utf8')
+    const backupDir = getConfigBackupDir('claude')
+    mkdirSync(backupDir, { recursive: true })
+    writeFileSync(join(backupDir, 'truncated.meta.json'), '{', 'utf8')
+    writeFileSync(join(backupDir, 'fractional.meta.json'), JSON.stringify({ seq: 1.5 }), 'utf8')
+    writeFileSync(join(backupDir, 'negative.meta.json'), JSON.stringify({ seq: -1 }), 'utf8')
+    writeFileSync(join(backupDir, 'exhausted.meta.json'), JSON.stringify({ seq: Number.MAX_SAFE_INTEGER }), 'utf8')
+
+    const entry = createConfigBackup('claude', configPath)
+
+    assert.ok(entry)
+    assert.ok(existsSync(`${entry.backupPath}.meta.json`))
+    const meta = JSON.parse(readFileSync(`${entry.backupPath}.meta.json`, 'utf8'))
+    assert.strictEqual(meta.seq, 1)
+  })
 })
 
 describe('listConfigBackups', () => {
@@ -87,6 +105,11 @@ describe('listConfigBackups', () => {
 
     writeFileSync(configPath, 'v2', 'utf8')
     const second = createConfigBackup('claude', configPath)!
+    const firstMetaPath = `${first.backupPath}.meta.json`
+    const firstMeta = JSON.parse(readFileSync(firstMetaPath, 'utf8'))
+    firstMeta.seq = 'invalid-but-non-fatal'
+    firstMeta.createdAt = new Date(firstMeta.createdAt).toUTCString()
+    writeFileSync(firstMetaPath, JSON.stringify(firstMeta), 'utf8')
 
     const list = listConfigBackups('claude')
     assert.strictEqual(list.length, 2)
@@ -96,6 +119,24 @@ describe('listConfigBackups', () => {
 
   it('returns an empty array when no backups exist', () => {
     assert.deepStrictEqual(listConfigBackups('codex'), [])
+  })
+
+  it('keeps valid backups while skipping malformed or structurally invalid sidecars', () => {
+    const configPath = join(tmpDir, '.claude.json')
+    writeFileSync(configPath, 'valid', 'utf8')
+    const valid = createConfigBackup('claude', configPath)!
+    const backupDir = getConfigBackupDir('claude')
+
+    writeFileSync(join(backupDir, 'truncated.json'), '{}', 'utf8')
+    writeFileSync(join(backupDir, 'truncated.json.meta.json'), '{', 'utf8')
+    writeFileSync(join(backupDir, 'empty.json'), '{}', 'utf8')
+    writeFileSync(join(backupDir, 'empty.json.meta.json'), '{}', 'utf8')
+    writeFileSync(join(backupDir, 'bad-date.json'), '{}', 'utf8')
+    writeFileSync(join(backupDir, 'bad-date.json.meta.json'), JSON.stringify({
+      harness: 'claude', originalPath: configPath, createdAt: 42, seq: 'not-a-number',
+    }), 'utf8')
+
+    assert.deepStrictEqual(listConfigBackups('claude'), [valid])
   })
 })
 
@@ -108,6 +149,11 @@ describe('restoreConfigBackup', () => {
     writeFileSync(configPath, 'v2', 'utf8')
     createConfigBackup('claude', configPath)
 
+    const backupDir = getConfigBackupDir('claude')
+    writeFileSync(join(backupDir, 'foreign.json'), 'foreign', 'utf8')
+    writeFileSync(join(backupDir, 'foreign.json.meta.json'), JSON.stringify({
+      harness: 'claude', originalPath: configPath, createdAt: {}, seq: Number.MAX_SAFE_INTEGER,
+    }), 'utf8')
     writeFileSync(configPath, 'corrupt', 'utf8')
 
     const entry = restoreConfigBackup('claude')
