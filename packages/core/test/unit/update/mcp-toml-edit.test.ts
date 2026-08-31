@@ -178,6 +178,33 @@ describe('editMcpTomlBytes', () => {
     assert.equal(next, original)
   })
 
+  it('distinguishes TOML datetimes by instant instead of comparing them as empty records', () => {
+    // smol-toml parses TOML datetimes as TomlDate, a Date subclass with no own
+    // enumerable keys: without an explicit Date branch the deep comparison
+    // would treat every datetime as an empty object and distinct datetimes as
+    // equal. The editor must therefore refuse to install a changed datetime
+    // value it cannot render byte-exactly, instead of silently accepting it.
+    const original = '[mcp_servers.alpha]\nurl = "https://a.example/mcp"\nupdated_at = 2024-01-01T00:00:00Z\n'
+
+    assert.throws(
+      () => editMcpTomlBytes(original, {
+        setFields: [{ server: 'alpha', field: 'updated_at', value: new Date('2024-01-02T00:00:00Z') }],
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof McpTomlEditError)
+        assert.equal(error.code, 'MCP_BLOCK_INVALID')
+        return true
+      }
+    )
+
+    // The identical instant is a semantic no-op: the document is returned
+    // byte-for-byte, proving datetimes are compared by instant.
+    const noOp = editMcpTomlBytes(original, {
+      setFields: [{ server: 'alpha', field: 'updated_at', value: new Date('2024-01-01T00:00:00Z') }],
+    })
+    assert.equal(noOp, original)
+  })
+
   it('matches quoted server and field names by decoded value', () => {
     const original = '[mcp_servers."alpha-console"]\nurl = "https://old.example/mcp"\n'
     const expected = '[mcp_servers."alpha-console"]\nurl = "https://new.example.com/mcp"\n'

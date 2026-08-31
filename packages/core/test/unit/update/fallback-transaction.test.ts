@@ -681,11 +681,15 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       // os.homedir() follows USERPROFILE on Windows; redirect both so the
       // canonical path resolution actually moves on every platform.
       process.env.USERPROFILE = movedHome
+      let movedCanonicalExists = true
       try {
         const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot, transaction: fixture.identity })
         assert.equal(result.success, false)
         assert.equal(result.error?.code, 'FALLBACK_MCP_DRIFT')
       } finally {
+        // Capture the moved-location existence before the cleanup deletes it,
+        // otherwise the assertion below would be vacuous.
+        movedCanonicalExists = existsSync(path.join(movedHome, '.claude.json'))
         if (previousHome === undefined) delete process.env.HOME
         else process.env.HOME = previousHome
         if (previousUserProfile === undefined) delete process.env.USERPROFILE
@@ -694,7 +698,7 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       }
       // Neither the planned nor the moved canonical path was created.
       assert.equal(existsSync(fixture.canonicalPath), false)
-      assert.equal(existsSync(path.join(movedHome, '.claude.json')), false)
+      assert.equal(movedCanonicalExists, false)
     } finally {
       rmSync(fixture.sourceRoot, { recursive: true, force: true })
     }

@@ -65,7 +65,13 @@ let activeRaw = ''
  */
 export function editMcpJsonBytes (raw: string, edit: McpByteEdit, options?: { mcpKey?: JsonMcpKey }): string {
   const mcpKey = options?.mcpKey ?? detectJsonMcpKey(raw)
+  const hasStructuralEdits = (edit.removeServers?.length ?? 0) > 0 || (edit.setFields?.length ?? 0) > 0 || (edit.removeFields?.length ?? 0) > 0
   if (raw.trim().length === 0) {
+    // Fail closed like the TOML editor: an empty document has no MCP block to
+    // own, so requested removals/field edits must never be dropped silently.
+    if (hasStructuralEdits) {
+      throw new McpEditError('MCP_BLOCK_MISSING', `The ${mcpKey} block is absent`)
+    }
     const servers = edit.upsertServers ?? {}
     return JSON.stringify({ [mcpKey]: servers }, null, 2) + '\n'
   }
@@ -77,7 +83,6 @@ export function editMcpJsonBytes (raw: string, edit: McpByteEdit, options?: { mc
       throw new McpEditError('MCP_PARSE_FAILED', 'The MCP configuration is not a valid JSON object')
     }
     const mcpNode = findNodeAtLocation(tree, [mcpKey])
-    const hasStructuralEdits = (edit.removeServers?.length ?? 0) > 0 || (edit.setFields?.length ?? 0) > 0 || (edit.removeFields?.length ?? 0) > 0
     if (mcpNode && mcpNode.type !== 'object') {
       // The MCP container exists but is not an object (null, array, string,
       // number). Ownership-needing edits cannot be proven: fail closed without

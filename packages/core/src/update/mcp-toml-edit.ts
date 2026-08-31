@@ -420,6 +420,13 @@ function modelAfterOps (model: Record<string, unknown>, edit: McpTomlEdit): Reco
 function deepEqual (left: unknown, right: unknown): boolean {
   if (left === right) return true
   if (typeof left === 'number' && typeof right === 'number' && Number.isNaN(left) && Number.isNaN(right)) return true
+  // smol-toml parses TOML datetimes as TomlDate, a Date subclass: a Date is a
+  // record-shaped object with no own enumerable keys, so the record branch
+  // below would treat every Date as an empty object and distinct datetimes
+  // would compare equal. Compare instants explicitly before the record branch.
+  if (left instanceof Date || right instanceof Date) {
+    return left instanceof Date && right instanceof Date && left.getTime() === right.getTime()
+  }
   if (Array.isArray(left) && Array.isArray(right)) {
     return left.length === right.length && left.every((value, i) => deepEqual(value, right[i]))
   }

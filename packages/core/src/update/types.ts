@@ -322,6 +322,8 @@ export interface UpdatePlanItem {
   metadata?: UpdateInstallationMetadata
   artifact?: ResolvedArtifactIdentity
   fallbackTransaction?: FallbackTransactionIdentity
+  /** Temporary directories this plan item's process created (for example a manifest staging dir); removal must only ever target these. */
+  temporaryDirectories?: readonly string[]
 }
 
 export interface UpdatePlan {

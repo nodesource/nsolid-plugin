@@ -124,7 +124,10 @@ export async function executeCodexTransaction (
         return {
           success: false,
           rollbackAttempted: false,
-          error: { code: 'CODEX_TREE_TERMINATION_UNCONFIRMED', message: 'Codex timed out and descendant termination could not be confirmed; the backup was preserved' },
+          error: {
+            code: 'CODEX_TREE_TERMINATION_UNCONFIRMED',
+            message: `Codex timed out and descendant termination could not be confirmed; backups were preserved at ${configBackupStorage.directory} and ${cacheBackupStorage.directory}`,
+          },
         }
       }
       rollbackAttempted = commandResult.completed.some((completed) => completed.args.includes('remove')) || command.args.includes('remove')

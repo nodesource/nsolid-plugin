@@ -339,4 +339,25 @@ describe('Codex update transaction', () => {
     assert.equal(result.error?.code, 'CODEX_BACKUP_FAILED')
     assert.equal(existsSync(path.join(home, '.codex')), false)
   })
+
+  it('reports the preserved backup locations in the tree-termination timeout error', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    const result = await executeCodexTransaction(item(cachePath), {
+      run: async () => ({ exitCode: null, stdout: '', stderr: '', timedOut: true, treeTerminated: false }),
+    })
+
+    assert.equal(result.success, false)
+    assert.equal(result.rollbackAttempted, false)
+    assert.equal(result.error?.code, 'CODEX_TREE_TERMINATION_UNCONFIRMED')
+    // The randomly named sibling backup directories must be discoverable from
+    // the error so the user can locate or remove the preserved evidence.
+    assert.match(result.error?.message ?? '', /config-backup/)
+    assert.match(result.error?.message ?? '', /cache-backup/)
+    assert.equal(result.error?.message?.includes(path.dirname(cachePath)), true)
+  })
 })

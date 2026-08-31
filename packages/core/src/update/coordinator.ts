@@ -1,17 +1,18 @@
 import type { HarnessType } from '../types.js'
 import { rm } from 'node:fs/promises'
-import path from 'node:path'
 import { createCommandRunner } from './command-runner.js'
 import { detectCliInstallation, detectInstallations } from './inventory.js'
 import { cleanupNpmArtifact, downloadNpmArtifact, resolveFixedGitBundleVersion, resolveMarketplaceVersion, resolveRegistryVersion } from './version-source.js'
 import { classifyVersionSet, classifyVersions } from './version.js'
 import type {
+  ResolvedArtifactIdentity,
   UpdateContext,
   UpdateInstallation,
   UpdateOptions,
   UpdatePlan,
   UpdatePlanItem,
   UpdateResult,
+  UpdateSource,
   UpdateStatus,
   UpdateStrategy,
   UpdateSummary,
@@ -105,7 +106,15 @@ export async function planUpdates (options: UpdateOptions = {}): Promise<UpdateP
       })
     }
     const resolved = lookup.version
-      ? { ...installation, version: classifyInstallationVersion(installation, lookup.version), artifact: lookup.artifact ?? installation.artifact }
+      ? {
+          ...installation,
+          version: classifyInstallationVersion(installation, lookup.version),
+          artifact: lookup.artifact ?? installation.artifact,
+          // The immutable identity the lookup proved (a resolved commit or a
+          // verified snapshot) becomes part of the planned source so the
+          // execution guard validates the pinned identity, not a mutable ref.
+          source: withPinnedMarketplaceCommit(installation.source, lookup.artifact),
+        }
       : installation
     if (lookup.error) {
       if (options.check !== true && isMutationUnavailableLookup(lookup.error.code)) {
@@ -232,10 +241,11 @@ function recoveryPlanItem (checkOnly: boolean): UpdatePlanItem {
 
 async function cleanupPlanState (item: UpdatePlanItem): Promise<void> {
   await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
-  const command = item.steps.find((step) => step.kind === 'command')
-  const transactionIndex = command?.kind === 'command' ? command.command.args.indexOf('--transaction') : -1
-  const manifestPath = transactionIndex >= 0 && command?.kind === 'command' ? command.command.args[transactionIndex + 1] : undefined
-  if (manifestPath) await rm(path.dirname(manifestPath), { recursive: true, force: true }).catch(() => {})
+  // Only directories recorded at planning time (created by this process) are
+  // removed; never derive a delete target from command arguments.
+  for (const directory of item.temporaryDirectories ?? []) {
+    await rm(directory, { recursive: true, force: true }).catch(() => {})
+  }
 }
 
 function mustPreservePlanState (result: UpdateResult): boolean {
@@ -373,4 +383,32 @@ function validateScope (options: UpdateOptions): void {
 
 function isMutationUnavailableLookup (code: string): boolean {
   return code === 'IMMUTABLE_SOURCE_UNAVAILABLE' || code === 'SOURCE_CONTENT_MISMATCH' || code === 'INVALID_MARKETPLACE_SOURCE'
+}
+
+/**
+ * Carry the immutable identity resolved during planning into the planned
+ * source. A marketplace source planned with a mutable ref (for example
+ * `revision: 'main'`) is only ever authorized against the exact commit the
+ * immutable lookup resolved, so the execution guard sees a pinned revision
+ * instead of the original mutable ref.
+ */
+export function withPinnedMarketplaceCommit (source: UpdateSource, artifact: ResolvedArtifactIdentity | undefined): UpdateSource {
+  if (artifact?.kind !== 'git') return source
+  if (source.kind !== 'claude-marketplace' && source.kind !== 'codex-marketplace') return source
+  const versionSource = source.versionSource
+  if (versionSource.kind !== 'git') return source
+  // Both the revision and the commit must already be the resolved artifact
+  // commit: a source pinned only by `commit` but still carrying a mutable
+  // `revision` (for example `revision: 'main'`) would fail the execution
+  // guard, which reads the revision as the authoritative pinned identity.
+  const alreadyPinned = versionSource.revision === artifact.commit && versionSource.commit === artifact.commit
+  if (alreadyPinned) return source
+  return {
+    ...source,
+    versionSource: {
+      ...versionSource,
+      revision: artifact.commit,
+      commit: artifact.commit,
+    },
+  }
 }

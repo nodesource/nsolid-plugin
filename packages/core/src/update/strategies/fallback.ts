@@ -80,7 +80,7 @@ export const fallbackStrategy: UpdateStrategy = {
     const command = { executable: spawn.executable, executableIdentity, args: spawn.args, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS }
     const paths = installation.metadata?.trackedSkills?.map((skill) => skill.path) ?? []
     if (installation.metadata?.trackedMcpConfigPath) paths.push(installation.metadata.trackedMcpConfigPath)
-    return planItem(
+    const planned = planItem(
       { ...installation, source: { ...installation.source, executor }, fallbackTransaction: identity },
       [
         { kind: 'filesystem', description: 'Back up tracked NodeSource-owned fallback assets', operation: 'backup', paths },
@@ -91,6 +91,13 @@ export const fallbackStrategy: UpdateStrategy = {
       [{ kind: 'filesystem', description: 'Restore tracked fallback assets and tracking state', operation: 'restore', paths }],
       installation.target === 'opencode' ? 'Restart OpenCode to load refreshed skills' : undefined
     )
+    // The manifest staging directory is owned by this process from creation:
+    // record it on the plan item so cleanup (whether execute() runs or not)
+    // removes exactly the directory this process created.
+    return {
+      ...planned,
+      temporaryDirectories: [path.dirname(manifestPath)],
+    }
   },
 
   async execute (item: UpdatePlanItem, context: UpdateContext): Promise<UpdateResult> {
@@ -180,9 +187,11 @@ export const fallbackStrategy: UpdateStrategy = {
       return resultFromPlan(item, 'updated', { resultingVersion: item.version.latest, rollback: { attempted: false } })
     } finally {
       if (!preserveRecoveryArtifacts) await rm(workspace, { recursive: true, force: true }).catch(() => {})
-      const transactionIndex = step.command.args.indexOf('--transaction')
-      const manifestPath = transactionIndex >= 0 ? step.command.args[transactionIndex + 1] : undefined
-      if (manifestPath && !preserveRecoveryArtifacts) await rm(path.dirname(manifestPath), { recursive: true, force: true }).catch(() => {})
+      if (!preserveRecoveryArtifacts) {
+        for (const directory of item.temporaryDirectories ?? []) {
+          await rm(directory, { recursive: true, force: true }).catch(() => {})
+        }
+      }
     }
   },
 }

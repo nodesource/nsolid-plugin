@@ -47,6 +47,27 @@ describe('fallback update strategy', () => {
     assert.equal(existsSync(path.resolve(observedCwd)), false)
   })
 
+  it('removes only the recorded manifest directory, never a path derived from command args', async () => {
+    const recorded = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-recorded-'))
+    const foreign = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-foreign-'))
+    // The command references a foreign directory that this process did not
+    // create; only the recorded temporary directory may be removed.
+    const candidate = {
+      ...item(),
+      steps: [{ kind: 'command' as const, description: 'refresh', command: { executable: 'npm', args: ['--transaction', path.join(foreign, 'transaction.json')], cwd: tmpdir(), timeoutMs: 1000 } }],
+      temporaryDirectories: [recorded],
+    }
+
+    const result = await fallbackStrategy.execute(candidate, {
+      options: {},
+      commandRunner: { run: async () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }) },
+    })
+
+    assert.equal(result.status, 'failed')
+    assert.equal(existsSync(recorded), false)
+    assert.equal(existsSync(foreign), true, 'a directory not created by this process must never be deleted')
+  })
+
   it('reports a missing package executor as unsupported instead of failed planning', async () => {
     const previousPath = process.env.PATH
     const previousHome = process.env.HOME

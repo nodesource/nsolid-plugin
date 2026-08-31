@@ -171,6 +171,29 @@ describe('MCP byte-preserving AST edits', () => {
     })
   })
 
+  it('fails closed with MCP_BLOCK_MISSING when an empty document receives structural edits', () => {
+    for (const edit of [
+      { removeServers: ['nsolid-console'] },
+      { setFields: [{ server: 'nsolid-console', field: 'url', value: 'https://x' }] },
+      { removeFields: [{ server: 'nsolid-console', field: 'url' }] },
+    ]) {
+      assert.throws(() => editMcpJsonBytes('', edit), (error: unknown) => {
+        assert.ok(error instanceof McpEditError)
+        assert.equal(error.code, 'MCP_BLOCK_MISSING')
+        return true
+      })
+      // Whitespace-only documents behave the same as empty ones.
+      assert.throws(() => editMcpJsonBytes(' \n\t ', edit), (error: unknown) => {
+        assert.ok(error instanceof McpEditError)
+        assert.equal(error.code, 'MCP_BLOCK_MISSING')
+        return true
+      })
+    }
+    // A pure upsert against an empty document still creates the container.
+    const created = editMcpJsonBytes('', { upsertServers: { 'nsolid-console': { url: 'https://fresh' } } })
+    assert.deepEqual(JSON.parse(created), { mcpServers: { 'nsolid-console': { url: 'https://fresh' } } })
+  })
+
   it('reads node values without mutating the document', () => {
     const raw = '{\n  "mcpServers": {"s": {"url": "https://x", "n": 3, "b": true, "z": null}}\n}\n'
     assert.equal(readMcpNodeValue(raw, ['mcpServers', 's', 'url']), 'https://x')
