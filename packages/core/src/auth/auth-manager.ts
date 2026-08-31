@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { win32 } from 'node:path'
-import type { AuthConfig, Credentials, Logger, AuthConfirmation, HarnessType } from '../types.js'
+import type { AuthConfig, Credentials, Logger, AuthConfirmation, HarnessType, BrowserLauncher } from '../types.js'
 import { loadCredentials, saveCredentials, isExpired } from './token-storage.js'
 import { validateToken } from './token-validator.js'
 import { startOAuthServer } from './oauth-server.js'
@@ -100,6 +100,13 @@ export interface EnsureAuthenticatedOptions {
   force?: boolean;
   /** Injectable stdout/stderr sink for headless OAuth sign-in instructions. Defaults to `process.stderr.write`. */
   notify?: (text: string) => void;
+  /**
+   * Injectable browser launcher for the sign-in URL. Defaults to the
+   * production `openBrowser()` (rundll32/open/xdg-open). Tests inject a
+   * capture-only launcher so authentication never spawns a real browser.
+   * Must not throw (see {@link BrowserLauncher}).
+   */
+  browserLauncher?: BrowserLauncher;
 }
 
 export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logger, options: EnsureAuthenticatedOptions = {}): Promise<Credentials> {
@@ -174,7 +181,8 @@ export async function ensureAuthenticated (authConfig: AuthConfig, logger?: Logg
   notify('If a browser did not open automatically, open this sign-in URL manually:\n')
   notify(`${signInUrl.toString()}\n\n`)
 
-  openBrowser(signInUrl.toString(), logger)
+  const launchBrowser = options.browserLauncher ?? openBrowser
+  launchBrowser(signInUrl.toString(), logger)
 
   const callback = await server.waitForCallback()
   await server.close()

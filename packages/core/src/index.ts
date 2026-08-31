@@ -169,7 +169,7 @@ export async function setup (options: SetupOptions): Promise<SetupResult> {
     }
 
     try {
-      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth, force: options.force, notify: options.notify })
+      await ensureAuthenticated(authConfig, logger, { harness: options.harness, confirmAuth: options.confirmAuth, force: options.force, notify: options.notify, browserLauncher: options.browserLauncher })
       // Credentials are authenticated now — the active org is set (freshly
       // stored, or already valid). This is the "org switch succeeded" signal,
       // independent of the harness install/config refresh that follows.
@@ -822,7 +822,7 @@ export async function doctor (
   return report
 }
 
-export type { HarnessType, InstallOptions, InstallResult, DoctorReport, BundleDescriptor, Credentials } from './types.js'
+export type { HarnessType, InstallOptions, InstallResult, SetupOptions, SetupResult, DoctorReport, BundleDescriptor, Credentials, BrowserLauncher } from './types.js'
 export type { LinkResult, LinkStatus } from './skills/skill-linker.js'
 export type { SkillTrackingEntry, McpTrackingEntry, TrackingData } from './skills/skill-tracker.js'
 export type { BackupEntry } from './utils/backup.js'

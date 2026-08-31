@@ -75,6 +75,16 @@ export interface Logger {
   error(message: string, meta?: Record<string, unknown>): void
 }
 
+/**
+ * Opens the OAuth sign-in URL in a browser (or headless equivalent). Defaults
+ * to the production `openBrowser()` implementation (rundll32/open/xdg-open).
+ * Injectable for tests and embedders that must never spawn an external
+ * process. Must not throw synchronously: the OAuth callback server is already
+ * running when it is invoked, so a throwing launcher would leak the server and
+ * abort the manual sign-in URL flow.
+ */
+export type BrowserLauncher = (url: string, logger?: Logger) => void
+
 import type { ProgressReporter } from './utils/progress.js'
 
 export interface AuthConfirmationContext {
@@ -148,6 +158,13 @@ export interface SetupOptions extends InstallOptions {
    * capture or suppress OAuth sign-in URL messages without touching stderr.
    */
   notify?: (text: string) => void;
+  /**
+   * Injectable browser launcher for the OAuth sign-in URL. Defaults to the
+   * production `openBrowser()` (rundll32/open/xdg-open). Tests inject a
+   * capture-only launcher so authentication never spawns a real browser.
+   * Must not throw (see {@link BrowserLauncher}).
+   */
+  browserLauncher?: BrowserLauncher;
 }
 export type SetupResult = InstallResult
 

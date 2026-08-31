@@ -5,35 +5,26 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync,
 import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
-import { createRequire } from 'node:module'
-import type { BundleDescriptor } from '../../src/types.js'
+import type { BundleDescriptor, BrowserLauncher } from '../../src/types.js'
 import type { ProgressReporter } from '../../src/utils/progress.js'
 import type { TrackingData } from '../../src/skills/skill-tracker.js'
+import { getFreePort } from './auth/ports.js'
 
-const require = createRequire(import.meta.url)
-const cp = require('node:child_process')
-
-const execFileCalls: unknown[][] = []
-cp.execFile = (...args: unknown[]) => { execFileCalls.push(args) }
+// Capture-only browser launcher: the OAuth sign-in URL is recorded here and
+// never passed to an OS browser launcher (rundll32/open/xdg-open), so a
+// regression that routes authentication around the injected seam cannot
+// silently spawn a real browser process from these tests.
+const browserLaunches: string[] = []
+const captureBrowserLauncher: BrowserLauncher = (url: string) => { browserLaunches.push(url) }
 const authNotices: string[] = []
 const captureAuthNotice = (text: string): void => { authNotices.push(text) }
-
-function getUrlFromExecFileCall (): URL {
-  const call = execFileCalls[execFileCalls.length - 1]
-  const cmd = call[0] as string
-  const args = call[1] as string[]
-  const urlStr = cmd === 'rundll32'
-    ? args[args.length - 1]
-    : args.find((a: string) => a.startsWith('http') || a.startsWith('"http'))!
-  return new URL(urlStr.replace(/^"|"$/g, ''))
-}
 
 async function pollForState (timeoutMs = 5000): Promise<{ state: string; port: number }> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
       const noticeUrl = authNotices.join('').match(/https?:\/\/\S+\/sign-in\?\S+/)?.[0]
-      const url = noticeUrl ? new URL(noticeUrl) : getUrlFromExecFileCall()
+      const url = noticeUrl ? new URL(noticeUrl) : new URL(browserLaunches[browserLaunches.length - 1]!)
       const state = url.searchParams.get('state')
       const port = url.searchParams.get('port')
       if (state && port) return { state, port: Number(port) }
@@ -138,7 +129,7 @@ beforeEach(() => {
   originalNpmExecpath = process.env.npm_execpath
   process.env.HOME = tmpDir
   process.env.USERPROFILE = tmpDir
-  execFileCalls.length = 0
+  browserLaunches.length = 0
   authNotices.length = 0
   delete process.env.NSOLID_PLUGIN_PROGRESS
   delete process.env.npm_execpath
@@ -293,7 +284,7 @@ describe('install()', () => {
     globalThis.fetch = OK_FETCH
     const progress = SILENT_PROGRESS
 
-    const result = await setup({ harness: 'claude', bundlePath, skillsSource, progress })
+    const result = await setup({ harness: 'claude', bundlePath, skillsSource, progress, browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.success, true)
     assert.strictEqual(result.skillsInstalled, 0)
@@ -309,7 +300,7 @@ describe('install()', () => {
         type: 'oauth',
         provider: 'nodesource',
         accountsUrl: 'https://accounts.nodesource.com',
-        callbackPort: 8769,
+        callbackPort: await getFreePort(8400, 8500),
       },
     })
     const bundlePath = writeBundle(bundle)
@@ -328,10 +319,17 @@ describe('install()', () => {
       warn: () => {},
     }
 
-    const promise = setup({ harness: 'claude', bundlePath, skillsSource, progress, force: true, notify: captureAuthNotice })
+    const promise = setup({ harness: 'claude', bundlePath, skillsSource, progress, force: true, notify: captureAuthNotice, browserLauncher: captureBrowserLauncher })
 
     const { state, port } = await pollForState()
+    assert.strictEqual(browserLaunches.length, 1, 'the injected launcher must be used exactly once')
+    const launchUrl = new URL(browserLaunches[0]!)
+    assert.strictEqual(launchUrl.pathname, '/sign-in')
+    assert.strictEqual(launchUrl.searchParams.get('extension'), 'nsolid-plugin')
+    assert.strictEqual(launchUrl.searchParams.get('state'), state)
+    assert.strictEqual(launchUrl.searchParams.get('port'), String(port))
     assert.match(authNotices.join(''), /\/sign-in\?.*state=/, 'force should start a fresh browser authentication flow')
+    assert.ok(authNotices.join('').includes(browserLaunches[0]!), 'the manual notice must still surface the sign-in URL')
     await sendCallback(port, state, { consoleId: 'org-456' })
     const result = await promise
 
@@ -351,7 +349,7 @@ describe('install()', () => {
         type: 'oauth',
         provider: 'nodesource',
         accountsUrl: 'https://accounts.nodesource.com',
-        callbackPort: 8769,
+        callbackPort: await getFreePort(8400, 8500),
       },
     })
     const bundlePath = writeBundle(bundle)
@@ -365,7 +363,7 @@ describe('install()', () => {
     })) as unknown as typeof fetch
     const progress: ProgressReporter = { header: () => {}, step: () => {}, done: () => {}, warn: () => {} }
 
-    const promise = setup({ harness: 'opencode', bundlePath, skillsSource, progress, force: true, harnessSpecificSkills: true, notify: captureAuthNotice })
+    const promise = setup({ harness: 'opencode', bundlePath, skillsSource, progress, force: true, harnessSpecificSkills: true, notify: captureAuthNotice, browserLauncher: captureBrowserLauncher })
 
     const { state, port } = await pollForState()
     await sendCallback(port, state, { consoleId: 'org-456' })
@@ -373,6 +371,7 @@ describe('install()', () => {
 
     assert.strictEqual(result.authSucceeded, true)
     assert.strictEqual(result.success, true)
+    assert.strictEqual(browserLaunches.length, 1, 'the injected launcher must be used exactly once')
     assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'shared credentials must be switched')
     const cfg = readJsonFile<Record<string, any>>(join(tmpDir, '.config', 'opencode', 'opencode.jsonc'))
     const server = (cfg?.mcp as Record<string, { url?: string; headers?: Record<string, string> }>)?.['nsolid-console']
@@ -392,7 +391,7 @@ describe('install()', () => {
         type: 'oauth',
         provider: 'nodesource',
         accountsUrl: 'https://accounts.nodesource.com',
-        callbackPort: 8769,
+        callbackPort: await getFreePort(8400, 8500),
       },
     })
     const bundlePath = writeBundle(bundle)
@@ -406,7 +405,7 @@ describe('install()', () => {
     })) as unknown as typeof fetch
     const progress: ProgressReporter = { header: () => {}, step: () => {}, done: () => {}, warn: () => {} }
 
-    const promise = setup({ harness: 'pi', bundlePath, skillsSource, progress, force: true, packageOwnedSkills: true, notify: captureAuthNotice })
+    const promise = setup({ harness: 'pi', bundlePath, skillsSource, progress, force: true, packageOwnedSkills: true, notify: captureAuthNotice, browserLauncher: captureBrowserLauncher })
 
     const { state, port } = await pollForState()
     await sendCallback(port, state, { consoleId: 'org-456' })
@@ -414,6 +413,7 @@ describe('install()', () => {
 
     assert.strictEqual(result.authSucceeded, true)
     assert.strictEqual(result.success, true)
+    assert.strictEqual(browserLaunches.length, 1, 'the injected launcher must be used exactly once')
     assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'shared credentials must be switched')
     const cfg = readJsonFile<Record<string, any>>(join(tmpDir, '.pi', 'agent', 'mcp.json'))
     const server = (cfg?.mcpServers as Record<string, { url?: string; headers?: Record<string, string> }>)?.['nsolid-console']
@@ -432,7 +432,7 @@ describe('install()', () => {
         type: 'oauth',
         provider: 'nodesource',
         accountsUrl: 'https://accounts.nodesource.com',
-        callbackPort: 8769,
+        callbackPort: await getFreePort(8400, 8500),
       },
     })
     const bundlePath = writeBundle(bundle)
@@ -449,7 +449,7 @@ describe('install()', () => {
     })) as unknown as typeof fetch
     const progress: ProgressReporter = { header: () => {}, step: () => {}, done: () => {}, warn: () => {} }
 
-    const promise = setup({ harness: 'opencode', bundlePath, skillsSource, progress, force: true, harnessSpecificSkills: true, notify: captureAuthNotice })
+    const promise = setup({ harness: 'opencode', bundlePath, skillsSource, progress, force: true, harnessSpecificSkills: true, notify: captureAuthNotice, browserLauncher: captureBrowserLauncher })
 
     const { state, port } = await pollForState()
     await sendCallback(port, state, { consoleId: 'org-456' })
@@ -459,6 +459,7 @@ describe('install()', () => {
     assert.strictEqual(result.authSucceeded, true)
     // ...but the config refresh after it failed.
     assert.strictEqual(result.success, false)
+    assert.strictEqual(browserLaunches.length, 1, 'the injected launcher must be used exactly once')
     assert.ok(result.errors.some((e) => e.includes('MCP configuration failed')), 'config write failure must be surfaced')
     // The switched credentials MUST NOT be rolled back.
     assert.strictEqual(loadCredentials()?.organizationId, 'org-456', 'globally switched credentials are kept despite the refresh failure')
@@ -480,7 +481,7 @@ describe('install()', () => {
     globalThis.fetch = OK_FETCH
     const progress = SILENT_PROGRESS
 
-    const result = await setup({ harness: 'antigravity', bundlePath, skillsSource, progress })
+    const result = await setup({ harness: 'antigravity', bundlePath, skillsSource, progress, browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.success, true)
     assert.strictEqual(result.skillsInstalled, 0)
@@ -505,7 +506,7 @@ describe('install()', () => {
     globalThis.fetch = OK_FETCH
     const progress = SILENT_PROGRESS
 
-    const result = await setup({ harness: 'codex', bundlePath, skillsSource, progress })
+    const result = await setup({ harness: 'codex', bundlePath, skillsSource, progress, browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.success, true)
     assert.strictEqual(result.skillsInstalled, 0)
@@ -531,7 +532,7 @@ describe('install()', () => {
     globalThis.fetch = OK_FETCH
     const progress = SILENT_PROGRESS
 
-    const result = await setup({ harness: 'pi', bundlePath, skillsSource, progress, packageOwnedSkills: true })
+    const result = await setup({ harness: 'pi', bundlePath, skillsSource, progress, packageOwnedSkills: true, browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.success, true)
     assert.strictEqual(result.skillsInstalled, 0)
@@ -555,17 +556,19 @@ describe('install()', () => {
     globalThis.fetch = OK_FETCH
     resetRuntimeControl('provision')
 
-    const result = await setup({ harness: 'claude', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+    const result = await setup({ harness: 'claude', bundlePath, skillsSource, progress: SILENT_PROGRESS, browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.success, true)
     assert.strictEqual(existsSync(join(mcpRuntimeRoot(), 'node_modules', 'mcp-remote', 'dist', 'proxy.js')), true)
     assert.strictEqual(result.hadToAuthenticate, false, 'valid credentials: no browser')
+    assert.strictEqual(browserLaunches.length, 0, 'valid credentials must never reach the browser launcher')
     assert.strictEqual(runtimeControl.provisions, 1, 'first run installed the runtime')
 
     // Second run: the runtime is ready, so npm must not be invoked again.
     resetRuntimeControl('fail')
-    const second = await setup({ harness: 'claude', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+    const second = await setup({ harness: 'claude', bundlePath, skillsSource, progress: SILENT_PROGRESS, browserLauncher: captureBrowserLauncher })
     assert.strictEqual(second.success, true, 'idempotent rerun must not need npm')
+    assert.strictEqual(browserLaunches.length, 0, 'valid credentials must never reach the browser launcher')
     assert.strictEqual(runtimeControl.provisions, 0, 'ready runtime reused without provisioning')
   })
 
@@ -580,10 +583,11 @@ describe('install()', () => {
     globalThis.fetch = OK_FETCH
     resetRuntimeControl('fail')
 
-    const failed = await setup({ harness: 'codex', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+    const failed = await setup({ harness: 'codex', bundlePath, skillsSource, progress: SILENT_PROGRESS, browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(failed.success, false)
     assert.strictEqual(failed.errors.length, 1)
+    assert.strictEqual(browserLaunches.length, 0, 'valid credentials must never reach the browser launcher')
     assert.match(failed.errors[0], /MCP runtime setup failed/)
     // Credentials survive for the retry.
     assert.strictEqual(existsSync(join(tmpDir, '.agents', '.nodesource-auth.json')), true)
@@ -591,7 +595,7 @@ describe('install()', () => {
 
     // Retry with a working npm completes.
     resetRuntimeControl('provision')
-    const retried = await setup({ harness: 'codex', bundlePath, skillsSource, progress: SILENT_PROGRESS })
+    const retried = await setup({ harness: 'codex', bundlePath, skillsSource, progress: SILENT_PROGRESS, browserLauncher: captureBrowserLauncher })
     assert.strictEqual(retried.success, true)
     assert.strictEqual(existsSync(join(mcpRuntimeRoot(), 'node_modules', 'mcp-remote')), true)
   })
@@ -613,6 +617,7 @@ describe('install()', () => {
         bundlePath,
         skillsSource,
         progress: SILENT_PROGRESS,
+        browserLauncher: captureBrowserLauncher,
         ...(harness === 'pi' ? { packageOwnedSkills: true } : {}),
         ...(harness === 'opencode' ? { harnessSpecificSkills: true } : {}),
       })

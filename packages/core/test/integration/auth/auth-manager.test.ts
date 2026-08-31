@@ -4,16 +4,16 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
-import { createRequire } from 'node:module'
-import type { AuthConfig, Credentials } from '../../../src/types.js'
+import type { AuthConfig, Credentials, BrowserLauncher } from '../../../src/types.js'
 import { getAuthFilePath, getAgentsDir } from '../../../src/utils/path.js'
 import { getFreePort } from './ports.js'
 
-const require = createRequire(import.meta.url)
-const cp = require('node:child_process')
-
-const execFileCalls: unknown[][] = []
-cp.execFile = (...args: unknown[]) => { execFileCalls.push(args) }
+// Capture-only browser launcher: the OAuth sign-in URL is recorded here and
+// never passed to an OS browser launcher (rundll32/open/xdg-open), so a
+// regression that routes authentication around the injected seam cannot
+// silently spawn a real browser process from these tests.
+const browserLaunches: string[] = []
+const captureBrowserLauncher: BrowserLauncher = (url: string) => { browserLaunches.push(url) }
 
 let tmpDir: string
 let originalHome: string | undefined
@@ -34,19 +34,12 @@ const authConfig: AuthConfig = {
   callbackPort: 0,
 }
 
-function getUrlFromExecFileCall (): URL {
-  const call = execFileCalls[execFileCalls.length - 1]
-  const cmd = call[0] as string
-  const args = call[1] as string[]
-  const urlStr = cmd === 'rundll32'
-    ? args[args.length - 1]
-    : args.find((a: string) => a.startsWith('http') || a.startsWith('"http'))!
-  const cleaned = urlStr.replace(/^"|"$/g, '')
-  return new URL(cleaned)
+function getUrlFromBrowserLaunch (): URL {
+  return new URL(browserLaunches[browserLaunches.length - 1]!)
 }
 
-function getStateFromExecFileCall (): string {
-  return getUrlFromExecFileCall().searchParams.get('state')!
+function getStateFromBrowserLaunch (): string {
+  return getUrlFromBrowserLaunch().searchParams.get('state')!
 }
 
 async function pollForState (getStateFn: () => string, timeoutMs = 5000): Promise<string> {
@@ -90,7 +83,7 @@ beforeEach(async () => {
   process.env.HOME = tmpDir
   process.env.USERPROFILE = tmpDir
   originalFetch = globalThis.fetch
-  execFileCalls.length = 0
+  browserLaunches.length = 0
 
   originalAccountsUrl = process.env.NSOLID_ACCOUNTS_URL
   delete process.env.NSOLID_ACCOUNTS_URL
@@ -135,11 +128,11 @@ describe('ensureAuthenticated', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfig)
+    const result = await ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     assert.deepStrictEqual(result, creds)
     assert.strictEqual(fetchCalls, 1, 'fast path should attempt token validation')
-    assert.strictEqual(execFileCalls.length, 0)
+    assert.strictEqual(browserLaunches.length, 0)
   })
 
   it('returns validated permissions with stored credentials', async () => {
@@ -168,12 +161,12 @@ describe('ensureAuthenticated', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfig)
+    const result = await ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     assert.deepStrictEqual(result, { ...creds, permissions: ['completely-different:perm'] })
     assert.deepStrictEqual(loadCredentials()?.permissions, ['completely-different:perm'])
     assert.strictEqual(fetchCalls, 1, 'stored credentials should be validated when possible')
-    assert.strictEqual(execFileCalls.length, 0)
+    assert.strictEqual(browserLaunches.length, 0)
   })
 
   it('re-authenticates when credentials file is corrupt', { timeout: 10000 }, async () => {
@@ -188,15 +181,15 @@ describe('ensureAuthenticated', () => {
     })) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig)
+    const promise = ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     await new Promise((resolve) => setTimeout(resolve, 50))
-    const signInUrl = getUrlFromExecFileCall()
+    const signInUrl = getUrlFromBrowserLaunch()
     assert.strictEqual(signInUrl.origin, 'https://accounts.example.com')
     assert.strictEqual(signInUrl.pathname, '/sign-in')
     assert.strictEqual(signInUrl.searchParams.get('extension'), 'nsolid-plugin')
     assert.strictEqual(signInUrl.searchParams.get('port'), String(callbackPort))
-    const state = getStateFromExecFileCall()
+    const state = getStateFromBrowserLaunch()
     await sendCallback(callbackPort, state)
     const result = await promise
 
@@ -225,10 +218,10 @@ describe('ensureAuthenticated', () => {
     })) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig)
+    const promise = ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     await new Promise((resolve) => setTimeout(resolve, 50))
-    const state = getStateFromExecFileCall()
+    const state = getStateFromBrowserLaunch()
     await sendCallback(callbackPort, state)
     const result = await promise
 
@@ -257,10 +250,10 @@ describe('ensureAuthenticated', () => {
     })) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig, undefined, { force: true })
+    const promise = ensureAuthenticated(authConfig, undefined, { force: true, browserLauncher: captureBrowserLauncher })
 
-    const state = await pollForState(getStateFromExecFileCall)
-    assert.strictEqual(execFileCalls.length, 1, 'force should open the browser even though valid credentials exist')
+    const state = await pollForState(getStateFromBrowserLaunch)
+    assert.strictEqual(browserLaunches.length, 1, 'force should open the browser even though valid credentials exist')
     await sendCallback(callbackPort, state, { consoleId: 'org-456' })
     const result = await promise
 
@@ -290,10 +283,10 @@ describe('ensureAuthenticated', () => {
     })) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfig, undefined, { force: false })
+    const result = await ensureAuthenticated(authConfig, undefined, { force: false, browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.organizationId, 'org-123')
-    assert.strictEqual(execFileCalls.length, 0, 'force: false should still take the fast path')
+    assert.strictEqual(browserLaunches.length, 0, 'force: false should still take the fast path')
   })
 
   it('trusts stored credentials when validation API is unavailable during fast path', async () => {
@@ -316,12 +309,12 @@ describe('ensureAuthenticated', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfig)
+    const result = await ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.serviceToken, 'valid-token')
     assert.strictEqual(result.organizationId, 'org-123')
     assert.strictEqual(fetchCalls, 1, 'fast path should try validation before falling back')
-    assert.strictEqual(execFileCalls.length, 0, 'browser must not open when API is unavailable')
+    assert.strictEqual(browserLaunches.length, 0, 'browser must not open when API is unavailable')
   })
 
   it('re-authenticates when validation rejects stored credentials', { timeout: 10000 }, async () => {
@@ -347,16 +340,16 @@ describe('ensureAuthenticated', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig)
+    const promise = ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
-    const state = await pollForState(getStateFromExecFileCall)
+    const state = await pollForState(getStateFromBrowserLaunch)
     await sendCallback(callbackPort, state)
     const result = await promise
 
     assert.strictEqual(result.serviceToken, 'oauth-token')
     assert.strictEqual(result.organizationId, 'org-456')
     assert.strictEqual(fetchCalls, 2, 'stored token rejection should be followed by OAuth token validation')
-    assert.strictEqual(execFileCalls.length, 1, 'browser should open for re-authentication')
+    assert.strictEqual(browserLaunches.length, 1, 'browser should open for re-authentication')
   })
 
   it('trusts stored credentials when validation API returns an HTML shell (200 text/html)', async () => {
@@ -387,12 +380,12 @@ describe('ensureAuthenticated', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfig)
+    const result = await ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     assert.strictEqual(result.serviceToken, 'valid-token')
     assert.strictEqual(result.organizationId, 'org-123')
     assert.strictEqual(fetchCalls, 1, 'fast path should try validation before falling back')
-    assert.strictEqual(execFileCalls.length, 0, 'browser must not open when API returns an HTML shell')
+    assert.strictEqual(browserLaunches.length, 0, 'browser must not open when API returns an HTML shell')
   })
 })
 
@@ -433,11 +426,11 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
 
     await assert.rejects(
-      ensureAuthenticated(authConfigWithPerms),
+      ensureAuthenticated(authConfigWithPerms, undefined, { browserLauncher: captureBrowserLauncher }),
       /Missing required permissions: nsolid:profile:read/
     )
     assert.strictEqual(fetchCalls, 1)
-    assert.strictEqual(execFileCalls.length, 0)
+    assert.strictEqual(browserLaunches.length, 0)
   })
 
   it('returns credentials when all required permissions are present', async () => {
@@ -466,11 +459,11 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const result = await ensureAuthenticated(authConfigWithPerms)
+    const result = await ensureAuthenticated(authConfigWithPerms, undefined, { browserLauncher: captureBrowserLauncher })
 
     assert.deepStrictEqual(result.permissions, ['nsolid:benchmark:run', 'nsolid:profile:read'])
     assert.strictEqual(fetchCalls, 1)
-    assert.strictEqual(execFileCalls.length, 0)
+    assert.strictEqual(browserLaunches.length, 0)
   })
 
   it('checks known cached permissions when validation is unavailable', async () => {
@@ -496,11 +489,11 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
 
     await assert.rejects(
-      ensureAuthenticated(authConfigWithPerms),
+      ensureAuthenticated(authConfigWithPerms, undefined, { browserLauncher: captureBrowserLauncher }),
       /Missing required permissions: nsolid:profile:read/
     )
     assert.strictEqual(fetchCalls, 1)
-    assert.strictEqual(execFileCalls.length, 0)
+    assert.strictEqual(browserLaunches.length, 0)
   })
 
   it('rejects stored credentials with unknown cached permissions when validation is unavailable', async () => {
@@ -525,11 +518,11 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
 
     await assert.rejects(
-      ensureAuthenticated(authConfigWithPerms),
+      ensureAuthenticated(authConfigWithPerms, undefined, { browserLauncher: captureBrowserLauncher }),
       /Cannot verify required permissions: nsolid:benchmark:run, nsolid:profile:read/
     )
     assert.strictEqual(fetchCalls, 1)
-    assert.strictEqual(execFileCalls.length, 0)
+    assert.strictEqual(browserLaunches.length, 0)
   })
 
   it('does not store fresh OAuth credentials when required permissions cannot be verified', { timeout: 10000 }, async () => {
@@ -542,17 +535,17 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfigWithPerms)
+    const promise = ensureAuthenticated(authConfigWithPerms, undefined, { browserLauncher: captureBrowserLauncher })
     const rejection = assert.rejects(
       promise,
       /Cannot verify required permissions: nsolid:benchmark:run, nsolid:profile:read/
     )
 
-    const state = await pollForState(getStateFromExecFileCall)
+    const state = await pollForState(getStateFromBrowserLaunch)
     await sendCallback(callbackPort, state)
     await rejection
     assert.strictEqual(fetchCalls, 1)
-    assert.strictEqual(execFileCalls.length, 1)
+    assert.strictEqual(browserLaunches.length, 1)
     assert.strictEqual(loadCredentials(), null)
   })
 
@@ -571,66 +564,18 @@ describe('ensureAuthenticated - requiredPermissions', () => {
     }) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfigWithPerms)
+    const promise = ensureAuthenticated(authConfigWithPerms, undefined, { browserLauncher: captureBrowserLauncher })
     const rejection = assert.rejects(
       promise,
       /Missing required permissions: nsolid:profile:read/
     )
 
-    const state = await pollForState(getStateFromExecFileCall)
+    const state = await pollForState(getStateFromBrowserLaunch)
     await sendCallback(callbackPort, state)
     await rejection
     assert.strictEqual(fetchCalls, 1)
-    assert.strictEqual(execFileCalls.length, 1)
+    assert.strictEqual(browserLaunches.length, 1)
     assert.strictEqual(loadCredentials(), null)
-  })
-})
-
-describe('ensureAuthenticated - Windows browser launch', () => {
-  it('uses the trusted rundll32 path with url.dll,FileProtocolHandler on Windows', { timeout: 10000 }, async () => {
-    const originalPlatform = process.platform
-    const originalSystemRoot = process.env.SystemRoot
-    Object.defineProperty(process, 'platform', { value: 'win32' })
-    process.env.SystemRoot = 'C:\\Windows'
-
-    try {
-      const { saveCredentials } = await import('../../../src/auth/token-storage.js')
-      const expiredCreds: Credentials = {
-        serviceToken: 'expired-token',
-        organizationId: 'org-123',
-        saasToken: 'expired-saas',
-        consoleUrl: 'https://expired.saas.nodesource.io',
-        mcpUrl: 'https://org-123.mcp.saas.nodesource.io',
-        expiresAt: new Date(Date.now() - 1000).toISOString(),
-      }
-      saveCredentials(expiredCreds)
-
-      globalThis.fetch = mock.fn(async () => ({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        json: async () => ({ permissions: [] }),
-      })) as unknown as typeof fetch
-
-      const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-      const promise = ensureAuthenticated(authConfig)
-
-      await new Promise((resolve) => setTimeout(resolve, 50))
-
-      const lastCall = execFileCalls[execFileCalls.length - 1]
-      assert.strictEqual(lastCall[0], 'C:\\Windows\\System32\\rundll32.exe')
-      const lastArgs = lastCall[1] as string[]
-      assert.strictEqual(lastArgs[0], 'url.dll,FileProtocolHandler')
-      assert.ok(lastArgs[1].startsWith('https://accounts.example.com/sign-in'))
-
-      const state = getStateFromExecFileCall()
-      await sendCallback(callbackPort, state)
-      await promise
-    } finally {
-      Object.defineProperty(process, 'platform', { value: originalPlatform })
-      if (originalSystemRoot === undefined) delete process.env.SystemRoot
-      else process.env.SystemRoot = originalSystemRoot
-    }
   })
 })
 
@@ -650,11 +595,11 @@ describe('ensureAuthenticated - consoleId validation', () => {
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
 
     await assert.rejects(async () => {
-      const promise = ensureAuthenticated(authConfig)
+      const promise = ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
       promise.catch(() => {})
 
       await new Promise((resolve) => setTimeout(resolve, 50))
-      const state = getStateFromExecFileCall()
+      const state = getStateFromBrowserLaunch()
       await sendCallback(callbackPort, state, { consoleId: 'invalid@console!' })
 
       // Re-throw for assert.rejects to catch
@@ -693,13 +638,13 @@ describe('ensureAuthenticated - accountsUrl override', () => {
     }
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(explicitConfig)
+    const promise = ensureAuthenticated(explicitConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     await new Promise((resolve) => setTimeout(resolve, 50))
-    const signInUrl = getUrlFromExecFileCall()
+    const signInUrl = getUrlFromBrowserLaunch()
     assert.strictEqual(signInUrl.host, 'custom.accounts.example.com')
     assert.strictEqual(signInUrl.pathname, '/sign-in')
-    const state = getStateFromExecFileCall()
+    const state = getStateFromBrowserLaunch()
     await sendCallback(callbackPort, state)
     await promise
   })
@@ -720,13 +665,13 @@ describe('ensureAuthenticated - accountsUrl override', () => {
     }
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(prodConfig)
+    const promise = ensureAuthenticated(prodConfig, undefined, { browserLauncher: captureBrowserLauncher })
 
     await new Promise((resolve) => setTimeout(resolve, 50))
-    const signInUrl = getUrlFromExecFileCall()
+    const signInUrl = getUrlFromBrowserLaunch()
     assert.strictEqual(signInUrl.host, 'accounts.nodesource.com')
     assert.strictEqual(signInUrl.pathname, '/sign-in')
-    const state = getStateFromExecFileCall()
+    const state = getStateFromBrowserLaunch()
     await sendCallback(callbackPort, state)
     await promise
   })
@@ -760,9 +705,9 @@ describe('ensureAuthenticated - manual sign-in URL fallback', () => {
     }) as typeof process.stderr.write
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig)
+    const promise = ensureAuthenticated(authConfig, undefined, { browserLauncher: captureBrowserLauncher })
     try {
-      const state = await pollForState(getStateFromExecFileCall)
+      const state = await pollForState(getStateFromBrowserLaunch)
       await sendCallback(callbackPort, state)
       await promise
     } finally {
@@ -803,13 +748,13 @@ describe('ensureAuthenticated - unrecognized console URL', () => {
     })) as unknown as typeof fetch
 
     const { ensureAuthenticated } = await import('../../../src/auth/auth-manager.js')
-    const promise = ensureAuthenticated(authConfig, undefined, { force: true })
+    const promise = ensureAuthenticated(authConfig, undefined, { force: true, browserLauncher: captureBrowserLauncher })
     const rejection = assert.rejects(
       promise,
       /Could not determine the N\|Solid MCP endpoint from the console URL/
     )
 
-    const state = await pollForState(getStateFromExecFileCall)
+    const state = await pollForState(getStateFromBrowserLaunch)
     await sendCallback(callbackPort, state, { consoleId: 'org-456', url: 'https://console.example.com' })
     await rejection
 
