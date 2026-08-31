@@ -347,7 +347,14 @@ async function restore (payload: PayloadSnapshot, registration: readonly Registr
       writeDurableFile(entry.path, restoreBytes)
       // A private mode is part of the restored contract: the final file is
       // verified explicitly because creation modes are umask-filtered.
-      if ((statSync(entry.path).mode & 0o777) !== 0o600) return false
+      // Windows chmod only toggles the read-only bit, so the strongest mode
+      // contract it can express is "writable, not read-only" (files report
+      // 0o666); POSIX keeps the exact 0600 requirement.
+      const restoredMode = statSync(entry.path).mode & 0o777
+      const privateModeOk = process.platform === 'win32'
+        ? (restoredMode & 0o222) !== 0
+        : restoredMode === 0o600
+      if (!privateModeOk) return false
     }
     for (const entry of registration) {
       const restored = existsSync(entry.path) ? stateDigest(entry.path) : null

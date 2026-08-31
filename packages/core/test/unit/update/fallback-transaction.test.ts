@@ -676,7 +676,11 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       // The environment resolves a different canonical path after planning.
       const movedHome = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-moved-'))
       const previousHome = process.env.HOME
+      const previousUserProfile = process.env.USERPROFILE
       process.env.HOME = movedHome
+      // os.homedir() follows USERPROFILE on Windows; redirect both so the
+      // canonical path resolution actually moves on every platform.
+      process.env.USERPROFILE = movedHome
       try {
         const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot, transaction: fixture.identity })
         assert.equal(result.success, false)
@@ -684,6 +688,8 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       } finally {
         if (previousHome === undefined) delete process.env.HOME
         else process.env.HOME = previousHome
+        if (previousUserProfile === undefined) delete process.env.USERPROFILE
+        else process.env.USERPROFILE = previousUserProfile
         rmSync(movedHome, { recursive: true, force: true })
       }
       // Neither the planned nor the moved canonical path was created.

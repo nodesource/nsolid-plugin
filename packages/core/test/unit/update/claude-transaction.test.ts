@@ -9,6 +9,11 @@ import { executeClaudeTransaction, installedClaudePayloadRoot, restoreClaudeNati
 import type { OwnedPathKind } from '../../../src/update/fs-transaction.js'
 import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 
+// Windows chmod only toggles the read-only bit: a writable file reports mode
+// 0o666, so 0600 is not observable there. Assert the strongest mode contract
+// each platform can express.
+const privateFileMode = process.platform === 'win32' ? 0o666 : 0o600
+
 interface Fixture {
   home: string
   registryPath: string
@@ -290,9 +295,9 @@ describe('Claude native replacement transaction', () => {
 
       assert.equal(result.success, false)
       assert.equal(result.rollbackSucceeded, true)
-      // The restored registration evidence keeps the private 0600 mode even
+      // The restored registration evidence keeps the private mode even
       // though the live file existed with 0644 before the restore.
-      assert.equal(statSync(fixture.registryPath).mode & 0o777, 0o600)
+      assert.equal(statSync(fixture.registryPath).mode & 0o777, privateFileMode)
       assert.equal(readFileSync(fixture.registryPath, 'utf8'), fixture.registryBytes)
     } finally {
       rmSync(fixture.home, { recursive: true, force: true })
@@ -317,10 +322,10 @@ describe('Claude native replacement transaction', () => {
       const previousUmask = process.umask(0o277)
       try {
         // open(2) creation modes are umask-filtered: the restored file must
-        // still carry the exact private 0600 mode afterwards.
+        // still carry the exact private mode afterwards.
         const restored = await restoreClaudeNativeState({} as Parameters<typeof restoreClaudeNativeState>[0], registration)
         assert.equal(restored, true)
-        assert.equal(statSync(fixture.registryPath).mode & 0o777, 0o600)
+        assert.equal(statSync(fixture.registryPath).mode & 0o777, privateFileMode)
         assert.equal(readFileSync(fixture.registryPath, 'utf8'), fixture.registryBytes)
       } finally {
         process.umask(previousUmask)
@@ -435,12 +440,12 @@ describe('Claude native replacement transaction', () => {
       assert.equal(manifest.registration[0].path, fixture.registryPath)
       assert.equal(manifest.registration[0].existed, true)
       assert.equal(manifest.registration[0].digest, sha256(fixture.registryBytes))
-      assert.equal(manifest.registration[0].backup, 'registration/0000.bin')
+      assert.equal(manifest.registration[0].backup, path.join('registration', '0000.bin'))
       const backup0 = path.join(recoveryRoot, 'registration', '0000.bin')
       const backup1 = path.join(recoveryRoot, 'registration', '0001.bin')
       assert.equal(existsSync(backup0), true)
       assert.equal(existsSync(backup1), true)
-      assert.equal(statSync(backup0).mode & 0o777, 0o600)
+      assert.equal(statSync(backup0).mode & 0o777, privateFileMode)
       assert.equal(readFileSync(backup0).equals(Buffer.from(fixture.registryBytes)), true)
       assert.equal(readFileSync(backup1).equals(marketplacesBytes), true)
       // The manifest references the separately allocated same-volume payload backup.
@@ -481,7 +486,7 @@ describe('Claude native replacement transaction', () => {
       assert.equal(existsSync(path.join(recoveryRoot, 'recovery.json')), true)
       const backup0 = path.join(recoveryRoot, 'registration', '0000.bin')
       assert.equal(existsSync(backup0), true)
-      assert.equal(statSync(backup0).mode & 0o777, 0o600)
+      assert.equal(statSync(backup0).mode & 0o777, privateFileMode)
       assert.equal(sha256(readFileSync(backup0)), sha256(registryBytesBefore))
       const payloadSiblings = readdirSync(path.dirname(fixture.payloadRoot)).filter((name) => name.includes('.nsolid-payload-backup-'))
       assert.equal(payloadSiblings.length, 1)
