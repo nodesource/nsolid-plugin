@@ -191,6 +191,34 @@ describe('restoreConfigBackup', () => {
     assert.strictEqual(entry.backupPath, second.backupPath)
   })
 
+  it('orders by persisted sequence when the clock steps backwards between backups', () => {
+    // Regression: createdAt is wall-clock time and can move backwards (NTP
+    // step corrections, manual clock changes, VM snapshot restores). The
+    // persisted seq is monotonic, so it — not createdAt — decides which
+    // sequenced backup is newest.
+    const configPath = join(tmpDir, '.claude.json')
+    writeFileSync(configPath, 'v1', 'utf8')
+    const first = createConfigBackup('claude', configPath)!
+    writeFileSync(configPath, 'v2', 'utf8')
+    const second = createConfigBackup('claude', configPath)!
+
+    // Simulate a backwards clock step: the backup created LAST now claims an
+    // older createdAt. Any timestamp-based ordering would pick `first`.
+    const secondMetaPath = `${second.backupPath}.meta.json`
+    const secondMeta = JSON.parse(readFileSync(secondMetaPath, 'utf8'))
+    secondMeta.createdAt = new Date(new Date(secondMeta.createdAt).getTime() - 3_600_000).toISOString()
+    writeFileSync(secondMetaPath, JSON.stringify(secondMeta, null, 2) + '\n')
+
+    const list = listConfigBackups('claude')
+    assert.strictEqual(list[0].backupPath, second.backupPath)
+    assert.strictEqual(list[1].backupPath, first.backupPath)
+
+    writeFileSync(configPath, 'corrupt', 'utf8')
+    const restored = restoreConfigBackup('claude')
+    assert.strictEqual(restored.backupPath, second.backupPath)
+    assert.strictEqual(readFileSync(configPath, 'utf8'), 'v2')
+  })
+
   it('restores a specific backup when given a path', () => {
     const configPath = join(tmpDir, '.codex', 'config.toml')
     mkdirSync(join(tmpDir, '.codex'), { recursive: true })
@@ -284,12 +312,12 @@ describe('restoreConfigBackup', () => {
     assert.strictEqual(backups.length, workers, 'every concurrent backup was recorded')
     const seqs = backups.map((b) => JSON.parse(readFileSync(`${b.backupPath}.meta.json`, 'utf8')).seq as number)
     assert.strictEqual(new Set(seqs).size, seqs.length, `sequences must be unique across processes: ${seqs}`)
-    // Ordering invariant: within a createdAt tie, seq strictly decreases.
-    for (let i = 1; i < backups.length; i++) {
-      const [prev, cur] = [backups[i - 1], backups[i]]
+    // Ordering invariant: sequenced backups are newest-first strictly by seq
+    // (createdAt can interleave across processes; the persisted seq cannot).
+    for (let i = 1; i < seqs.length; i++) {
       assert.ok(
-        prev.createdAt > cur.createdAt || (prev.createdAt === cur.createdAt && seqs[i - 1] > seqs[i]),
-        `backups must be newest-first even when createdAt ties: ${prev.createdAt}#${seqs[i - 1]} then ${cur.createdAt}#${seqs[i]}`
+        seqs[i - 1] > seqs[i],
+        `sequences must strictly decrease in newest-first order: ${seqs.join(' > ')}`
       )
     }
   })

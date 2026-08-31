@@ -213,13 +213,16 @@ export function listConfigBackups (harness: HarnessType): BackupEntry[] {
     })
   }
 
-  // Newest first: createdAt is primary; ties (same millisecond) break by the
-  // persisted seq, which cannot tie. Legacy backups without seq (seq = 0)
-  // fall back to the meta file mtime among themselves.
+  // Newest first: the persisted seq is the source of truth for sequenced
+  // backups — createdAt is wall-clock time that can step backwards (NTP
+  // corrections, manual changes, VM snapshot restores), while seq is monotonic
+  // and cannot tie. Comparisons involving legacy entries without a seq
+  // (seq = 0) fall back to createdAt, tie-broken by the meta file mtime.
   return entries
-    .sort((a, b) =>
-      b.entry.createdAt.localeCompare(a.entry.createdAt) || b.seq - a.seq || b.metaMtimeMs - a.metaMtimeMs
-    )
+    .sort((a, b) => {
+      if (a.seq > 0 && b.seq > 0) return b.seq - a.seq
+      return b.entry.createdAt.localeCompare(a.entry.createdAt) || b.metaMtimeMs - a.metaMtimeMs
+    })
     .map(({ entry }) => entry)
 }
 
