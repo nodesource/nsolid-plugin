@@ -177,6 +177,24 @@ function writeTomlConfig (configPath: string, config: NormalizedMcpConfig): void
 }
 
 /**
+ * The field names NodeSource renders for each server, computed through the
+ * same pipeline `writeMcpConfig` applies before bytes reach disk (variable
+ * expansion plus the harness write format, which may add or rename fields).
+ * Field names do not depend on variable values, so this is safe to use as
+ * ownership evidence: the tracking snapshot must never describe fields that
+ * exist only because the user put them in the config.
+ */
+export function renderedMcpFieldNames (
+  harness: HarnessType,
+  servers: McpServerRef[],
+  variables?: Record<string, string>
+): Record<string, string[]> {
+  const resolved = variables !== undefined ? expandVariables(servers, variables) : servers
+  const rendered = applyHarnessWriteFormat(harness, { mcpServers: Object.fromEntries(resolved.map((server) => [server.name, { ...server }])) })
+  return Object.fromEntries(Object.entries(rendered.mcpServers).map(([name, server]) => [name, Object.keys(server)]))
+}
+
+/**
  * Apply harness-specific MCP server schema before writing to disk.
  *
  * Antigravity stores the endpoint as `serverUrl`; every other harness uses

@@ -15,14 +15,14 @@ import { getHarnessSkillsPath, linkSkillsToHarness, materializeSkillLink, unlink
 import { assertSafeSkillName } from '../utils/skill-name.js'
 import { getAdapter } from '../harnesses/index.js'
 import type { FallbackTransactionIdentity, UpdateError } from './types.js'
-import { appendFallbackJournalEntries, applyFallbackEntry, claimFallbackJournalMutation, fallbackJournalPath, registerFallbackStage, trackingDigest, valueDigest, pathDigest, pathKind, type FallbackJournal } from './fallback-journal.js'
+import { appendFallbackJournalEntries, applyFallbackEntry, claimFallbackJournalMutation, fallbackJournalPath, registerFallbackStage, trackingDigest, pathDigest, pathKind, type FallbackJournal } from './fallback-journal.js'
 import { planMcpReconciliation, type McpConfigPlanEntry } from './mcp-reconciliation.js'
 import { detectJsonMcpKey, editMcpJsonBytes, McpEditError } from './mcp-edit.js'
 import { editMcpTomlBytes, McpTomlEditError } from './mcp-toml-edit.js'
-import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerField, readMcpServerRecord } from './mcp-lookup.js'
+import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerField, readMcpServerRecord, valueDigest } from './mcp-lookup.js'
 import { readPackageVersion } from './package-manager.js'
 import { isStableVersion } from './version.js'
-import { isCanonicalPath, matchesTrackedOwnership } from './fallback-ownership.js'
+import { isCanonicalPath, matchesTrackedOwnership, mcpRecordIsExclusivelyOwned } from './fallback-ownership.js'
 
 export interface FallbackRefreshOptions {
   harness: HarnessType
@@ -179,13 +179,19 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
       }
 
       // Plan every MCP change grouped by owning file before anything is
-      // staged or written.
+      // staged or written. The desired harness-formatted values are shared
+      // with the tracking update: their keys are exactly the fields
+      // NodeSource renders, so tracking evidence can be filtered to owned
+      // keys instead of every field that survived in the config bytes.
       const configuredMcpServers = canReconcileMcp ? bundle.mcpServers : []
+      const desiredMcpValues = canReconcileMcp && credentials
+        ? Object.fromEntries(bundle.mcpServers.map((server) => [server.name, harnessServerValue(options.harness, server, credentials)]))
+        : {}
       const plan = canReconcileMcp && credentials
         ? planMcpReconciliation({
           previousServers: previousMcps.map((entry) => ({ name: entry.name, configPath: path.resolve(entry.configPath), fields: entry.fields })),
           desiredServers: bundle.mcpServers,
-          desiredValues: Object.fromEntries(bundle.mcpServers.map((server) => [server.name, harnessServerValue(options.harness, server, credentials)])),
+          desiredValues: desiredMcpValues,
           canonicalConfigPath: canonicalConfigPath ?? undefined,
         })
         : { kind: 'planned' as const, entries: [] as McpConfigPlanEntry[], destinations: {} }
@@ -298,7 +304,7 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
               if (staged !== undefined) return mcpFieldDigestsFromBytes(configPath, staged, name, { preferredKey })
               return readMcpFieldDigests(configPath, name, { preferredKey })
             }
-            const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName, resolveFieldDigests)
+            const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName, desiredMcpValues, resolveFieldDigests)
             journal = await registerFallbackStage(journal, options.transaction!.trackingPath, { bytes: Buffer.from(JSON.stringify(updatedTracking, null, 2) + '\n', 'utf8') })
           }
         }
@@ -382,7 +388,7 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
         // swap installs exactly those.
         journal = await applyFallbackEntry(journal, options.transaction!.trackingPath)
       } else {
-        const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName)
+        const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName, desiredMcpValues)
         await writeTrackingFile(updatedTracking)
       }
       return { success: true }
@@ -646,6 +652,7 @@ function buildTrackingUpdate (
   plan: { destinations: Readonly<Record<string, string>> },
   mcpServers: BundleDescriptor['mcpServers'],
   staleByName: Map<string, TrackingData['mcpServers'][number]>,
+  desiredValues: Readonly<Record<string, Record<string, unknown>>>,
   resolveFieldDigests: (configPath: string, name: string) => Record<string, string> | undefined = (configPath, name) => readMcpFieldDigests(configPath, name, { preferredKey: harnessMcpKey(harness) })
 ): TrackingData {
   const tracking = JSON.parse(JSON.stringify(original)) as TrackingData
@@ -691,28 +698,28 @@ function buildTrackingUpdate (
   for (const server of mcpServers) {
     const configPath = plan.destinations[server.name]
     if (!configPath) continue
+    // Tracking evidence describes ONLY the fields NodeSource renders: the
+    // keys of the desired harness-formatted value. Foreign fields that merely
+    // survived in the config bytes must never enter tracking, or the next
+    // refresh would treat them as owned and delete them (reconciliation
+    // removes tracked fields absent from the desired render).
+    const digests = resolveFieldDigests(configPath, server.name)
+    const ownedNames = Object.keys(desiredValues[server.name] ?? {})
+    const fields = digests === undefined
+      ? undefined
+      : Object.fromEntries(ownedNames.filter((name) => Object.hasOwn(digests, name)).map((name) => [name, digests[name]]))
     const existing = tracking.mcpServers.find((entry) => entry.harness === harness && entry.name === server.name)
     if (existing) {
       existing.configPath = path.resolve(configPath)
       existing.configuredAt = now
-      existing.fields = resolveFieldDigests(configPath, server.name)
+      existing.fields = fields
     } else {
-      tracking.mcpServers.push({ name: server.name, configPath: path.resolve(configPath), harness, configuredAt: now, fields: resolveFieldDigests(configPath, server.name) })
+      tracking.mcpServers.push({ name: server.name, configPath: path.resolve(configPath), harness, configuredAt: now, fields })
     }
   }
   tracking.bundleVersion = bundle.version
   tracking.bundleVersions = { ...(tracking.bundleVersions ?? {}), [harness]: bundle.version }
   return tracking
-}
-
-function mcpRecordIsExclusivelyOwned (configPath: string, name: string, ownedFields: Record<string, string> | undefined, preferredKey: 'mcp' | 'mcpServers'): boolean {
-  if (!ownedFields || Object.keys(ownedFields).length === 0) return false
-  const current = readMcpFieldDigests(configPath, name, { preferredKey })
-  if (!current) return false
-  const ownedNames = Object.keys(ownedFields).sort()
-  const currentNames = Object.keys(current).sort()
-  return ownedNames.length === currentNames.length && ownedNames.every((field, index) =>
-    field === currentNames[index] && ownedFields[field] === current[field])
 }
 
 function failure (code: string, message: string, rollback?: { attempted: boolean; succeeded: boolean }): FallbackRefreshResult {

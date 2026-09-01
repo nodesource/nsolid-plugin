@@ -1,7 +1,7 @@
+import { createHash } from 'node:crypto'
 import { parseJsonc, readJsoncFile, readTomlFile } from '../utils/config.js'
 import { parse as parseToml } from 'smol-toml'
 import type { HarnessType } from '../types.js'
-import { valueDigest } from './fallback-journal.js'
 
 export type PreferredMcpKey = 'mcp' | 'mcpServers'
 
@@ -100,4 +100,22 @@ export function mcpFieldDigestsFromBytes (configPath: string, bytes: Buffer | st
     if (!record || typeof record !== 'object' || Array.isArray(record)) return undefined
     return Object.fromEntries(Object.entries(record as Record<string, unknown>).map(([field, value]) => [field, valueDigest(value)]))
   } catch { return undefined }
+}
+
+/**
+ * Single source of truth for the per-field digest evidence stored in tracking
+ * entries and verified by the ownership gate. Field digests are computed from
+ * a stable serialization so nested objects compare equal regardless of key
+ * order, exactly as `JSON.stringify` produced them when planning.
+ */
+export function valueDigest (value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(stableValue(value)) ?? 'undefined').digest('hex')
+}
+
+function stableValue (value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, stableValue(child)]))
+  }
+  return value
 }

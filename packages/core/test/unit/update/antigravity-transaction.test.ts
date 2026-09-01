@@ -47,6 +47,39 @@ describe('Antigravity staged plugin validation', () => {
     }
   })
 
+  it('rejects identity-less plugin.json, foreign identities, and substring import keys', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-agy-identity-'))
+    try {
+      mkdirSync(path.join(root, 'skills', 'example'), { recursive: true })
+      const pluginJson = path.join(root, 'plugin.json')
+      const bundleJson = path.join(root, 'bundle.json')
+      writeFileSync(bundleJson, JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
+      writeFileSync(path.join(root, 'skills', 'example', 'SKILL.md'), '# example')
+      const manifest = path.join(root, 'import_manifest.json')
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin' } } }))
+
+      // plugin.json without the canonical identity.
+      writeFileSync(pluginJson, JSON.stringify({ description: 'no name' }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // A lookalike name.
+      writeFileSync(pluginJson, JSON.stringify({ name: 'not-nsolid-plugin' }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // A version that disagrees with bundle.json.
+      writeFileSync(pluginJson, JSON.stringify({ name: 'nsolid-plugin', version: '0.0.1' }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // bundle.json claiming a foreign identity.
+      writeFileSync(pluginJson, JSON.stringify({ name: 'nsolid-plugin' }))
+      writeFileSync(bundleJson, JSON.stringify({ name: 'other-plugin', version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      writeFileSync(bundleJson, JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
+      // A substring import key whose value is not a plugin import.
+      writeFileSync(manifest, JSON.stringify({ imports: { 'my-nsolid-plugin-helper': { path: '/keep' } } }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('requires unrelated manifest imports to survive plugin replacement byte-for-byte', () => {
     // Array form: an in-place splice of only the owned entry keeps every
     // outside byte; dropping the sibling import removes foreign bytes.
@@ -197,6 +230,119 @@ describe('Antigravity staged plugin validation', () => {
         assert.deepEqual([...containers.root, ...containers.manifest], [])
         assert.equal(readFileSync(path.join(fixture.pluginRoot, 'skills/example/SKILL.md'), 'utf8'), '# v1.0.0\n')
         assert.equal(existsSync(path.join(fixture.pluginRoot, 'plugin.json')), true)
+      } finally {
+        restoreHome(fixture)
+      }
+    })
+
+    function failingSyncItem (): UpdatePlanItem {
+      return {
+        ...agyItem(),
+        steps: [{ kind: 'command' as const, description: 'agy sync', command: { executable: 'agy', args: ['sync'], timeoutMs: 1_000 } }],
+      }
+    }
+
+    function findBackupPath (fixture: { home: string; pluginRoot: string; manifestPath: string }): { rootBackup: string; manifestBackup: string } {
+      const configDir = path.join(fixture.home, '.gemini', 'config')
+      const containers = backupContainers(configDir)
+      assert.equal(containers.root.length, 1)
+      assert.equal(containers.manifest.length, 1)
+      return {
+        rootBackup: path.join(configDir, 'plugins', containers.root[0], path.basename(fixture.pluginRoot)),
+        manifestBackup: path.join(configDir, containers.manifest[0], path.basename(fixture.manifestPath)),
+      }
+    }
+
+    it('refuses to restore a tampered root backup and preserves both backups', async () => {
+      const fixture = setupInstalledFixture()
+      try {
+        const result = await executeAntigravityTransaction(failingSyncItem(), {
+          run: async () => {
+            rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
+            const { rootBackup } = findBackupPath(fixture)
+            writeFileSync(path.join(rootBackup, 'plugin.json'), '{"name":"tampered"}')
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          },
+        })
+
+        assert.equal(result.success, false)
+        assert.equal(result.rollbackAttempted, true)
+        assert.equal(result.rollbackSucceeded, false)
+        // The live state was never replaced: the post-command damage remains.
+        assert.equal(existsSync(path.join(fixture.pluginRoot, 'plugin.json')), false)
+        const containers = backupContainers(path.join(fixture.home, '.gemini', 'config'))
+        assert.equal(containers.root.length, 1)
+        assert.equal(containers.manifest.length, 1)
+      } finally {
+        restoreHome(fixture)
+      }
+    })
+
+    it('refuses to restore a tampered manifest backup and preserves both backups', async () => {
+      const fixture = setupInstalledFixture()
+      try {
+        const result = await executeAntigravityTransaction(failingSyncItem(), {
+          run: async () => {
+            rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
+            const { manifestBackup } = findBackupPath(fixture)
+            writeFileSync(manifestBackup, '{"imports":{}}')
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          },
+        })
+
+        assert.equal(result.success, false)
+        assert.equal(result.rollbackAttempted, true)
+        assert.equal(result.rollbackSucceeded, false)
+        // The live manifest was never replaced with the tampered backup bytes.
+        assert.match(readFileSync(fixture.manifestPath, 'utf8'), /nsolid-plugin/)
+        const containers = backupContainers(path.join(fixture.home, '.gemini', 'config'))
+        assert.equal(containers.root.length, 1)
+        assert.equal(containers.manifest.length, 1)
+      } finally {
+        restoreHome(fixture)
+      }
+    })
+
+    it('reports failure when the restored state fails strict identity validation', async () => {
+      const fixture = setupInstalledFixture()
+      try {
+        // The pre-update identity-less plugin can be restored byte-exactly,
+        // yet must never be reported as a successful rollback.
+        writeFileSync(path.join(fixture.pluginRoot, 'plugin.json'), JSON.stringify({ description: 'identity-less' }))
+        const result = await executeAntigravityTransaction(failingSyncItem(), {
+          run: async () => {
+            rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          },
+        })
+
+        assert.equal(result.success, false)
+        assert.equal(result.rollbackAttempted, true)
+        assert.equal(result.rollbackSucceeded, false)
+        const containers = backupContainers(path.join(fixture.home, '.gemini', 'config'))
+        assert.equal(containers.root.length, 1)
+        assert.equal(containers.manifest.length, 1)
+      } finally {
+        restoreHome(fixture)
+      }
+    })
+
+    it('restores the original plugin and cleans both backups when a command fails', async () => {
+      const fixture = setupInstalledFixture()
+      try {
+        const result = await executeAntigravityTransaction(failingSyncItem(), {
+          run: async () => {
+            writeFileSync(path.join(fixture.pluginRoot, 'skills/example/SKILL.md'), '# substituted\n')
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          },
+        })
+
+        assert.equal(result.success, false)
+        assert.equal(result.rollbackAttempted, true)
+        assert.equal(result.rollbackSucceeded, true)
+        assert.equal(readFileSync(path.join(fixture.pluginRoot, 'skills/example/SKILL.md'), 'utf8'), '# v1.0.0\n')
+        const containers = backupContainers(path.join(fixture.home, '.gemini', 'config'))
+        assert.deepEqual([...containers.root, ...containers.manifest], [])
       } finally {
         restoreHome(fixture)
       }

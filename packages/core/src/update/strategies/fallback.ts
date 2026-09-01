@@ -10,7 +10,7 @@ import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromP
 import { getTrackingFilePath, getSkillsDir, resolveHome } from '../../utils/path.js'
 import { getAdapter } from '../../harnesses/index.js'
 import { getHarnessSkillsPath } from '../../skills/skill-linker.js'
-import { beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, markFallbackJournalMutating, recoverFallbackJournal, reloadFallbackJournal, restoreFallbackJournal, trackingDigest, type FallbackJournal } from '../fallback-journal.js'
+import { beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, markFallbackJournalMutating, pathDigest, pathKind, recoverFallbackJournal, reloadFallbackJournal, restoreFallbackJournal, trackingDigest, type FallbackJournal } from '../fallback-journal.js'
 import { cleanupNpmArtifact } from '../version-source.js'
 import { managerArgsForIdentity, verifyLocalArtifact } from '../package-manager.js'
 import { readTrackingFile } from '../../skills/skill-tracker.js'
@@ -175,6 +175,15 @@ export const fallbackStrategy: UpdateStrategy = {
           preserveRecoveryArtifacts = true
           return failedResult(item, { code: 'FALLBACK_STATE_UNPROVEN', message: 'Fallback child completed but the resulting owned state could not be captured safely' }, { attempted: false })
         }
+        // The child's journal is trusted only when its live state independently
+        // proves what it claims: applied stages match their registered digest,
+        // deletions are gone, and untouched entries are byte-identical to the
+        // journaled original. Comparing against expectedCurrentDigest is
+        // meaningless here — capture overwrote it with the current live state.
+        if (!await journalProvesAppliedState(journal)) {
+          const recovered = await restoreFallbackJournal(journal)
+          return failedResult(item, { code: recovered ? 'FALLBACK_VALIDATION_FAILED' : 'FALLBACK_ROLLBACK_FAILED', message: recovered ? 'Fallback child completed without proving the planned owned-state mutation' : 'Fallback validation failed and parent recovery was incomplete' }, { attempted: true, succeeded: recovered })
+        }
         const tracking = await readTrackingFile()
         const bundleEvidence = tracking?.bundleVersions?.[item.target as keyof typeof tracking.bundleVersions] ?? tracking?.bundleVersion
         if (!tracking || bundleEvidence !== item.version.latest || !validateFallbackPostconditions(tracking, item.target)) {
@@ -253,7 +262,9 @@ function detectExecutor (): 'npm-exec' | 'pnpm-dlx' | undefined {
   return undefined
 }
 
-function validateFallbackPostconditions (tracking: Awaited<ReturnType<typeof readTrackingFile>>, harness: UpdatePlanItem['target']): boolean {
+type TrackingDataOrNull = Awaited<ReturnType<typeof readTrackingFile>>
+
+function validateFallbackPostconditions (tracking: TrackingDataOrNull, harness: UpdatePlanItem['target']): boolean {
   if (!tracking || harness === 'cli') return false
   const scopedSkills = tracking.skills.filter((entry) => entry.harnesses.includes(harness))
   if (scopedSkills.some((entry) => {
@@ -261,5 +272,47 @@ function validateFallbackPostconditions (tracking: Awaited<ReturnType<typeof rea
     return !path.isAbsolute(skillPath) || !existsSync(skillPath)
   })) return false
   const scopedMcp = tracking.mcpServers.filter((entry) => entry.harness === harness)
-  return scopedMcp.every((entry) => path.isAbsolute(entry.configPath) && existsSync(entry.configPath))
+  if (!scopedMcp.every((entry) => path.isAbsolute(entry.configPath) && existsSync(entry.configPath))) return false
+  // Postcondition: tracked-ownership evidence consistency — a SUBSET check by
+  // design. Every tracked field must still match the live configuration
+  // re-read through the field-digests module (a lying tracking file, a drift
+  // in an owned field, or a write into the wrong container fails the gate),
+  // but preserved user fields in the live record are tolerated here. This is
+  // deliberately NOT the exclusive-ownership gate in fallback-ownership.ts,
+  // which requires an exact field set before removal decisions.
+  const preferredKey = harnessMcpKey(harness as HarnessType)
+  return scopedMcp.every((entry) => {
+    if (!entry.fields || Object.keys(entry.fields).length === 0) return false
+    const live = readMcpFieldDigests(entry.configPath, entry.name, { preferredKey })
+    if (!live) return false
+    return Object.entries(entry.fields).every(([name, expectedDigest]) => live[name] === expectedDigest)
+  })
+}
+
+/**
+ * Independently prove the child's claimed mutation from the journal and the
+ * live filesystem: applied staged entries must carry exactly the registered
+ * stage digest, applied deletions must be gone, and entries the child never
+ * staged must still be byte-identical to the journaled original.
+ */
+async function journalProvesAppliedState (journal: FallbackJournal): Promise<boolean> {
+  for (const entry of journal.entries) {
+    const target = path.resolve(entry.path)
+    if (entry.stageDigest !== undefined) {
+      if (entry.applied !== true) return false
+      if (await pathDigest(target) !== entry.stageDigest) return false
+      continue
+    }
+    if (entry.applied === true) {
+      if (await pathKind(target) !== 'missing') return false
+      continue
+    }
+    const kind = await pathKind(target)
+    if (entry.existed === true) {
+      if (kind === 'missing' || entry.digest === undefined || await pathDigest(target) !== entry.digest) return false
+    } else if (kind !== 'missing') {
+      return false
+    }
+  }
+  return true
 }

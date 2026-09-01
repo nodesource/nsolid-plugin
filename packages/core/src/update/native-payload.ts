@@ -29,6 +29,11 @@ export function normalizedPayloadPath (value: string | undefined): string {
   return normalized
 }
 
+/** Hex sha256 of a byte buffer, shared by the native transactions. */
+export function sha256Hex (value: Buffer): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
 export function nativePayloadTreeDigest (root: string): string | undefined {
   try {
     const resolvedRoot = path.resolve(root)

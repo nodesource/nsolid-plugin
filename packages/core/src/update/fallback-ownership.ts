@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { getAdapter } from '../harnesses/index.js'
+import { readMcpFieldDigests, type PreferredMcpKey } from './mcp-lookup.js'
 import { getHarnessSkillsPath } from '../skills/skill-linker.js'
 import type { TrackingData } from '../skills/skill-tracker.js'
 import type { FallbackTransactionIdentity } from './types.js'
@@ -54,4 +55,23 @@ export function isSameOrContained (candidate: string, parent: string): boolean {
   if (relative === '') return true
   if (path.isAbsolute(relative)) return false
   return relative !== '..' && !relative.startsWith(`..${path.sep}`)
+}
+
+/**
+ * Exclusive-ownership gate for MCP server records (one of two MCP ownership
+ * invariants; the postcondition check in strategies/fallback.ts is the other,
+ * and is a subset match by design). A record may be REMOVED only when the
+ * live per-field digests match the owned evidence exactly — same field set,
+ * same digests — because a foreign field inside the record means the user
+ * co-owns it. Routes through the field-digests module so the ownership rule
+ * and the tracking evidence can never drift apart.
+ */
+export function mcpRecordIsExclusivelyOwned (configPath: string, name: string, ownedFields: Record<string, string> | undefined, preferredKey: PreferredMcpKey): boolean {
+  if (!ownedFields || Object.keys(ownedFields).length === 0) return false
+  const current = readMcpFieldDigests(configPath, name, { preferredKey })
+  if (!current) return false
+  const ownedNames = Object.keys(ownedFields).sort()
+  const currentNames = Object.keys(current).sort()
+  return ownedNames.length === currentNames.length && ownedNames.every((field, index) =>
+    field === currentNames[index] && ownedFields[field] === current[field])
 }

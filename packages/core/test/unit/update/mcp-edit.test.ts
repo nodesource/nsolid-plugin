@@ -1,12 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { editMcpJsonBytes, McpEditError, readMcpNodeValue } from '../../../src/update/mcp-edit.js'
-import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerRecord } from '../../../src/update/mcp-lookup.js'
+import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerRecord, valueDigest } from '../../../src/update/mcp-lookup.js'
 import { parseJsonc } from '../../../src/utils/config.js'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { valueDigest } from '../../../src/update/fallback-journal.js'
 
 describe('MCP byte-preserving AST edits', () => {
   it('rewrites only the owned server and preserves comments, foreign servers, and formatting', () => {

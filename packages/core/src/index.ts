@@ -31,6 +31,7 @@ import {
 } from './skills/skill-tracker.js'
 import {
   writeMcpConfig,
+  renderedMcpFieldNames,
   removeMcpConfig,
   addTrackedMcps,
   removeTrackedMcps,
@@ -375,7 +376,8 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     }
 
     if (mcpConfigPath && result.mcpServersConfigured.length > 0) {
-      const mcpEntries = bundle.mcpServers.map((s) => ({ name: s.name, configPath: mcpConfigPath }))
+      const rendered = renderedMcpFieldNames(options.harness, bundle.mcpServers, variables)
+      const mcpEntries = bundle.mcpServers.map((s) => ({ name: s.name, configPath: mcpConfigPath, ownedFields: rendered[s.name] }))
       await addTrackedMcps(mcpEntries, options.harness, logger)
     }
   } catch (err) {

@@ -1,6 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { findNodeAtLocation, getNodeValue, parseTree, type Node } from 'jsonc-parser'
 import { resolveHome } from '../utils/path.js'
@@ -9,7 +8,7 @@ import { isStableVersion } from './version.js'
 import { copyOwnedPath, createSiblingBackupPath, ownedPathKind, removeOwnedPath } from './fs-transaction.js'
 import type { SiblingBackupPath } from './fs-transaction.js'
 import { runTransactionCommands } from './transaction-commands.js'
-import { nativePayloadTreeDigest } from './native-payload.js'
+import { nativePayloadTreeDigest, sha256Hex } from './native-payload.js'
 
 export interface AntigravityTransactionResult {
   success: boolean
@@ -19,8 +18,8 @@ export interface AntigravityTransactionResult {
 }
 
 interface AntigravityBackupSnapshot {
-  root: { target: string; backup: string; existed: boolean; complete: boolean }
-  manifest: { target: string; backup: string; existed: boolean; complete: boolean }
+  root: { target: string; backup: string; existed: boolean; complete: boolean; originalDigest?: string }
+  manifest: { target: string; backup: string; existed: boolean; complete: boolean; originalDigest?: string }
 }
 
 /** Injectable dependencies for deterministic tests. */
@@ -75,13 +74,15 @@ export async function executeAntigravityTransaction (
   let rollbackAttempted = false
   let preserveBackup = false
   let originalManifestText: string | undefined
+  let originalRootDigest: string | undefined
+  let originalManifestDigest: string | undefined
   // Exact post-mutation state this transaction is authorized to replace
   // during rollback.
   let authorizedRootDigest: string | null | undefined
   let authorizedManifestDigest: string | null | undefined
   const backupSnapshot = (): AntigravityBackupSnapshot => ({
-    root: { target: pluginRoot, backup: rootBackup, existed: rootExisted, complete: rootBackupComplete },
-    manifest: { target: manifestPath, backup: manifestBackup, existed: manifestExisted, complete: manifestBackupComplete },
+    root: { target: pluginRoot, backup: rootBackup, existed: rootExisted, complete: rootBackupComplete, originalDigest: originalRootDigest },
+    manifest: { target: manifestPath, backup: manifestBackup, existed: manifestExisted, complete: manifestBackupComplete, originalDigest: originalManifestDigest },
   })
   // Single guarded post-mutation rollback path: a failed restore always
   // preserves both sibling backup containers for manual recovery.
@@ -104,11 +105,15 @@ export async function executeAntigravityTransaction (
     try {
       if (rootExisted) {
         await copyOwnedPath(pluginRoot, rootBackup)
+        // Persist the original digests before any mutation; the backup must
+        // be authenticated against these, never against itself.
+        originalRootDigest = treeDigest(rootBackup)
         rootBackupComplete = true
       }
       if (manifestExisted) {
         const originalManifest = await readFile(manifestPath)
         originalManifestText = originalManifest.toString('utf8')
+        originalManifestDigest = sha256Hex(originalManifest)
         await writeFile(manifestBackup, originalManifest, { mode: 0o600 })
         manifestBackupComplete = true
       }
@@ -189,8 +194,11 @@ export function validateStagedPlugin (pluginRoot: string, manifestPath: string, 
   if (!existsSync(path.join(pluginRoot, 'skills'))) return false
   try {
     const plugin = JSON.parse(readFileSync(path.join(pluginRoot, 'plugin.json'), 'utf8')) as unknown
-    if (!plugin || typeof plugin !== 'object') return false
-    const bundle = JSON.parse(readFileSync(path.join(pluginRoot, 'bundle.json'), 'utf8')) as { version?: unknown; skills?: Array<{ name?: unknown; path?: unknown }> }
+    if (!isPluginIdentity(plugin)) return false
+    const bundle = JSON.parse(readFileSync(path.join(pluginRoot, 'bundle.json'), 'utf8')) as { name?: unknown; version?: unknown; skills?: Array<{ name?: unknown; path?: unknown }> }
+    // bundle.json must never claim a foreign identity or disagree on version.
+    if (bundle.name !== undefined && bundle.name !== 'nsolid-plugin') return false
+    if (plugin.version !== undefined && plugin.version !== bundle.version) return false
     if (expectedVersion !== undefined && (!isStableVersion(bundle.version) || bundle.version !== expectedVersion)) return false
     if (expectedDigest && nativePayloadTreeDigest(pluginRoot) !== expectedDigest) return false
     if (!Array.isArray(bundle.skills) || bundle.skills.length === 0) return false
@@ -203,12 +211,17 @@ export function validateStagedPlugin (pluginRoot: string, manifestPath: string, 
     if (Array.isArray(manifest.imports)) return manifest.imports.some((entry) => isPluginImport(entry))
     if (manifest.imports && typeof manifest.imports === 'object') {
       return Object.entries(manifest.imports as Record<string, unknown>).some(([key, value]) =>
-        key.includes('nsolid-plugin') || isPluginImport(value))
+        key === 'nsolid-plugin' || isPluginImport(value))
     }
     return false
   } catch {
     return false
   }
+}
+
+/** plugin.json must carry the canonical plugin identity, never a lookalike. */
+function isPluginIdentity (value: unknown): value is { name: 'nsolid-plugin'; version?: unknown } {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && (value as { name?: unknown }).name === 'nsolid-plugin'
 }
 
 /**
@@ -284,18 +297,25 @@ function treeDigest (target: string): string | undefined {
   return nativePayloadTreeDigest(target)
 }
 
-function sha256Hex (value: Buffer): string {
-  return createHash('sha256').update(value).digest('hex')
-}
-
 async function restore (
   snapshot: AntigravityBackupSnapshot,
   authorized: { rootDigest?: string | null; manifestDigest?: string | null }
 ): Promise<boolean> {
   try {
-    const rootOriginalDigest = snapshot.root.existed ? treeDigest(snapshot.root.backup) : null
-    const manifestOriginalDigest = snapshot.manifest.existed ? sha256Hex(readFileSync(snapshot.manifest.backup)) : null
     if (!snapshot.root.complete || !snapshot.manifest.complete) return false
+    // Authenticate the backup bytes against the digests persisted at backup
+    // time, before any live path is touched; a backup can never pass by
+    // matching itself.
+    if (snapshot.root.existed) {
+      if (snapshot.root.originalDigest === undefined || !existsSync(snapshot.root.backup)) return false
+      if (treeDigest(snapshot.root.backup) !== snapshot.root.originalDigest) return false
+    }
+    if (snapshot.manifest.existed) {
+      if (snapshot.manifest.originalDigest === undefined || !existsSync(snapshot.manifest.backup)) return false
+      if (sha256Hex(readFileSync(snapshot.manifest.backup)) !== snapshot.manifest.originalDigest) return false
+    }
+    const rootOriginalDigest = snapshot.root.existed ? snapshot.root.originalDigest : null
+    const manifestOriginalDigest = snapshot.manifest.existed ? snapshot.manifest.originalDigest : null
     // Only restore while the live bytes are still exactly the state this
     // transaction produced (or its original state). Concurrent drift is never
     // overwritten.

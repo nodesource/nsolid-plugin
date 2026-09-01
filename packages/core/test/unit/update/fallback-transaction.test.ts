@@ -5,7 +5,8 @@ import { cp as realFsCp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { refreshOwnedInstallation } from '../../../src/update/fallback-transaction.js'
-import { appendFallbackJournalEntries, applyFallbackEntry, beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, fallbackJournalPath, markFallbackJournalMutating, reloadFallbackJournal, registerFallbackStage, restoreFallbackJournal, trackingDigest, valueDigest } from '../../../src/update/fallback-journal.js'
+import { appendFallbackJournalEntries, applyFallbackEntry, beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, fallbackJournalPath, markFallbackJournalMutating, reloadFallbackJournal, registerFallbackStage, restoreFallbackJournal, trackingDigest } from '../../../src/update/fallback-journal.js'
+import { valueDigest } from '../../../src/update/mcp-lookup.js'
 import { randomUUID } from 'node:crypto'
 import type { FallbackTransactionIdentity } from '../../../src/update/types.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
@@ -346,9 +347,162 @@ describe('fallback refresh transaction', () => {
     // Tracking digests must describe the final bytes, never the stale ones.
     assert.equal(tracked?.fields?.url, valueDigest('https://new.example.com/mcp'))
     assert.equal(tracked?.fields?.note, undefined)
-    assert.equal(tracked?.fields?.user_token, valueDigest('user-secret'))
+    // user_token survived refresh #1 in the config bytes; tracking must not
+    // record it as owned, or refresh #2 would delete it.
+    assert.equal(tracked?.fields?.user_token, undefined)
     assert.equal(tracked?.fields?.headers, valueDigest({}))
     assert.equal(tracked?.fields?.name, valueDigest('alpha-console'))
+    rmSync(sourceRoot, { recursive: true, force: true })
+  })
+
+  it('never tracks foreign MCP fields and preserves them across two refreshes of the same bundle', async () => {
+    // Reviewer scenario: refresh #1 records digests of every field present in
+    // the staged bytes (including a user-added user_token); refresh #2 then
+    // deletes it because reconciliation removes tracked fields absent from
+    // the desired render. Tracking must only ever describe desired-render
+    // fields so a foreign field survives both refreshes.
+    const skillPath = path.join(home, '.agents', 'skills', 'tracked')
+    mkdirSync(skillPath, { recursive: true })
+    writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
+    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
+    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
+    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
+    const bundlePath = path.join(sourceRoot, 'bundle.json')
+    writeJson(bundlePath, {
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
+      mcpServers: [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }],
+    })
+    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
+      serviceToken: 'token',
+      organizationId: 'org',
+      saasToken: 'saas',
+      consoleUrl: 'https://console.example.com',
+      mcpUrl: 'https://new.example.com/mcp',
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    })
+    const configPath = path.join(home, '.codex', 'config.toml')
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    const originalConfig = [
+      '[mcp_servers.alpha-console]',
+      'url = "https://old.example.com/mcp"',
+      'user_token = "user-secret"',
+    ].join('\r\n') + '\r\n'
+    writeFileSync(configPath, originalConfig)
+    writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: 'codex',
+      bundleVersions: { codex: '1.0.0' },
+      skills: [{ name: 'tracked', path: skillPath, paths: { codex: skillPath }, installedAt: new Date().toISOString(), harnesses: ['codex'] }],
+      mcpServers: [{
+        name: 'alpha-console',
+        configPath,
+        harness: 'codex',
+        configuredAt: new Date().toISOString(),
+        fields: { url: valueDigest('https://old.example.com/mcp') },
+      }],
+    })
+
+    const first = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    assert.equal(first.success, true, JSON.stringify(first))
+
+    const configAfterFirst = readFileSync(configPath, 'utf8')
+    assert.equal(configAfterFirst.includes('user_token = "user-secret"'), true, 'refresh #1 must leave the foreign field in the config bytes')
+    const trackingAfterFirst = await readTrackingFile()
+    const trackedAfterFirst = trackingAfterFirst?.mcpServers.find((entry) => entry.name === 'alpha-console')
+    // Only the desired-render fields enter tracking; user_token is foreign.
+    assert.deepEqual(Object.keys(trackedAfterFirst?.fields ?? {}).sort(), ['headers', 'name', 'url'])
+    assert.equal(trackedAfterFirst?.fields?.url, valueDigest('https://new.example.com/mcp'))
+
+    const second = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    assert.equal(second.success, true, JSON.stringify(second))
+
+    // Reviewer's exact regression: refresh #2 of the same bundle must not
+    // delete the user-owned field.
+    const configAfterSecond = readFileSync(configPath, 'utf8')
+    assert.equal(configAfterSecond.includes('user_token = "user-secret"'), true, 'refresh #2 must not delete the foreign field it never owned')
+    const trackingAfterSecond = await readTrackingFile()
+    const trackedAfterSecond = trackingAfterSecond?.mcpServers.find((entry) => entry.name === 'alpha-console')
+    assert.deepEqual(Object.keys(trackedAfterSecond?.fields ?? {}).sort(), ['headers', 'name', 'url'])
+    assert.equal(trackedAfterSecond?.fields?.url, valueDigest('https://new.example.com/mcp'))
+    rmSync(sourceRoot, { recursive: true, force: true })
+  })
+
+  it('keeps tracking desired-field digests updated when a desired value changes between refreshes', async () => {
+    const skillPath = path.join(home, '.agents', 'skills', 'tracked')
+    mkdirSync(skillPath, { recursive: true })
+    writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
+    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
+    const bundleVersion = (url: string): unknown => ({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
+      mcpServers: [{ name: 'alpha-console', url, headers: {} }],
+    })
+    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
+    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
+    const bundlePath = path.join(sourceRoot, 'bundle.json')
+    writeJson(bundlePath, bundleVersion('https://one.example.com/mcp'))
+    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
+      serviceToken: 'token',
+      organizationId: 'org',
+      saasToken: 'saas',
+      consoleUrl: 'https://console.example.com',
+      mcpUrl: 'https://one.example.com/mcp',
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    })
+    const configPath = path.join(home, '.codex', 'config.toml')
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    const originalConfig = [
+      '[mcp_servers.alpha-console]',
+      'url = "https://old.example.com/mcp"',
+      'user_token = "user-secret"',
+    ].join('\r\n') + '\r\n'
+    writeFileSync(configPath, originalConfig)
+    writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: 'codex',
+      bundleVersions: { codex: '1.0.0' },
+      skills: [{ name: 'tracked', path: skillPath, paths: { codex: skillPath }, installedAt: new Date().toISOString(), harnesses: ['codex'] }],
+      mcpServers: [{
+        name: 'alpha-console',
+        configPath,
+        harness: 'codex',
+        configuredAt: new Date().toISOString(),
+        fields: { url: valueDigest('https://old.example.com/mcp') },
+      }],
+    })
+
+    const first = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    assert.equal(first.success, true, JSON.stringify(first))
+    const trackingAfterFirst = await readTrackingFile()
+    const trackedAfterFirst = trackingAfterFirst?.mcpServers.find((entry) => entry.name === 'alpha-console')
+    assert.equal(trackedAfterFirst?.fields?.url, valueDigest('https://one.example.com/mcp'))
+
+    // Second refresh with a changed desired value: owned fields keep their
+    // digests updated while the foreign field survives untouched.
+    writeJson(bundlePath, bundleVersion('https://two.example.com/mcp'))
+    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
+      serviceToken: 'token',
+      organizationId: 'org',
+      saasToken: 'saas',
+      consoleUrl: 'https://console.example.com',
+      mcpUrl: 'https://two.example.com/mcp',
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    })
+    const second = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    assert.equal(second.success, true, JSON.stringify(second))
+
+    const configAfterSecond = readFileSync(configPath, 'utf8')
+    assert.equal(configAfterSecond.includes('url = "https://two.example.com/mcp"'), true)
+    assert.equal(configAfterSecond.includes('user_token = "user-secret"'), true, 'the foreign field survives a desired-value change it does not own')
+    const trackingAfterSecond = await readTrackingFile()
+    const trackedAfterSecond = trackingAfterSecond?.mcpServers.find((entry) => entry.name === 'alpha-console')
+    assert.equal(trackedAfterSecond?.fields?.url, valueDigest('https://two.example.com/mcp'))
+    assert.deepEqual(Object.keys(trackedAfterSecond?.fields ?? {}).sort(), ['headers', 'name', 'url'])
     rmSync(sourceRoot, { recursive: true, force: true })
   })
 

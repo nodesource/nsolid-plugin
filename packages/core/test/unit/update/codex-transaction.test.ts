@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { writeTomlFileSync } from '../../../src/utils/config.js'
@@ -359,5 +359,142 @@ describe('Codex update transaction', () => {
     assert.match(result.error?.message ?? '', /config-backup/)
     assert.match(result.error?.message ?? '', /cache-backup/)
     assert.equal(result.error?.message?.includes(path.dirname(cachePath)), true)
+  })
+
+  describe('rollback gating and verified restore', () => {
+    function backupContainers (baseDir: string, marker: string): string[] {
+      return existsSync(baseDir) ? readdirSync(baseDir).filter((name) => name.includes(marker)) : []
+    }
+
+    function failedUpgradeItem (cachePath: string): UpdatePlanItem {
+      // The reviewer's exact scenario: a failed install/upgrade command whose
+      // args contain no `remove` at all.
+      return {
+        ...item(cachePath),
+        steps: [
+          { kind: 'command', description: 'upgrade', command: { executable: 'codex', args: ['plugin', 'marketplace', 'upgrade', 'NodeSource/nsolid-plugin'], timeoutMs: 1000 } },
+        ],
+      }
+    }
+
+    function setupFixture (): { cachePath: string; configPath: string; originalConfig: string; configMarker: string } {
+      const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+      mkdirSync(cachePath, { recursive: true })
+      const configPath = path.join(home, '.codex', 'config.toml')
+      mkdirSync(path.dirname(configPath), { recursive: true })
+      writeFileSync(configPath, [
+        '# user comment must survive',
+        '[plugins."nsolid-plugin@nodesource"]',
+        'enabled = true',
+        '',
+      ].join('\n'))
+      writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+      return { cachePath, configPath, originalConfig: readFileSync(configPath, 'utf8'), configMarker: '.nsolid-config-backup-' }
+    }
+
+    function tamperConfigBackup (configPath: string, marker: string, tampered: string): void {
+      const container = backupContainers(path.dirname(configPath), marker)[0]
+      assert.ok(container, 'expected the config backup container to exist')
+      writeFileSync(path.join(path.dirname(configPath), container, path.basename(configPath)), tampered)
+    }
+
+    it('rolls back a failed upgrade command whose args contain no remove', async () => {
+      const fixture = setupFixture()
+      const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
+        run: async (command) => {
+          // Simulate the partially mutated state the failed command leaves.
+          writeFileSync(path.join(fixture.cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '9.9.9', skills: [] }))
+          assert.equal(command.args.includes('remove'), false)
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_COMMAND_FAILED')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.equal(readFileSync(fixture.configPath, 'utf8'), fixture.originalConfig)
+      assert.match(readFileSync(path.join(fixture.cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+      assert.equal(backupContainers(path.dirname(fixture.configPath), fixture.configMarker).length, 0)
+    })
+
+    it('refuses to restore a tampered config backup', async () => {
+      const fixture = setupFixture()
+      const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
+        run: async () => {
+          const mutatedConfig = fixture.originalConfig.replace('enabled = true', 'enabled = false')
+          writeFileSync(fixture.configPath, mutatedConfig)
+          tamperConfigBackup(fixture.configPath, fixture.configMarker, '# tampered bytes')
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, false)
+      // The live config must not be overwritten with the tampered backup
+      // bytes, and it must not have been restored to the original either.
+      assert.equal(readFileSync(fixture.configPath, 'utf8'), fixture.originalConfig.replace('enabled = true', 'enabled = false'))
+      // Backups are preserved for manual recovery.
+      assert.equal(backupContainers(path.dirname(fixture.configPath), fixture.configMarker).length, 1)
+    })
+
+    it('refuses to overwrite a concurrently edited live config after command failure', async () => {
+      const fixture = setupFixture()
+      const drifted = `${fixture.originalConfig}# concurrent user edit\n`
+      const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
+        // The concurrent edit must land after the transaction captures the
+        // post-command state but before the restore reads the live bytes, so
+        // it is queued two microtask ticks behind the failure resolution.
+        run: () => new Promise((resolve) => {
+          queueMicrotask(() => {
+            resolve({ exitCode: 1, stdout: '', stderr: '', timedOut: false })
+            queueMicrotask(() => queueMicrotask(() => writeFileSync(fixture.configPath, drifted)))
+          })
+        }),
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, false)
+      assert.equal(readFileSync(fixture.configPath, 'utf8'), drifted)
+      assert.equal(backupContainers(path.dirname(fixture.configPath), fixture.configMarker).length, 1)
+    })
+
+    it('restores exact original digests, not mere existence', async () => {
+      const fixture = setupFixture()
+      const digestBefore = nativePayloadDigest(fixture.cachePath)
+      assert.ok(digestBefore, 'the cache must be digestible')
+      const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
+        run: async () => {
+          writeFileSync(path.join(fixture.cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '9.9.9', skills: [] }))
+          writeFileSync(path.join(fixture.cachePath, 'stray.json'), '{}')
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.equal(readFileSync(fixture.configPath, 'utf8'), fixture.originalConfig)
+      assert.equal(existsSync(path.join(fixture.cachePath, 'stray.json')), false)
+      assert.equal(nativePayloadDigest(fixture.cachePath), digestBefore)
+    })
+
+    it('restores an originally empty config file after a failed command', async () => {
+      const fixture = setupFixture()
+      writeFileSync(fixture.configPath, '')
+      const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
+        run: async () => {
+          writeFileSync(fixture.configPath, 'codex rewrote the empty config\n')
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.equal(readFileSync(fixture.configPath, 'utf8'), '')
+      assert.equal(backupContainers(path.dirname(fixture.configPath), fixture.configMarker).length, 0)
+    })
   })
 })

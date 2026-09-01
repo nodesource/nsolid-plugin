@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
@@ -391,6 +391,78 @@ describe('fallback journal ownership validation', () => {
     assert.equal(readFileSync(path.join(freshPath, 'user-file.txt'), 'utf8'), 'precious\n')
     assert.equal(existsSync(journal.journalPath), true)
     rmSync(stageSource, { recursive: true, force: true })
+  })
+
+  it('fails closed when the snapshot directory points at the tracking directory itself', async () => {
+    const { trackingPath, manifest, trackingJson } = setupValidFixture()
+    const { journal } = await beginFallbackJournal(manifest)
+    const trackingDir = path.dirname(trackingPath)
+    const sibling = path.join(trackingDir, 'sibling.txt')
+    writeFileSync(sibling, 'keep')
+    const tampered = { ...journal, snapshotDirectory: trackingDir }
+
+    assert.equal(await restoreFallbackJournal(tampered), false)
+    const committed = { ...tampered, phase: 'committed' as const }
+    writeFileSync(journal.journalPath, JSON.stringify(committed))
+    await assert.rejects(commitFallbackJournal(committed))
+    assert.deepEqual(await recoverFallbackJournal(trackingPath, true), { pending: true, recovered: false })
+
+    // The tracking directory and its siblings survived every cleanup attempt.
+    assert.equal(readFileSync(trackingPath, 'utf8'), trackingJson)
+    assert.equal(readFileSync(sibling, 'utf8'), 'keep')
+    assert.equal(existsSync(journal.snapshotDirectory), true)
+    assert.equal(existsSync(journal.journalPath), true)
+  })
+
+  it('fails closed when the snapshot directory is a symlink escaping the tracking directory', { skip: process.platform === 'win32' }, async () => {
+    const { trackingPath, manifest } = setupValidFixture()
+    const { journal } = await beginFallbackJournal(manifest)
+    const victim = path.join(home, 'victim-dir')
+    mkdirSync(victim)
+    writeFileSync(path.join(victim, 'keep.txt'), 'keep')
+    rmSync(journal.snapshotDirectory, { recursive: true, force: true })
+    symlinkSync(victim, journal.snapshotDirectory, 'dir')
+
+    assert.equal(await restoreFallbackJournal(journal), false)
+    const committed = { ...journal, phase: 'committed' as const }
+    writeFileSync(journal.journalPath, JSON.stringify(committed))
+    assert.deepEqual(await recoverFallbackJournal(trackingPath, true), { pending: true, recovered: false })
+    await assert.rejects(commitFallbackJournal(journal))
+
+    // Nothing outside the journal was deleted and the journal survives.
+    assert.equal(readFileSync(path.join(victim, 'keep.txt'), 'utf8'), 'keep')
+    assert.equal(existsSync(journal.journalPath), true)
+  })
+
+  it('fails closed when the snapshot directory name does not match the mkdtemp shape', async () => {
+    const { trackingPath, manifest } = setupValidFixture()
+    const { journal } = await beginFallbackJournal(manifest)
+    const trackingDir = path.dirname(trackingPath)
+    const suffixless = { ...journal, snapshotDirectory: path.join(trackingDir, '.nsolid-plugin-update-') }
+    const foreign = { ...journal, snapshotDirectory: path.join(trackingDir, '.other-update-abc123') }
+
+    assert.equal(await restoreFallbackJournal(suffixless), false)
+    assert.equal(await restoreFallbackJournal(foreign), false)
+    writeFileSync(journal.journalPath, JSON.stringify({ ...foreign, phase: 'committed' as const }))
+    await assert.rejects(commitFallbackJournal(foreign))
+    assert.deepEqual(await recoverFallbackJournal(trackingPath, true), { pending: true, recovered: false })
+
+    // The real snapshot was never cleaned up by the forged journals.
+    assert.equal(existsSync(journal.snapshotDirectory), true)
+    assert.equal(existsSync(journal.journalPath), true)
+  })
+
+  it('aborts the restore without touching live paths when a non-tracking backup was tampered with', async () => {
+    const { skillPath, manifest } = setupValidFixture()
+    const { journal } = await beginFallbackJournal(manifest)
+    const skillEntry = journal.entries.find((entry) => path.resolve(entry.path) === path.resolve(skillPath))!
+    writeFileSync(path.join(skillEntry.backup!, 'SKILL.md'), '# tampered\n')
+
+    assert.equal(await restoreFallbackJournal(journal), false)
+    // The live skill still holds its pre-restore bytes, not the tampered backup.
+    assert.equal(readFileSync(path.join(skillPath, 'SKILL.md'), 'utf8'), '# tracked\n')
+    assert.equal(existsSync(journal.journalPath), true)
+    assert.equal(existsSync(journal.snapshotDirectory), true)
   })
 })
 

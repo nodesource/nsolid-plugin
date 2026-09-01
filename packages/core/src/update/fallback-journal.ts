@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { cp, lstat, mkdtemp, open, readFile, readlink, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdtemp, open, readFile, realpath, readlink, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import type { FallbackTransactionIdentity } from './types.js'
@@ -48,10 +48,6 @@ export interface FallbackJournalResult {
 
 export function trackingDigest (trackingPath: string): string | undefined {
   try { return createHash('sha256').update(readFileSync(trackingPath)).digest('hex') } catch { return undefined }
-}
-
-export function valueDigest (value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(stableValue(value)) ?? 'undefined').digest('hex')
 }
 
 export function fallbackJournalPath (trackingPath: string): string {
@@ -260,6 +256,7 @@ export async function captureFallbackJournalState (journal: FallbackJournal): Pr
 export async function commitFallbackJournal (journal: FallbackJournal): Promise<void> {
   journal = await reloadFallbackJournal(journal)
   if (!isSafeJournal(journal) || !await journalOwnershipIsValid(journal)) throw new Error('Invalid fallback journal')
+  if (!await snapshotArtifactsAreSafe(journal)) throw new Error('Invalid fallback journal')
   await writeDurable(journal.journalPath, { ...journal, phase: 'committed' })
   await rm(journal.journalPath, { force: true })
   await rm(journal.snapshotDirectory, { recursive: true, force: true }).catch(() => {})
@@ -279,6 +276,17 @@ export async function restoreFallbackJournal (journal: FallbackJournal): Promise
     for (const entry of journal.entries) {
       if (!await entryStateIsAuthorized(entry)) return false
     }
+    // Preflight before the first destructive byte moves: the snapshot must be
+    // provably real, and every backup that will be restored must still hold
+    // the journaled original. A tampered or rotted backup aborts with the
+    // live paths untouched and the artifacts preserved.
+    if (!await snapshotArtifactsAreSafe(journal)) return false
+    for (const entry of journal.entries) {
+      if (!entry.existed) continue
+      if (!entry.backup) return false
+      if (await pathKind(entry.backup) !== entry.kind) return false
+      if (await pathDigest(entry.backup) !== entry.digest) return false
+    }
     for (const entry of journal.entries) {
       const kind = await pathKind(entry.path)
       if (kind !== 'missing') await rm(entry.path, { recursive: true, force: true })
@@ -293,6 +301,7 @@ export async function restoreFallbackJournal (journal: FallbackJournal): Promise
       return await pathDigest(entry.path) === entry.digest
     })).then((values) => values.every(Boolean))
     if (valid) {
+      if (!await snapshotArtifactsAreSafe(journal)) return false
       await rm(journal.journalPath, { force: true })
       await rm(journal.snapshotDirectory, { recursive: true, force: true }).catch(() => {})
       await removeEntryArtifacts(journal.entries)
@@ -345,6 +354,9 @@ export async function recoverFallbackJournal (trackingPath: string, mutate: bool
   if (!isSafeJournal(journal) || journal.journalPath !== journalPath || !await journalOwnershipIsValid(journal)) return { pending: true, recovered: false }
   if (!mutate) return { pending: true, recovered: false }
   if (journal.phase === 'committed') {
+    // The cleanup rm is destructive: gate it on filesystem reality so a
+    // forged snapshot location can never widen the deletion.
+    if (!await snapshotArtifactsAreSafe(journal)) return { pending: true, recovered: false }
     await rm(journal.journalPath, { force: true }).catch(() => {})
     await rm(journal.snapshotDirectory, { recursive: true, force: true }).catch(() => {})
     await removeEntryArtifacts(journal.entries)
@@ -362,6 +374,34 @@ async function removeEntryArtifacts (entries: readonly FallbackJournalEntry[]): 
     // The quarantine path lives inside its own sibling container directory;
     // remove the container, not only the moved payload.
     if (entry.quarantine) await rm(path.dirname(entry.quarantine), { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/**
+ * Filesystem-aware gate run immediately before every destructive use of the
+ * snapshot (the commit, restore, and committed-phase recovery cleanups): the
+ * journal threat model is a forged file in a user-writable location, and
+ * lexical containment cannot see symlinked path components. Fail closed
+ * whenever reality cannot be proven; artifacts then survive untouched.
+ */
+async function snapshotArtifactsAreSafe (journal: FallbackJournal): Promise<boolean> {
+  const snapshot = path.resolve(journal.snapshotDirectory)
+  try {
+    const stat = await lstat(snapshot)
+    if (!stat.isDirectory()) return false
+    const realParent = await realpath(path.dirname(path.resolve(journal.manifest.trackingPath)))
+    const realSnapshot = await realpath(snapshot)
+    if (realSnapshot === realParent || !realSnapshot.startsWith(realParent + path.sep)) return false
+    for (const entry of journal.entries) {
+      if (entry.backup === undefined) continue
+      // A verbatim-copied symlink backup legitimately resolves to a target
+      // outside the snapshot, so only its containing directory is required
+      // to be the real snapshot itself.
+      if (await realpath(path.dirname(entry.backup)) !== realSnapshot) return false
+    }
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -434,7 +474,14 @@ function isSafeJournal (journal: FallbackJournal): boolean {
   if (journal.mutator !== undefined && (!Number.isSafeInteger(journal.mutator.pid) || journal.mutator.pid <= 0 || typeof journal.mutator.nonce !== 'string' || typeof journal.mutator.claimedAt !== 'string' || !Number.isFinite(Date.parse(journal.mutator.claimedAt)))) return false
   const trackingPath = path.resolve(journal.manifest.trackingPath)
   if (journal.journalPath !== fallbackJournalPath(trackingPath)) return false
-  if (!isSameOrContained(path.resolve(journal.snapshotDirectory), path.dirname(trackingPath))) return false
+  // The snapshot must be exactly what beginFallbackJournal creates: a strict
+  // direct child of the tracking directory carrying the mkdtemp suffix shape.
+  // Lexical containment alone would let a forged journal point the snapshot
+  // at the tracking directory itself (equality passes) and the cleanup rm
+  // would delete user state.
+  const snapshot = path.resolve(journal.snapshotDirectory)
+  if (path.dirname(snapshot) !== path.dirname(trackingPath)) return false
+  if (!/^\.nsolid-plugin-update-[A-Za-z0-9_]{6}$/.test(path.basename(snapshot))) return false
   if (!journal.manifest.installationId || journal.manifest.installationId !== `${journal.manifest.harness}:fallback`) return false
   const expectedPaths = new Set([
     trackingPath,
@@ -468,7 +515,12 @@ function isSafeJournal (journal: FallbackJournal): boolean {
       }
       flexibleEntries.add(target)
     }
-    if (entry.backup !== undefined && (!isSameOrContained(path.resolve(entry.backup), path.resolve(journal.snapshotDirectory)) || !isCanonicalPath(path.resolve(entry.backup)))) return false
+    if (entry.backup !== undefined) {
+      const backup = path.resolve(entry.backup)
+      // A backup must live strictly inside the snapshot; equality would let a
+      // forged entry alias the snapshot container itself.
+      if (backup === snapshot || !isSameOrContained(backup, snapshot) || !isCanonicalPath(backup)) return false
+    }
     if (entry.stage !== undefined) {
       const stageDir = path.resolve(path.dirname(entry.stage))
       if (!isSameOrContained(stageDir, path.dirname(target)) || stageDir === path.dirname(target) || !isCanonicalPath(stageDir)) return false
@@ -527,12 +579,4 @@ async function manifestMatchesTrackingFile (manifest: FallbackTransactionIdentit
   } catch {
     return false
   }
-}
-
-function stableValue (value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, stableValue(child)]))
-  }
-  return value
 }

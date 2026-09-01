@@ -685,6 +685,54 @@ describe('install()', () => {
     assert.strictEqual(servers['nsolid-console'].url, 'https://custom-mcp.example.com/entry')
   })
 
+  it('re-running install does not swallow user-added MCP fields into ownership', async () => {
+    const { install } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({
+      consoleUrl: 'https://test-org.saas.nodesource.io',
+      mcpUrl: 'https://custom-mcp.example.com/entry',
+    })
+
+    const first = await install({ harness: 'claude', bundlePath, skillsSource })
+    assert.strictEqual(first.success, true)
+
+    // The user adds a field to OUR server record between installs.
+    const claudeConfigPath = join(tmpDir, '.claude.json')
+    const claudeConfig = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
+    claudeConfig.mcpServers['nsolid-console'].user_token = 'user-secret'
+    writeFileSync(claudeConfigPath, JSON.stringify(claudeConfig, null, 2))
+
+    const second = await install({ harness: 'claude', bundlePath, skillsSource })
+    assert.strictEqual(second.success, true)
+
+    // The user field survives the reinstall merge...
+    const afterSecond = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
+    assert.strictEqual(afterSecond.mcpServers['nsolid-console'].user_token, 'user-secret')
+    assert.strictEqual(afterSecond.mcpServers['nsolid-console'].url, 'https://custom-mcp.example.com/entry')
+
+    // ...and tracking records only the rendered owned fields, so a later
+    // refresh can never treat user_token as owned and delete it.
+    const tracking = readJsonFile<{ mcpServers: Array<{ name: string; fields?: Record<string, string> }> }>(
+      join(tmpDir, '.agents', '.nodesource-installed.json')
+    )!
+    const tracked = tracking.mcpServers.find((entry) => entry.name === 'nsolid-console')
+    assert.ok(tracked, 'server tracked')
+    assert.ok(!Object.hasOwn(tracked.fields ?? {}, 'user_token'), 'user_token must not be tracked as owned')
+    assert.ok(Object.hasOwn(tracked.fields ?? {}, 'url'), 'the rendered owned fields stay tracked')
+  })
+
   it('derives console MCP URL without appending /mcp when no explicit MCP URL is stored', async () => {
     const { install } = await import('../../src/index.js')
     const { readJsonFile } = await import('../../src/utils/config.js')

@@ -1,11 +1,10 @@
 import path from 'node:path'
 import { existsSync, unlinkSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import type { HarnessType, Logger } from '../types.js'
 import type { McpTrackingEntry, TrackingData } from '../skills/skill-tracker.js'
 import { readTrackingFile, writeTrackingFile } from '../skills/skill-tracker.js'
 import { getTrackingFilePath, resolveHome } from '../utils/path.js'
-import { readJsonFile, readJsoncFile, readTomlFile } from '../utils/config.js'
+import { harnessMcpKey, readMcpFieldDigests } from '../update/mcp-lookup.js'
 
 export type { McpTrackingEntry } from '../skills/skill-tracker.js'
 
@@ -20,7 +19,7 @@ function createEmptyTracking (harness: HarnessType): TrackingData {
 }
 
 export async function addTrackedMcps (
-  entries: { name: string; configPath: string }[],
+  entries: { name: string; configPath: string; ownedFields?: readonly string[] }[],
   harness: HarnessType,
   logger?: Logger
 ): Promise<void> {
@@ -32,50 +31,32 @@ export async function addTrackedMcps (
       (m) => m.name === entry.name && m.harness === harness
     )
 
+    const configPath = path.resolve(resolveHome(entry.configPath))
+    // Tracking evidence describes the same container the transaction reads and
+    // writes for this harness: the field-digests module is the single source
+    // of truth for both the container selection and the digest computation.
+    // Ownership evidence must never describe fields the user added: tracked
+    // fields absent from the desired render get removed on the next refresh.
+    const digests = readMcpFieldDigests(configPath, entry.name, { preferredKey: harnessMcpKey(harness) })
+    const fields = entry.ownedFields === undefined || digests === undefined
+      ? digests
+      : Object.fromEntries(Object.entries(digests).filter(([name]) => entry.ownedFields!.includes(name)))
     if (existing) {
-      existing.configPath = path.resolve(resolveHome(entry.configPath))
+      existing.configPath = configPath
       existing.configuredAt = now
-      existing.fields = readOwnedFieldDigests(existing.configPath, existing.name)
+      existing.fields = fields
     } else {
       tracking.mcpServers.push({
         name: entry.name,
-        configPath: path.resolve(resolveHome(entry.configPath)),
+        configPath,
         harness,
         configuredAt: now,
-        fields: readOwnedFieldDigests(path.resolve(resolveHome(entry.configPath)), entry.name),
+        fields,
       })
     }
   }
 
   await writeTrackingFile(tracking, logger)
-}
-
-function readOwnedFieldDigests (configPath: string, name: string): Record<string, string> | undefined {
-  try {
-    const raw = configPath.endsWith('.toml')
-      ? readTomlFile<Record<string, unknown>>(configPath)
-      : configPath.endsWith('.jsonc')
-        ? readJsoncFile<Record<string, unknown>>(configPath)
-        : readJsonFile<Record<string, unknown>>(configPath)
-    if (!raw) return undefined
-    const servers = (raw.mcpServers ?? raw.mcp_servers ?? raw.mcp) as unknown
-    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return undefined
-    const server = (servers as Record<string, unknown>)[name]
-    if (!server || typeof server !== 'object' || Array.isArray(server)) return undefined
-    return Object.fromEntries(Object.entries(server as Record<string, unknown>).map(([field, value]) => [field, digest(value)]))
-  } catch { return undefined }
-}
-
-function digest (value: unknown): string {
-  return createHash('sha256').update(JSON.stringify(stableValue(value)) ?? 'undefined').digest('hex')
-}
-
-function stableValue (value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue)
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, stableValue(child)]))
-  }
-  return value
 }
 
 export async function removeTrackedMcps (
