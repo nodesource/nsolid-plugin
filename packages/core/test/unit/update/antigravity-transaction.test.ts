@@ -374,4 +374,49 @@ describe('Antigravity staged plugin validation', () => {
       rmSync(home, { recursive: true, force: true })
     }
   })
+
+  it('fails closed before mutation when the existing plugin root has no digestible tree', async () => {
+    // An empty existing plugin root cannot produce an authenticated backup
+    // digest, so rollback could never be proven: the transaction must abort
+    // in the backup phase, before any command runs.
+    const home = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-agy-empty-root-'))
+    const previousHome = process.env.HOME
+    const previousUserProfile = process.env.USERPROFILE
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    try {
+      const pluginRoot = path.join(home, '.gemini', 'config', 'plugins', 'nsolid-plugin')
+      const manifestPath = path.join(home, '.gemini', 'config', 'import_manifest.json')
+      mkdirSync(pluginRoot, { recursive: true })
+      writeFileSync(manifestPath, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin' } } }))
+      const item = {
+        ...agyItem(),
+        steps: [{ kind: 'command' as const, description: 'agy sync', command: { executable: 'agy', args: ['sync'], timeoutMs: 1_000 } }],
+      }
+      let commands = 0
+      const result = await executeAntigravityTransaction(item, {
+        run: async () => {
+          commands++
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'ANTIGRAVITY_BACKUP_FAILED')
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(commands, 0, 'no mutation may run without a provable backup digest')
+      // The live (empty) root and manifest were never touched, and the
+      // incomplete backup containers were cleaned up.
+      assert.equal(existsSync(pluginRoot), true)
+      assert.equal(readdirSync(pluginRoot).length, 0)
+      assert.equal(readdirSync(path.dirname(manifestPath)).filter((name) => name.includes('.nsolid-manifest-backup-')).length, 0)
+      assert.equal(readdirSync(path.dirname(pluginRoot)).filter((name) => name.includes('.nsolid-plugin-backup-')).length, 0)
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME
+      else process.env.HOME = previousHome
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE
+      else process.env.USERPROFILE = previousUserProfile
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 })

@@ -106,8 +106,12 @@ export async function executeAntigravityTransaction (
       if (rootExisted) {
         await copyOwnedPath(pluginRoot, rootBackup)
         // Persist the original digests before any mutation; the backup must
-        // be authenticated against these, never against itself.
+        // be authenticated against these, never against itself. An empty,
+        // oversized, or otherwise undigestible tree has no provable backup:
+        // fail here, before mutation, instead of entering a transaction whose
+        // rollback can never be authenticated.
         originalRootDigest = treeDigest(rootBackup)
+        if (originalRootDigest === undefined) throw new Error('backup tree could not be digested')
         rootBackupComplete = true
       }
       if (manifestExisted) {

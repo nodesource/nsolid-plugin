@@ -442,7 +442,11 @@ function harnessServerValue (harness: HarnessType, server: BundleDescriptor['mcp
     AUTH_ORG_ID: credentials.organizationId,
     MCP_URL: mcpUrl,
   })
-  const formatted = applyHarnessWriteFormat(harness, { mcpServers: { [server.name]: expanded[0] } as unknown as Record<string, never> })
+  // The ref's `name` is only the map key metadata: reconciliation values,
+  // inserted records, and tracking ownership must use only renderable entry
+  // fields, never the key that holds the server's own name.
+  const { name: _name, ...entry } = expanded[0]
+  const formatted = applyHarnessWriteFormat(harness, { mcpServers: { [server.name]: entry } as unknown as Record<string, never> })
   return formatted.mcpServers[server.name] as unknown as Record<string, unknown>
 }
 

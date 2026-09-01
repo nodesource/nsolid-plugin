@@ -797,3 +797,29 @@ describe('removeMcpConfig', () => {
     assert.strictEqual(existsSync(configPath), false)
   })
 })
+
+describe('renderedMcpFieldNames', () => {
+  it('never reports the metadata name as a rendered entry field', async () => {
+    const { renderedMcpFieldNames } = await import('../../../src/mcp/mcp-config-writer.js')
+
+    // The `name` on a McpServerRef is the map key metadata, never a field the
+    // install writer renders inside an entry; ownership evidence computed from
+    // it must not claim the key that holds the server's own name either.
+    const claude = renderedMcpFieldNames('claude', [serverA])
+    assert.deepEqual([...claude['ns-benchmark']].sort(), ['headers', 'type', 'url'])
+
+    const antigravity = renderedMcpFieldNames('antigravity', [serverA])
+    assert.deepEqual([...antigravity['ns-benchmark']].sort(), ['headers', 'serverUrl'])
+  })
+
+  it('keeps the rendered field names stable when variables are expanded', async () => {
+    const { renderedMcpFieldNames } = await import('../../../src/mcp/mcp-config-writer.js')
+
+    const claude = renderedMcpFieldNames('claude', [serverA], {
+      MCP_URL: 'https://benchmark.mcp.saas.nodesource.io/mcp',
+      AUTH_TOKEN: 'token',
+      AUTH_ORG_ID: 'org',
+    })
+    assert.deepEqual([...claude['ns-benchmark']].sort(), ['headers', 'type', 'url'])
+  })
+})

@@ -190,7 +190,9 @@ export function renderedMcpFieldNames (
   variables?: Record<string, string>
 ): Record<string, string[]> {
   const resolved = variables !== undefined ? expandVariables(servers, variables) : servers
-  const rendered = applyHarnessWriteFormat(harness, { mcpServers: Object.fromEntries(resolved.map((server) => [server.name, { ...server }])) })
+  // The ref's `name` is only the map key metadata: it is never rendered as a
+  // field inside the entry, so it must never enter ownership evidence either.
+  const rendered = applyHarnessWriteFormat(harness, { mcpServers: Object.fromEntries(resolved.map(({ name, ...entry }) => [name, entry])) })
   return Object.fromEntries(Object.entries(rendered.mcpServers).map(([name, server]) => [name, Object.keys(server)]))
 }
 

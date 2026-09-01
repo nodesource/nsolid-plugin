@@ -339,7 +339,6 @@ describe('fallback refresh transaction', () => {
       'url = "https://new.example.com/mcp"',
       'user_token = "user-secret"',
       'headers = {}',
-      'name = "alpha-console"',
     ].join('\r\n') + '\r\n'
     assert.equal(final, expectedConfig)
     const tracking = await readTrackingFile()
@@ -351,7 +350,9 @@ describe('fallback refresh transaction', () => {
     // record it as owned, or refresh #2 would delete it.
     assert.equal(tracked?.fields?.user_token, undefined)
     assert.equal(tracked?.fields?.headers, valueDigest({}))
-    assert.equal(tracked?.fields?.name, valueDigest('alpha-console'))
+    // The server's name is entry metadata, not a rendered field: it must never
+    // be written into the entry or claimed as ownership evidence.
+    assert.equal(tracked?.fields?.name, undefined)
     rmSync(sourceRoot, { recursive: true, force: true })
   })
 
@@ -413,7 +414,7 @@ describe('fallback refresh transaction', () => {
     const trackingAfterFirst = await readTrackingFile()
     const trackedAfterFirst = trackingAfterFirst?.mcpServers.find((entry) => entry.name === 'alpha-console')
     // Only the desired-render fields enter tracking; user_token is foreign.
-    assert.deepEqual(Object.keys(trackedAfterFirst?.fields ?? {}).sort(), ['headers', 'name', 'url'])
+    assert.deepEqual(Object.keys(trackedAfterFirst?.fields ?? {}).sort(), ['headers', 'url'])
     assert.equal(trackedAfterFirst?.fields?.url, valueDigest('https://new.example.com/mcp'))
 
     const second = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
@@ -425,7 +426,7 @@ describe('fallback refresh transaction', () => {
     assert.equal(configAfterSecond.includes('user_token = "user-secret"'), true, 'refresh #2 must not delete the foreign field it never owned')
     const trackingAfterSecond = await readTrackingFile()
     const trackedAfterSecond = trackingAfterSecond?.mcpServers.find((entry) => entry.name === 'alpha-console')
-    assert.deepEqual(Object.keys(trackedAfterSecond?.fields ?? {}).sort(), ['headers', 'name', 'url'])
+    assert.deepEqual(Object.keys(trackedAfterSecond?.fields ?? {}).sort(), ['headers', 'url'])
     assert.equal(trackedAfterSecond?.fields?.url, valueDigest('https://new.example.com/mcp'))
     rmSync(sourceRoot, { recursive: true, force: true })
   })
@@ -502,7 +503,7 @@ describe('fallback refresh transaction', () => {
     const trackingAfterSecond = await readTrackingFile()
     const trackedAfterSecond = trackingAfterSecond?.mcpServers.find((entry) => entry.name === 'alpha-console')
     assert.equal(trackedAfterSecond?.fields?.url, valueDigest('https://two.example.com/mcp'))
-    assert.deepEqual(Object.keys(trackedAfterSecond?.fields ?? {}).sort(), ['headers', 'name', 'url'])
+    assert.deepEqual(Object.keys(trackedAfterSecond?.fields ?? {}).sort(), ['headers', 'url'])
     rmSync(sourceRoot, { recursive: true, force: true })
   })
 

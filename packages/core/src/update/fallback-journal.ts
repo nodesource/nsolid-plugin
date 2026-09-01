@@ -481,7 +481,7 @@ function isSafeJournal (journal: FallbackJournal): boolean {
   // would delete user state.
   const snapshot = path.resolve(journal.snapshotDirectory)
   if (path.dirname(snapshot) !== path.dirname(trackingPath)) return false
-  if (!/^\.nsolid-plugin-update-[A-Za-z0-9_]{6}$/.test(path.basename(snapshot))) return false
+  if (!/^\.nsolid-plugin-update-[A-Za-z0-9._-]{6}$/.test(path.basename(snapshot))) return false
   if (!journal.manifest.installationId || journal.manifest.installationId !== `${journal.manifest.harness}:fallback`) return false
   const expectedPaths = new Set([
     trackingPath,

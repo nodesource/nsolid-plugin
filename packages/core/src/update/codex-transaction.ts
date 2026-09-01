@@ -118,7 +118,12 @@ export async function executeCodexTransaction (
       }
       if (cacheExisted) {
         await copyOwnedPath(cachePath, cacheBackup)
-        cacheOriginalDigest = ownedTreeDigest(cacheBackup) ?? undefined
+        // An empty, oversized, or otherwise undigestible tree has no provable
+        // backup digest: fail here, before mutation, instead of entering a
+        // transaction whose rollback can never be authenticated.
+        const digest = ownedTreeDigest(cacheBackup)
+        if (digest === null) throw new Error('cache backup tree could not be digested')
+        cacheOriginalDigest = digest
         cacheBackupComplete = true
       }
       backupsComplete = configBackupComplete && cacheBackupComplete

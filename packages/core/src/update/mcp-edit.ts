@@ -139,6 +139,14 @@ export function editMcpJsonBytes (raw: string, edit: McpByteEdit, options?: { mc
       apply([mcpKey, name], undefined)
     }
     for (const { server, field, value } of edit.setFields ?? []) {
+      // A field already holding the desired value is not rewritten: a no-op
+      // AST edit still re-serializes the node and would cosmetically drift
+      // bytes the transaction does not need to touch.
+      const liveTree = parseTree(current)
+      const liveMcp = liveTree ? findNodeAtLocation(liveTree, [mcpKey]) : undefined
+      const liveServer = liveMcp ? findNodeAtLocation(liveMcp, [server]) : undefined
+      const liveField = liveServer ? findNodeAtLocation(liveServer, [field]) : undefined
+      if (liveField && JSON.stringify(getNodeValue(liveField)) === JSON.stringify(value)) continue
       apply([mcpKey, server, field], value)
     }
     for (const { server, field } of edit.removeFields ?? []) {

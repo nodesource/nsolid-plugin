@@ -452,6 +452,37 @@ describe('fallback journal ownership validation', () => {
     assert.equal(existsSync(journal.journalPath), true)
   })
 
+  it('accepts a portable mkdtemp suffix containing dot and dash characters', async () => {
+    // POSIX mkdtemp only promises suffix characters from the portable filename
+    // set, which includes `.` and `-`: a valid snapshot produced by such a
+    // libc must still pass validation and restore.
+    const { trackingPath, skillPath, linkPath, manifest, trackingJson } = setupValidFixture()
+    const { journal } = await beginFallbackJournal(manifest)
+    const renamed = path.join(path.dirname(journal.snapshotDirectory), '.nsolid-plugin-update-a.c-01')
+    renameSync(journal.snapshotDirectory, renamed)
+    const rebased = {
+      ...journal,
+      snapshotDirectory: renamed,
+      entries: journal.entries.map((entry) => entry.backup === undefined
+        ? entry
+        : { ...entry, backup: path.join(renamed, path.basename(entry.backup)) }),
+    }
+    // Persist the rebased journal so later reloads keep the renamed snapshot.
+    writeFileSync(journal.journalPath, JSON.stringify(rebased, null, 2) + '\n')
+    // The live owned bytes were mutated like a crashed child would leave them.
+    writeFileSync(path.join(skillPath, 'SKILL.md'), '# mutated\n')
+    writeFileSync(linkPath, 'mutated\n')
+    writeFileSync(trackingPath, JSON.stringify({ ...JSON.parse(trackingJson), installedAt: 'mutated' }))
+    const captured = await captureFallbackJournalState(rebased)
+
+    assert.equal(await restoreFallbackJournal(captured), true)
+    assert.equal(readFileSync(path.join(skillPath, 'SKILL.md'), 'utf8'), '# tracked\n')
+    assert.equal(readFileSync(linkPath, 'utf8'), 'link\n')
+    assert.equal(readFileSync(trackingPath, 'utf8'), trackingJson)
+    assert.equal(existsSync(rebased.journalPath), false)
+    assert.equal(existsSync(renamed), false)
+  })
+
   it('aborts the restore without touching live paths when a non-tracking backup was tampered with', async () => {
     const { skillPath, manifest } = setupValidFixture()
     const { journal } = await beginFallbackJournal(manifest)

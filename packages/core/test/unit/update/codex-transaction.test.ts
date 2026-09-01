@@ -340,6 +340,35 @@ describe('Codex update transaction', () => {
     assert.equal(existsSync(path.join(home, '.codex')), false)
   })
 
+  it('fails closed before mutation when the existing cache has no digestible tree', async () => {
+    // An empty existing cache directory cannot produce an authenticated
+    // backup digest, so rollback could never be proven: the transaction must
+    // abort in the backup phase, before any command runs.
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    const configPath = path.join(home, '.codex', 'config.toml')
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    writeTomlFileSync(configPath, { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    const originalConfig = readFileSync(configPath, 'utf8')
+
+    let commands = 0
+    const result = await executeCodexTransaction(item(cachePath), {
+      run: async () => {
+        commands++
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+      },
+    })
+
+    assert.equal(result.success, false)
+    assert.equal(result.error?.code, 'CODEX_BACKUP_FAILED')
+    assert.equal(result.rollbackAttempted, false)
+    assert.equal(commands, 0, 'no mutation may run without a provable backup digest')
+    assert.equal(readFileSync(configPath, 'utf8'), originalConfig)
+    // The incomplete backup containers were cleaned up.
+    assert.equal(readdirSync(path.dirname(configPath)).filter((name) => name.includes('.nsolid-config-backup-')).length, 0)
+    assert.equal(readdirSync(path.dirname(cachePath)).filter((name) => name.includes('.nsolid-cache-backup-')).length, 0)
+  })
+
   it('reports the preserved backup locations in the tree-termination timeout error', async () => {
     const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
     mkdirSync(cachePath, { recursive: true })
