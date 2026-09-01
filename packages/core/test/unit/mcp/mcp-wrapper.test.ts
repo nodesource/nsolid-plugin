@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
 // @ts-expect-error The repository's JavaScript generator intentionally has no TypeScript declarations.
-import { CODEX_MCP_STARTUP_TIMEOUT_SEC, generateCodexMcpJson, generateMcpWrapper, HARNESS_VALUES as GENERATOR_HARNESS_VALUES, MCP_REMOTE_RUNTIME_PARENT_SEGMENTS, MCP_REMOTE_VERSION as GENERATOR_VERSION, PLUGIN_VERSION as GENERATOR_PLUGIN_VERSION } from '../../../../../scripts/plugin-generators.mjs'
+import { CODEX_MCP_STARTUP_TIMEOUT_SEC, generateCodexBootstrap, generateCodexMcpJson, generateMcpWrapper, HARNESS_VALUES as GENERATOR_HARNESS_VALUES, MCP_REMOTE_RUNTIME_PARENT_SEGMENTS, MCP_REMOTE_VERSION as GENERATOR_VERSION, PLUGIN_VERSION as GENERATOR_PLUGIN_VERSION } from '../../../../../scripts/plugin-generators.mjs'
 import { getMcpRemoteRuntimeParent, MCP_REMOTE_VERSION as CORE_VERSION } from '../../../src/mcp/mcp-remote-runtime.js'
 import { HARNESS_VALUES as CORE_HARNESS_VALUES, PLUGIN_OWNED_HARNESSES, NATIVE_PLUGIN_HARNESSES } from '../../../src/types.js'
 
@@ -242,6 +242,20 @@ describe('MCP wrapper runtime contract', () => {
     assert.deepEqual(committed, generated)
     for (const server of Object.values(generated.mcpServers) as Array<{ startup_timeout_sec: number }>) {
       assert.strictEqual(server.startup_timeout_sec, CODEX_MCP_STARTUP_TIMEOUT_SEC)
+    }
+  })
+
+  it('bounds the Codex bootstrap search to the plugin cache, never cwd (QA-05)', () => {
+    const bootstrap = generateCodexBootstrap()
+    // The readdirSync walk may only run over the Codex plugin cache: codex
+    // launches servers with cwd set to the user's home, and recursively
+    // walking it blew past the 60s startup timeout on Windows (QA-05).
+    const roots = bootstrap.match(/const roots=\[([^\]]*)\]/)?.[1] ?? ''
+    assert.ok(roots.includes("path.join(os.homedir(),'.codex','plugins','cache')"), 'searches the Codex plugin cache')
+    assert.ok(!roots.includes('process.cwd()'), 'cwd must never be a recursive walk root')
+    // cwd is allowed only as a fixed dev candidate probed with existsSync.
+    for (const tail of bootstrap.split('process.cwd()').slice(1)) {
+      assert.match(tail, /^,...rel\)|^,'nsolid-plugin',...rel\)/, `cwd use must be a fixed existsSync candidate: ${tail.slice(0, 40)}`)
     }
   })
 
