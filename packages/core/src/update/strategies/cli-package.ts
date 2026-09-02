@@ -3,6 +3,7 @@ import { buildGlobalUpdateCommand, formatRollbackCommand, managerArgsForIdentity
 import { isCommandSuccessful } from '../command-runner.js'
 import { commandFailure, failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
 import { cleanupNpmArtifact } from '../version-source.js'
+import { cliExactVersionManualCommands } from '../cli-guidance.js'
 
 export const cliPackageStrategy: UpdateStrategy = {
   target: 'cli',
@@ -11,14 +12,10 @@ export const cliPackageStrategy: UpdateStrategy = {
   async plan (installation: UpdateInstallation): Promise<UpdatePlanItem> {
     if (installation.source.kind !== 'global-package' || !installation.metadata?.packagePath) {
       const item = planItem(installation)
-      const version = installation.version.latest ?? '<resolved-version>'
+      const launcherSource = installation.source.kind === 'unsupported' ? installation.source.source : undefined
       return {
         ...item,
-        manualCommands: [
-          `npm install --global nsolid-plugin@${version}`,
-          `pnpm add --global nsolid-plugin@${version}`,
-          `npx -y nsolid-plugin@${version} <command>`,
-        ],
+        manualCommands: cliExactVersionManualCommands(installation.version.latest, launcherSource),
       }
     }
     if (!isMutableVersion(installation)) return planItem(installation)

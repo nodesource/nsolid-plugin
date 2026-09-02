@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { planMcpReconciliation } from '../../../src/update/mcp-reconciliation.js'
+import { valueDigest } from '../../../src/update/mcp-lookup.js'
 
 const desired = [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }]
 
@@ -125,5 +126,45 @@ describe('MCP multi-config reconciliation planning', () => {
       { server: 'nsolid-console', field: 'headers', value: {} },
     ])
     assert.deepEqual(entry.removeFields, [])
+  })
+
+  it('plans no field updates when tracked digests already match the desired value', () => {
+    const desiredValue = { url: 'https://example.com/mcp', headers: {} }
+    const plan = planMcpReconciliation({
+      previousServers: [{
+        name: 'nsolid-console',
+        configPath: '/configs/a.json',
+        fields: { url: valueDigest(desiredValue.url), headers: valueDigest(desiredValue.headers) },
+      }],
+      desiredServers: desired,
+      desiredValues: { 'nsolid-console': desiredValue },
+      canonicalConfigPath: '/configs/canonical.json',
+    })
+    assert.equal(plan.kind, 'planned')
+    if (plan.kind !== 'planned') return
+    const entry = plan.entries[0]
+    // Matching digests must not become no-op updates: rendering such an
+    // update yields bytes identical to the live file, which leaves the
+    // apply stage without staged bytes.
+    assert.deepEqual(entry.updateFields, [])
+    assert.deepEqual(entry.removeFields, [])
+    assert.deepEqual(entry.ownedFieldDigests.map((field) => field.field), ['url', 'headers'])
+  })
+
+  it('plans field updates only for tracked fields whose digests differ from the desired value', () => {
+    const plan = planMcpReconciliation({
+      previousServers: [{
+        name: 'nsolid-console',
+        configPath: '/configs/a.json',
+        fields: { url: valueDigest('https://old'), headers: valueDigest({ token: 'old' }) },
+      }],
+      desiredServers: desired,
+      desiredValues: { 'nsolid-console': { url: 'https://example.com/mcp', headers: { token: 'old' } } },
+      canonicalConfigPath: '/configs/canonical.json',
+    })
+    assert.equal(plan.kind, 'planned')
+    if (plan.kind !== 'planned') return
+    const entry = plan.entries[0]
+    assert.deepEqual(entry.updateFields, [{ server: 'nsolid-console', field: 'url', value: 'https://example.com/mcp' }])
   })
 })

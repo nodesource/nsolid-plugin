@@ -5,10 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { gzipSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
-import { executeUpdatePlan, planUpdates, update, withPinnedMarketplaceCommit } from '../../../src/update/coordinator.js'
+import { checkUpdates, executeUpdatePlan, planUpdates, update, withPinnedMarketplaceCommit } from '../../../src/update/coordinator.js'
 import { fallbackJournalPath } from '../../../src/update/fallback-journal.js'
+import { cliPackageStrategy } from '../../../src/update/strategies/cli-package.js'
 import { getTrackingFilePath } from '../../../src/utils/path.js'
-import type { ResolvedArtifactIdentity, UpdatePlanItem, UpdateSource } from '../../../src/update/types.js'
+import type { CommandSpec, ResolvedArtifactIdentity, UpdatePlanItem, UpdateSource } from '../../../src/update/types.js'
 
 let home: string
 let previousHome: string | undefined
@@ -410,5 +411,145 @@ describe('planUpdates pins the resolved marketplace commit into the planned sour
       if (previousPathExt === undefined) delete process.env.PATHEXT
       else process.env.PATHEXT = previousPathExt
     }
+  })
+})
+
+describe('unsupported CLI provenance', () => {
+  function cliPackageRoot (root: string, version: string): string {
+    const manifest = path.join(root, 'package.json')
+    mkdirSync(path.dirname(manifest), { recursive: true })
+    writeFileSync(manifest, JSON.stringify({ name: 'nsolid-plugin', version }))
+    writeFileSync(path.join(root, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version }))
+    return root
+  }
+
+  function cliLauncher (root: string): string {
+    const launcher = path.join(root, 'dist', 'src', 'cli.js')
+    mkdirSync(path.dirname(launcher), { recursive: true })
+    writeFileSync(launcher, '#!/usr/bin/env node\n')
+    return launcher
+  }
+
+  function registryFetch (version: string): typeof fetch {
+    return async () => new Response(JSON.stringify({ 'dist-tags': { latest: version } }), { status: 200 })
+  }
+
+  const exactVersionGuidance = (version: string) => [
+    `npm install --global nsolid-plugin@${version}`,
+    `pnpm add --global nsolid-plugin@${version}`,
+    `npx -y nsolid-plugin@${version} <command>`,
+  ]
+
+  it('reports a workspace CLI launch as unsupported with exact-version guidance during a check', async () => {
+    const root = cliPackageRoot(path.join(home, 'repo', 'packages', 'core'), '1.0.3')
+    const launcher = cliLauncher(root)
+    let probes = 0
+
+    const summary = await checkUpdates({
+      packageRoot: root,
+      executablePath: launcher,
+      cwd: path.join(home, 'scratch'),
+      fetchImpl: registryFetch('90.0.2'),
+      commandRunner: {
+        run: async () => {
+          probes++
+          throw new Error('read-only check must not probe package managers')
+        },
+      },
+    })
+
+    const cli = summary.results.find((result) => result.installationId === 'cli:global')
+    assert.ok(cli, 'a cli result must exist')
+    assert.equal(cli.status, 'unsupported')
+    assert.equal(cli.ownership, 'none')
+    assert.equal(cli.currentVersion, undefined)
+    assert.equal(cli.latestVersion, '90.0.2')
+    assert.deepEqual(cli.manualCommands, exactVersionGuidance('90.0.2'))
+    assert.equal(summary.exitCode, 0)
+    assert.equal(summary.success, true)
+    assert.equal(probes, 0)
+  })
+
+  it('appends wrapper guidance for a detected Volta launcher during a check', async () => {
+    const root = cliPackageRoot(path.join(home, '.volta', 'tools', 'image', 'packages', 'nsolid-plugin'), '90.0.0')
+    const launcher = path.join(root, 'bin', 'nsolid-plugin')
+    mkdirSync(path.dirname(launcher), { recursive: true })
+    writeFileSync(launcher, '#!/bin/sh\n')
+
+    const summary = await checkUpdates({
+      packageRoot: root,
+      executablePath: launcher,
+      cwd: path.join(home, 'scratch'),
+      fetchImpl: registryFetch('90.0.2'),
+      commandRunner: { run: async () => { throw new Error('check must not probe package managers') } },
+    })
+
+    const cli = summary.results.find((result) => result.installationId === 'cli:global')
+    assert.ok(cli)
+    assert.equal(cli.status, 'unsupported')
+    assert.equal(cli.currentVersion, undefined)
+    const strategyItem = await cliPackageStrategy.plan({
+      installationId: 'cli:global',
+      target: 'cli',
+      ownership: 'none',
+      installed: true,
+      source: { kind: 'unsupported', source: launcher, reason: 'unsupported-manager' },
+      version: { latest: '90.0.2', status: 'unknown' },
+    }, {
+      options: {},
+      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) },
+    })
+    assert.deepEqual(cli.manualCommands, strategyItem.manualCommands, 'check and mutation planning must use the identical shared guidance')
+    assert.deepEqual(cli.manualCommands, [...exactVersionGuidance('90.0.2'), 'volta install nsolid-plugin@90.0.2'])
+    assert.equal(summary.exitCode, 0)
+  })
+
+  it('exits 2 with exact-version guidance and runs no package-manager update for a workspace CLI mutation', async () => {
+    const root = cliPackageRoot(path.join(home, 'repo', 'packages', 'core'), '1.0.3')
+    const launcher = cliLauncher(root)
+    const tarballBytes = Buffer.from('verified artifact')
+    const integrity = `sha512-${createHash('sha512').update(tarballBytes).digest('base64')}`
+    const commands: string[] = []
+
+    const summary = await update({
+      packageRoot: root,
+      executablePath: launcher,
+      cwd: path.join(home, 'scratch'),
+      yes: true,
+      registry: 'https://registry.example',
+      fetchImpl: async (url: RequestInfo | URL) => {
+        const text = String(url)
+        if (text.endsWith('/nsolid-plugin')) {
+          return new Response(JSON.stringify({
+            'dist-tags': { latest: '90.0.2' },
+            versions: {
+              '90.0.2': {
+                name: 'nsolid-plugin',
+                version: '90.0.2',
+                dist: { tarball: 'https://registry.example/nsolid-plugin-90.0.2.tgz', integrity },
+              },
+            },
+          }), { status: 200 })
+        }
+        if (text.endsWith('.tgz')) return new Response(new Uint8Array(tarballBytes), { status: 200 })
+        throw new Error(`unexpected fetch ${text}`)
+      },
+      commandRunner: {
+        run: async (spec: CommandSpec) => {
+          commands.push([spec.executable, ...spec.args].join(' '))
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        },
+      },
+    })
+
+    const cli = summary.results.find((result) => result.installationId === 'cli:global')
+    assert.ok(cli)
+    assert.equal(cli.status, 'unsupported')
+    assert.equal(cli.currentVersion, undefined)
+    assert.equal(cli.latestVersion, '90.0.2')
+    assert.deepEqual(cli.manualCommands, exactVersionGuidance('90.0.2'))
+    assert.equal(summary.exitCode, 2)
+    assert.equal(summary.success, false)
+    assert.deepEqual(commands, [], 'an unsupported launcher must not invoke any package manager')
   })
 })

@@ -1,5 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { gzipSync } from 'node:zlib'
+import { gitArchivePayloadDigest, nativePayloadTreeDigest } from '../../../src/update/native-payload.js'
 import { isSafeManifestPath, readArchiveWithLimit, resolveMarketplaceVersion, resolveRegistryVersion, sanitizeRepository } from '../../../src/update/version-source.js'
 
 describe('update version sources', () => {
@@ -250,5 +255,147 @@ describe('archive download limit', () => {
     const { body } = syntheticBody([encode('tiny')])
     const bytes = await readArchiveWithLimit({ headers: new Headers({ 'content-length': 'not-a-number' }), body } as unknown as Parameters<typeof readArchiveWithLimit>[0], 64)
     assert.equal(bytes.toString('utf8'), 'tiny')
+  })
+})
+
+describe('planned payload identities', () => {
+  const COMMIT = 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c'
+
+  function writeOctal (target: Buffer, offset: number, length: number, value: number): void {
+    target.write(value.toString(8).padStart(length - 1, '0') + '\0', offset, length, 'ascii')
+  }
+
+  function makeTar (files: Map<string, Buffer>): Buffer {
+    const output: Buffer[] = []
+    for (const [relative, content] of files) {
+      const header = Buffer.alloc(512)
+      header.write(`repository-commit/${relative}`, 0, 100, 'utf8')
+      writeOctal(header, 100, 8, 0o644)
+      writeOctal(header, 108, 8, 0)
+      writeOctal(header, 116, 8, 0)
+      writeOctal(header, 124, 12, content.length)
+      writeOctal(header, 136, 12, 0)
+      header.fill(0x20, 148, 156)
+      header[156] = '0'.charCodeAt(0)
+      header.write('ustar\0', 257, 6, 'ascii')
+      header.write('00', 263, 2, 'ascii')
+      const checksum = header.reduce((sum, byte) => sum + byte, 0)
+      header.write(checksum.toString(8).padStart(6, '0'), 148, 6, 'ascii')
+      header[154] = 0
+      header[155] = 0x20
+      output.push(header, content, Buffer.alloc((512 - (content.length % 512)) % 512))
+    }
+    output.push(Buffer.alloc(1024))
+    return Buffer.concat(output)
+  }
+
+  function cleanPayloadFiles (): Map<string, Buffer> {
+    return new Map([
+      ['bundle.json', Buffer.from('{"name":"nsolid-plugin","version":"1.0.2","skills":[]}')],
+      ['skills/example/SKILL.md', Buffer.from('# example\n')],
+    ])
+  }
+
+  function makeSnapshot (withReservedMetadata: boolean): string {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-version-source-snapshot-'))
+    for (const [relative, content] of cleanPayloadFiles()) {
+      const target = path.join(root, relative)
+      mkdirSync(path.dirname(target), { recursive: true })
+      writeFileSync(target, content)
+    }
+    if (withReservedMetadata) writeFileSync(path.join(root, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
+    return root
+  }
+
+  function gitFetch (archive: Buffer, requested: string[]): typeof fetch {
+    return (async (url: string | URL) => {
+      const target = String(url)
+      requested.push(target)
+      if (target.includes('codeload.github.com')) return new Response(new Uint8Array(archive), { status: 200 })
+      return new Response(JSON.stringify({ version: '1.0.2' }), { status: 200 })
+    }) as typeof fetch
+  }
+
+  it('carries strict and comparison identities from one verified local snapshot capture', async () => {
+    const root = makeSnapshot(false)
+    try {
+      const result = await resolveMarketplaceVersion({ kind: 'local-snapshot', root, manifestPath: 'bundle.json', freshness: 'verified' })
+      const strict = nativePayloadTreeDigest(root)!
+      assert.equal(result.version, '1.0.2')
+      const artifact = result.artifact
+      if (!artifact || artifact.kind !== 'local-snapshot') assert.fail('expected a local-snapshot artifact')
+      assert.equal(artifact.contentDigest, strict)
+      // A clean payload has no normalizable entries: both identities describe
+      // the same captured bytes, so the digests coincide.
+      assert.equal(artifact.comparisonDigest, strict)
+      assert.equal(artifact.comparisonProfile, 'codex-installed-v1')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed when a verified local snapshot drifts after discovery', async () => {
+    const root = makeSnapshot(false)
+    try {
+      const result = await resolveMarketplaceVersion({ kind: 'local-snapshot', root, manifestPath: 'bundle.json', freshness: 'verified', contentDigest: 'f'.repeat(64) })
+      assert.equal(result.error?.code, 'SOURCE_CONTENT_MISMATCH')
+      assert.equal(result.artifact, undefined)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('omits the comparison identity when a local snapshot ships reserved harness metadata', async () => {
+    const root = makeSnapshot(true)
+    try {
+      const result = await resolveMarketplaceVersion({ kind: 'local-snapshot', root, manifestPath: 'bundle.json', freshness: 'verified' })
+      assert.equal(result.error, undefined)
+      const artifact = result.artifact
+      if (!artifact || artifact.kind !== 'local-snapshot') assert.fail('expected a local-snapshot artifact')
+      assert.equal(artifact.contentDigest, nativePayloadTreeDigest(root)!)
+      assert.equal(artifact.comparisonDigest, undefined)
+      assert.equal(artifact.comparisonProfile, undefined)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('carries strict and comparison identities from one immutable Git archive parse', async () => {
+    const archive = gzipSync(makeTar(cleanPayloadFiles()))
+    const requested: string[] = []
+    const result = await resolveMarketplaceVersion({
+      kind: 'git',
+      repository: 'NodeSource/nsolid-plugin',
+      commit: COMMIT,
+      manifestPath: 'bundle.json',
+    }, { requireImmutable: true, fetchImpl: gitFetch(archive, requested) })
+
+    assert.equal(result.error, undefined)
+    const artifact = result.artifact
+    if (!artifact || artifact.kind !== 'git') assert.fail('expected a git artifact')
+    assert.equal(artifact.commit, COMMIT)
+    assert.equal(artifact.contentDigest, gitArchivePayloadDigest(archive)!)
+    assert.equal(artifact.comparisonDigest, gitArchivePayloadDigest(archive, {}, { profile: 'codex-installed-v1' })!)
+    assert.equal(artifact.comparisonProfile, 'codex-installed-v1')
+    assert.ok(requested.some((url) => url === `https://codeload.github.com/NodeSource/nsolid-plugin/tar.gz/${COMMIT}`))
+  })
+
+  it('omits the comparison identity when the immutable Git payload ships reserved harness metadata', async () => {
+    const files = cleanPayloadFiles()
+    files.set('.codex-marketplace-install.json', Buffer.from('{"source":"marketplace"}\n'))
+    const archive = gzipSync(makeTar(files))
+    const result = await resolveMarketplaceVersion({
+      kind: 'git',
+      repository: 'NodeSource/nsolid-plugin',
+      commit: COMMIT,
+      manifestPath: 'bundle.json',
+    }, { requireImmutable: true, fetchImpl: gitFetch(archive, []) })
+
+    assert.equal(result.error, undefined)
+    const artifact = result.artifact
+    if (!artifact || artifact.kind !== 'git') assert.fail('expected a git artifact')
+    assert.equal(artifact.contentDigest, gitArchivePayloadDigest(archive)!)
+    assert.equal(artifact.comparisonDigest, undefined)
+    assert.equal(artifact.comparisonProfile, undefined)
   })
 })

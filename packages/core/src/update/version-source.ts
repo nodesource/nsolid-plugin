@@ -2,11 +2,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import type { MarketplaceVersionSource, NpmArtifactIdentity, UpdateError, VersionLookupResult } from './types.js'
+import type { GitArtifactIdentity, MarketplaceVersionSource, NpmArtifactIdentity, UpdateError, VersionLookupResult } from './types.js'
 import { isStableVersion } from './version.js'
 import { bytesMatchIntegrity } from './integrity.js'
 import { redactSecrets } from './redaction.js'
-import { gitArchivePayloadDigest, nativePayloadTreeDigest } from './native-payload.js'
+import { CODEX_INSTALLED_COMPARISON_PROFILE, plannedPayloadIdentityFromArchive, plannedPayloadIdentityFromTree } from './native-payload.js'
 
 export interface VersionSourceOptions {
   fetchImpl?: typeof fetch
@@ -189,9 +189,19 @@ export async function resolveMarketplaceVersion (
       // the artifact root is that resolved subdirectory, never the snapshot
       // directory above it.
       const payloadRoot = path.resolve(source.root, payloadDirectory(source.manifestPath))
-      const contentDigest = nativePayloadTreeDigest(payloadRoot)
+      // ONE capture of the snapshot feeds both identities; a snapshot that
+      // already contains reserved harness metadata carries no comparison
+      // identity and fails closed at execution time.
+      const identity = plannedPayloadIdentityFromTree(payloadRoot, CODEX_INSTALLED_COMPARISON_PROFILE)
+      const contentDigest = identity.contentDigest
       if (source.contentDigest && contentDigest && source.contentDigest !== contentDigest) return { error: lookupError('SOURCE_CONTENT_MISMATCH', 'Marketplace snapshot content changed after discovery') }
-      if (contentDigest) result.artifact = { kind: 'local-snapshot', root: payloadRoot, contentDigest }
+      if (contentDigest) {
+        result.artifact = { kind: 'local-snapshot', root: payloadRoot, contentDigest }
+        if (identity.comparisonDigest && identity.comparisonProfile) {
+          result.artifact.comparisonDigest = identity.comparisonDigest
+          result.artifact.comparisonProfile = identity.comparisonProfile
+        }
+      }
     }
     return result
   }
@@ -219,14 +229,25 @@ export async function resolveMarketplaceVersion (
     const manifestDigest = sha256(body)
     const payloadPath = payloadDirectory(source.manifestPath)
     const payloadManifest = payloadPath ? source.manifestPath.slice(payloadPath.length + 1) : source.manifestPath
-    const contentDigest = commit && options.requireImmutable
-      ? await resolveGitPayloadDigest(repository, commit, payloadPath, payloadManifest, options)
-      : manifestDigest
-    if (commit && options.requireImmutable && !contentDigest) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Marketplace payload could not be captured from the immutable commit') }
+    const identity = commit && options.requireImmutable
+      ? await resolveGitPayloadIdentity(repository, commit, payloadPath, payloadManifest, options)
+      : undefined
+    const contentDigest = identity?.contentDigest ?? manifestDigest
+    if (commit && options.requireImmutable && !identity?.contentDigest) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Marketplace payload could not be captured from the immutable commit') }
     if (source.contentDigest && source.contentDigest !== contentDigest) return { error: lookupError('SOURCE_CONTENT_MISMATCH', 'Marketplace content changed after discovery') }
-    return commit
-      ? { version, artifact: { kind: 'git', repository, commit, contentDigest: contentDigest ?? manifestDigest, payloadPath: payloadPath || undefined } }
-      : { version }
+    if (!commit) return { version }
+    const artifact: GitArtifactIdentity = {
+      kind: 'git',
+      repository,
+      commit,
+      contentDigest: contentDigest ?? manifestDigest,
+      payloadPath: payloadPath || undefined,
+    }
+    if (identity?.comparisonDigest) {
+      artifact.comparisonDigest = identity.comparisonDigest
+      artifact.comparisonProfile = CODEX_INSTALLED_COMPARISON_PROFILE
+    }
+    return { version, artifact }
   } catch (error) {
     return { error: lookupError('MARKETPLACE_LOOKUP_FAILED', sanitizeLookupMessage(error)) }
   }
@@ -254,7 +275,7 @@ export async function resolveFixedGitBundleVersion (
     const commit = response.headers.get('x-commit-sha') ?? response.headers.get('x-git-commit') ?? effectiveRevision
     if (options.requireImmutable && !isFullCommit(commit)) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Fixed source response did not identify an immutable commit') }
     const contentDigest = isFullCommit(commit) && options.requireImmutable
-      ? await resolveGitPayloadDigest(repository, commit, '', '', options)
+      ? (await resolveGitPayloadIdentity(repository, commit, '', '', options)).contentDigest
       : sha256(body)
     if (isFullCommit(commit) && options.requireImmutable && !contentDigest) return { error: lookupError('IMMUTABLE_SOURCE_UNAVAILABLE', 'Fixed source payload could not be captured from the immutable commit') }
     return isFullCommit(commit)
@@ -431,16 +452,27 @@ export async function readArchiveWithLimit (response: LimitedBodyResponse, limit
   return Buffer.concat(chunks)
 }
 
-async function resolveGitPayloadDigest (repository: string, commit: string, payloadPath: string, payloadManifest: string, options: VersionSourceOptions): Promise<string | undefined> {
+/**
+ * Download the immutable commit archive once and derive both identities from
+ * the same planned source bytes: the strict evidence digest and the
+ * installed-comparison digest under the Codex normalization profile. A
+ * planned payload that already contains reserved harness metadata carries no
+ * comparison identity, so execution fails closed instead of masking it.
+ */
+async function resolveGitPayloadIdentity (repository: string, commit: string, payloadPath: string, payloadManifest: string, options: VersionSourceOptions): Promise<{ contentDigest?: string; comparisonDigest?: string }> {
   try {
     const parsed = new URL(repository)
-    if (parsed.hostname.toLowerCase() !== 'github.com') return undefined
+    if (parsed.hostname.toLowerCase() !== 'github.com') return {}
     const segments = parsed.pathname.replace(/\.git$/, '').split('/').filter(Boolean)
-    if (segments.length !== 2 || !isFullCommit(commit)) return undefined
+    if (segments.length !== 2 || !isFullCommit(commit)) return {}
     const response = await fetchWithTimeout(`https://codeload.github.com/${segments[0]}/${segments[1]}/tar.gz/${commit}`, options)
-    if (!response.ok) return undefined
-    return gitArchivePayloadDigest(await readArchiveWithLimit(response), { payloadPath, manifestPath: payloadManifest })
-  } catch { return undefined }
+    if (!response.ok) return {}
+    const archive = await readArchiveWithLimit(response)
+    const scope = { payloadPath, manifestPath: payloadManifest }
+    // ONE archive parse feeds both identities.
+    const identity = plannedPayloadIdentityFromArchive(archive, scope, CODEX_INSTALLED_COMPARISON_PROFILE)
+    return { contentDigest: identity.contentDigest, comparisonDigest: identity.comparisonDigest }
+  } catch { return {} }
 }
 
 /** Repo-relative POSIX directory of a manifest path ('' when it sits at the root). */

@@ -56,41 +56,40 @@ function printUsage (): void {
   console.log(`Usage: nsolid-plugin <command> [options]
 
 Commands:
-  setup      Authenticate with NodeSource and prepare the MCP bridge runtime (may open a browser; first run needs npm access)
-  install    Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; prepares the MCP bridge runtime first; does not open a browser)
-  uninstall  Remove N|Solid Plugin skills for a harness
-  logout     Forget your stored NodeSource login (removes credentials only)
-  switch-org Force re-authentication to switch NodeSource organizations (opens a browser; affects all harnesses)
-  doctor     Check installation health for a harness
-  restore    Restore a harness MCP config from the latest backup
-  version    Report the CLI and bundled plugin versions
-  update     Check or update the CLI and detected harness installations
+  setup       Authenticate with NodeSource and prepare the MCP bridge (may open a browser)
+  install     Install skills/MCP for a harness without opening a browser
+  uninstall   Remove skills for a harness
+  logout      Forget the stored NodeSource login
+  switch-org  Re-authenticate to switch NodeSource organizations (opens a browser)
+  doctor      Check installation health for a harness
+  restore     Restore a harness MCP config from the latest backup
+  version     Report CLI and bundled plugin versions
+  update      Check or update the CLI and detected harness installations
 
 Options:
-  --harness <harness>    Target harness (required in non-interactive mode): ${HARNESS_VALUES.join(', ')}
-  --keep-credentials     Do not remove credentials even if this was the last harness (uninstall only)
-  --bundle <path>        Path to bundle.json (default: core package bundle.json)
-  --skills-source <path> Path to skills source directory (default: core package root)
-  --backup <path>       Restore a specific backup file (restore command only)
-  --list                List available backups (restore command only)
-  --verbose             Enable detailed logging to stderr
-  --json                Output doctor report as JSON (machine-readable)
-  --no-color            Disable colored output
-  --quiet               Suppress step-by-step progress output (setup/install/switch-org)
-  --yes                 Skip interactive confirmation prompts
-  --check               Report update status without mutating anything
+  --harness <harness>   Target harness (required without a TTY): ${HARNESS_VALUES.join(', ')}
+  --yes                 Apply updates without interactive confirmation
+  --check               Only report update status; never mutate
   --all                 Include every detected installation (cannot combine with --harness)
-  --version             Print the CLI and bundled plugin versions (alias for version)
-  --accounts-url <url>  Explicit origin-only accounts URL override for setup/switch-org
+  --json                Machine-readable output
+  --no-color            Disable colored output
+  --quiet               Suppress step-by-step progress (setup/install/switch-org)
+  --verbose             Detailed logging to stderr; shows the full technical update plan
+  --bundle <path>       Path to bundle.json
+  --skills-source <p>   Path to skills source directory
+  --backup <file>       Restore a specific backup file (restore only)
+  --list                List available backups (restore only)
+  --keep-credentials    Do not remove credentials on last-harness uninstall
+  --accounts-url <url>  Accounts URL override for setup/switch-org
+  --version             Print CLI and bundled plugin versions
   --help                Show this help message
 
-Distribution notes:
-  Claude/Codex/Antigravity: install from the GitHub plugin root; setup authenticates and prepares the MCP bridge runtime.
-  Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
-  OpenCode: run setup --harness opencode — it authenticates, prepares the MCP bridge runtime, and installs skills + MCP config in one step.
-  Install: the fallback direct installer provisions the MCP bridge runtime first, then installs assets; it never opens a browser.
-  After switch-org, a direct-config harness passed to --harness (OpenCode, Pi, fallback CLI installs) has its MCP config refreshed on the spot; Claude/Codex/Antigravity native plugins must be reconnected, and other direct-config harnesses need a later setup/install to re-bake the new org's token.
-  Auth: only setup/switch-org may open a browser.`)
+Notes:
+  Claude/Codex/Antigravity: install from the GitHub plugin root, then run setup.
+  Pi: use pi install for skills; setup only writes MCP config.
+  OpenCode: setup --harness opencode installs everything in one step.
+  After switch-org, re-run setup/install per harness to re-bake the new org token.
+  Only setup and switch-org may open a browser.`)
 }
 
 function printVersion (json: boolean): void {
@@ -113,65 +112,141 @@ async function confirmUpdatePlan (_context: UpdateConfirmationContext, _color: b
   }
 }
 
-function printUpdatePlan (plan: UpdatePlan, color: boolean): void {
+function printUpdatePlan (plan: UpdatePlan, color: boolean, verbose: boolean): void {
   if (plan.items.length === 0) {
     process.stderr.write('No installations detected.\n')
     return
   }
-  process.stderr.write(plan.checkOnly ? 'Update check:\n' : 'Update plan:\n')
-  for (const item of plan.items) printUpdatePlanItem(item, color, process.stderr)
+  process.stderr.write(plan.checkOnly ? 'Update check:\n' : 'Updates available:\n')
+  for (const item of plan.items) printUpdatePlanItem(item, color, verbose, process.stderr)
 }
 
-function printUpdatePlanItem (item: UpdatePlanItem, color: boolean, output: NodeJS.WritableStream): void {
+function humanVersionStatus (item: UpdatePlanItem): string {
+  if (item.source.kind === 'unsupported') return 'manual update required'
+  switch (item.version.status) {
+    case 'update-available': return 'update available'
+    case 'newer-than-registry': return 'up to date'
+    case 'current': return 'up to date'
+    case 'unknown': return 'version unknown'
+  }
+}
+
+function formatChangeNames (names: readonly string[]): string {
+  if (names.length <= 3) return names.join(', ')
+  return `${names.slice(0, 3).join(', ')}, … (+${names.length - 3} more)`
+}
+
+function formatChanges (changes: NonNullable<UpdatePlanItem['changes']>): string {
+  const parts: string[] = []
+  const noun = (count: number, singular: string, plural: string) => count === 1 ? singular : plural
+  if (changes.skillsAdded.length > 0) parts.push(`+${changes.skillsAdded.length} ${noun(changes.skillsAdded.length, 'skill', 'skills')} (${formatChangeNames(changes.skillsAdded)})`)
+  if (changes.skillsRemoved.length > 0) parts.push(`−${changes.skillsRemoved.length} ${noun(changes.skillsRemoved.length, 'skill', 'skills')} (${formatChangeNames(changes.skillsRemoved)})`)
+  if (changes.skillsUpdated > 0) parts.push(`${changes.skillsUpdated} ${noun(changes.skillsUpdated, 'skill', 'skills')} refreshed`)
+  if (changes.mcpAdded.length > 0) parts.push(`+${changes.mcpAdded.length} MCP server${changes.mcpAdded.length === 1 ? '' : 's'} (${formatChangeNames(changes.mcpAdded)})`)
+  if (changes.mcpRemoved.length > 0) parts.push(`−${changes.mcpRemoved.length} MCP server${changes.mcpRemoved.length === 1 ? '' : 's'} (${formatChangeNames(changes.mcpRemoved)})`)
+  if (changes.mcpUpdated > 0) parts.push(`${changes.mcpUpdated} MCP server${changes.mcpUpdated === 1 ? '' : 's'} reconciled`)
+  return parts.join(', ')
+}
+
+function printUpdatePlanItem (item: UpdatePlanItem, color: boolean, verbose: boolean, output: NodeJS.WritableStream): void {
   const paint = (value: string) => color ? C.dim(value) : value
-  output.write(`  ${item.installationId} — ${item.ownership} — ${item.version.status}`)
-  if (item.version.current && item.version.latest) output.write(` (${item.version.current} → ${item.version.latest})`)
-  else if (item.version.current) output.write(` (${item.version.current})`)
-  else if (item.version.latest) output.write(` (latest: ${item.version.latest})`)
-  output.write(`\n    source: ${sourceLabel(item)}\n`)
-  for (const command of item.manualCommands ?? []) output.write(`    ${paint('manual:')} ${command}\n`)
   if (item.planningError) {
-    output.write(`    error: ${item.planningError.message}\n`)
+    output.write(`  ✗ ${item.installationId} — ${item.planningError.message}\n`)
+    return
+  }
+  output.write(`  ${item.installationId} — ${humanVersionStatus(item)}`)
+  if (item.version.current && item.version.latest && item.version.status !== 'current') {
+    if (item.version.status === 'newer-than-registry') output.write(` (${item.version.current}; registry has ${item.version.latest})`)
+    else output.write(` (${item.version.current} → ${item.version.latest})`)
+  } else if (item.version.current) output.write(` (${item.version.current})`)
+  else if (item.version.latest) output.write(` (latest: ${item.version.latest})`)
+  output.write('\n')
+  if (item.changes) {
+    const changeText = formatChanges(item.changes)
+    if (changeText) output.write(`    ${paint('changes:')} ${changeText}\n`)
+  }
+  for (const command of item.manualCommands ?? []) output.write(`    → ${command}\n`)
+  if (!verbose && item.steps.length > 0) {
+    output.write(`    ${paint('(run with --verbose to see the full technical plan)')}\n`)
     return
   }
   for (const step of item.steps) {
     if (step.kind === 'command') output.write(`    ${paint('run:')} ${formatCommand(step.command.executable, step.command.args)}\n`)
-    if (step.kind === 'filesystem') output.write(`    ${paint(`${step.operation}:`)} ${step.paths.join(', ')}\n`)
+    if (step.kind === 'filesystem') output.write(`    ${paint(`${step.operation}:`)} ${formatPlanPaths(step.paths)}\n`)
     if (step.kind === 'validation') output.write(`    ${paint('check:')} ${step.checks.join('; ')}\n`)
   }
   if (item.rollbackSteps.length > 0) {
     output.write(`    ${paint('rollback:')}\n`)
     for (const step of item.rollbackSteps) {
       if (step.kind === 'command') output.write(`      ${paint('run:')} ${formatCommand(step.command.executable, step.command.args)}\n`)
-      if (step.kind === 'filesystem') output.write(`      ${paint(`${step.operation}:`)} ${step.paths.join(', ')}\n`)
+      if (step.kind === 'filesystem') output.write(`      ${paint(`${step.operation}:`)} ${formatPlanPaths(step.paths)}\n`)
       if (step.kind === 'validation') output.write(`      ${paint('check:')} ${step.checks.join('; ')}\n`)
     }
   }
 }
 
-function printUpdateSummary (summary: UpdateSummary, color: boolean): void {
-  for (const result of summary.results) {
-    const version = result.resultingVersion ?? result.latestVersion ?? result.currentVersion
-    const suffix = version ? ` (${version})` : ''
-    const error = result.error ? ` — ${result.error.message}` : ''
-    console.log(`${result.installationId}: ${result.status}${suffix}${error}`)
-    if (result.rollbackCommand && result.status === 'failed') console.log(`  restore: ${result.rollbackCommand}`)
-    if (result.restartHint && result.status === 'updated') console.log(`  ${result.restartHint}`)
-  }
-  const counts = Object.entries(summary.counts).filter(([, count]) => count > 0).map(([status, count]) => `${status}=${count}`).join(', ')
-  console.log(`${color ? C.dim('Summary:') : 'Summary:'} ${counts || 'none'}`)
+/**
+ * Human-readable plan rendering caps long path lists: the JSON output stays
+ * complete, but a fallback plan must not print every tracked skill path three
+ * times on stderr.
+ */
+function formatPlanPaths (paths: readonly string[], limit = 3): string {
+  if (paths.length <= limit) return paths.join(', ')
+  const remaining = paths.length - limit
+  const noun = remaining === 1 ? 'path' : 'paths'
+  return `${paths.slice(0, limit).join(', ')}, … (+${remaining} ${noun})`
 }
 
-function sourceLabel (item: UpdatePlanItem): string {
-  const source = item.source
-  if (source.kind === 'none') return 'none'
-  if (source.kind === 'unsupported') return `${source.reason} (${source.source})`
-  if (source.kind === 'global-package') return `${source.packageManager}: ${source.packageName}`
-  if (source.kind === 'claude-marketplace') return `${source.pluginId} @ ${source.marketplace} (${source.scope})`
-  if (source.kind === 'codex-marketplace') return `${source.pluginId} @ ${source.marketplace}`
-  if (source.kind === 'pi-package') return `${source.spec} (${source.scopes.join(',')})`
-  if (source.kind === 'antigravity-git') return `${source.url} (${source.layout.kind})`
-  return `fallback${source.executor ? ` (${source.executor})` : ''}`
+function printUpdateSummary (summary: UpdateSummary, color: boolean): void {
+  const ok = (value: string) => color ? C.green(value) : value
+  const bad = (value: string) => color ? C.red(value) : value
+  for (const result of summary.results) {
+    switch (result.status) {
+      case 'updated': {
+        const span = result.currentVersion && result.resultingVersion
+          ? ` (${result.currentVersion} → ${result.resultingVersion})`
+          : result.resultingVersion ? ` (${result.resultingVersion})` : ''
+        console.log(`${ok('✓')} ${result.installationId} updated${span}`)
+        if (result.restartHint) console.log(`  ${result.restartHint}`)
+        break
+      }
+      case 'current': {
+        const suffix = result.currentVersion ? ` (${result.currentVersion})` : ''
+        console.log(`${ok('✓')} ${result.installationId} is up to date${suffix}`)
+        break
+      }
+      case 'newer-than-registry': {
+        const local = result.currentVersion ?? '?'
+        const registry = result.latestVersion ? `; registry has ${result.latestVersion}` : ''
+        console.log(`${ok('✓')} ${result.installationId} is up to date (${local}${registry})`)
+        break
+      }
+      case 'unsupported': {
+        console.log(`${bad('✗')} ${result.installationId} cannot be updated automatically`)
+        for (const command of (result.manualCommands ?? []).slice(0, 2)) console.log(`  → ${command}`)
+        break
+      }
+      case 'failed': {
+        const error = result.error ? ` — ${result.error.message}` : ''
+        console.log(`${bad('✗')} ${result.installationId} update failed${error}`)
+        if (result.rollbackCommand) console.log(`  → restore: ${result.rollbackCommand}`)
+        break
+      }
+      case 'skipped': {
+        const error = result.error ? ` — ${result.error.message}` : ''
+        console.log(`${bad('✗')} ${result.installationId} skipped${error}`)
+        break
+      }
+      case 'unknown':
+        console.log(`${result.installationId} — installed version unknown`)
+        break
+      case 'not-installed':
+        console.log(`${result.installationId} — not installed`)
+        break
+      default:
+        console.log(`${result.installationId}: ${result.status}`)
+    }
+  }
 }
 
 function formatCommand (executable: string, args: readonly string[]): string {
@@ -411,10 +486,21 @@ async function main (): Promise<void> {
           : undefined,
       }
       const plan = await planUpdates(updateOptions)
-      printUpdatePlan(plan, color)
+      const actionable = plan.items.some((item) => item.version.status === 'update-available')
+      const willConfirm = isInteractive() && values.yes !== true
+      // Human surface: --check and interactive confirmation show the plan;
+      // machine runs (--json) and approved runs (--yes) stay quiet.
+      if (values.json !== true && (values.check === true || (actionable && willConfirm))) printUpdatePlan(plan, color, values.verbose === true)
+      if (values.json !== true && !values.check && values.yes === true) {
+        for (const item of plan.items) {
+          if (item.version.status === 'update-available' && item.version.current && item.version.latest) {
+            process.stderr.write(`→ Updating ${item.installationId} (${item.version.current} → ${item.version.latest})…\n`)
+          }
+        }
+      }
       const summary = await executeUpdatePlan(plan, updateOptions)
       if (values.json === true) console.log(JSON.stringify(summary))
-      else printUpdateSummary(summary, color)
+      else if (!values.check) printUpdateSummary(summary, color)
       process.exitCode = summary.exitCode
       break
     }

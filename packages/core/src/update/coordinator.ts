@@ -19,6 +19,7 @@ import type {
   VersionLookupResult,
 } from './types.js'
 import { planItem, resultFromPlan } from './strategies/common.js'
+import { summarizeFallbackChanges } from './strategies/fallback.js'
 import { cliPackageStrategy } from './strategies/cli-package.js'
 import { claudeStrategy } from './strategies/claude.js'
 import { codexStrategy } from './strategies/codex.js'
@@ -27,6 +28,7 @@ import { piStrategy } from './strategies/pi.js'
 import { fallbackStrategy } from './strategies/fallback.js'
 import { recoverFallbackJournal } from './fallback-journal.js'
 import { getTrackingFilePath } from '../utils/path.js'
+import { cliExactVersionManualCommands } from './cli-guidance.js'
 
 const STATUSES: readonly UpdateStatus[] = [
   'current',
@@ -55,6 +57,7 @@ export async function planUpdates (options: UpdateOptions = {}): Promise<UpdateP
     commandRunner,
     cwd: options.cwd,
     packageRoot: options.packageRoot,
+    executablePath: options.executablePath,
     includeCli: options.harness === undefined,
     readOnly: options.check === true,
     deferCliOwnership: options.check !== true,
@@ -79,31 +82,38 @@ export async function planUpdates (options: UpdateOptions = {}): Promise<UpdateP
     const plannedStatus = lookup.version
       ? classifyVersions(installation.version.current, lookup.version).status
       : installation.version.status
-    if (options.check !== true && lookup.artifact?.kind === 'npm' && (plannedStatus === 'update-available' || plannedStatus === 'unknown') && !lookup.artifact.tarballPath) {
+    if (
+      installation.target === 'cli' &&
+      options.check !== true &&
+      installation.source.kind === 'global-package' &&
+      (plannedStatus === 'update-available' || plannedStatus === 'unknown')
+    ) {
+      // Deferred structural evidence is sufficient to classify a no-op, but an
+      // actual global mutation requires the positive package-manager realpath
+      // proof immediately before its command can be planned. Structurally
+      // unsupported workspace, npx, and wrapper launches never enter this path.
+      installation = await detectCliInstallation({
+        commandRunner,
+        cwd: options.cwd,
+        packageRoot: options.packageRoot,
+        executablePath: options.executablePath,
+        includeCli: true,
+        readOnly: false,
+      })
+    }
+    if (
+      options.check !== true &&
+      installation.source.kind !== 'unsupported' &&
+      lookup.artifact?.kind === 'npm' &&
+      (plannedStatus === 'update-available' || plannedStatus === 'unknown') &&
+      !lookup.artifact.tarballPath
+    ) {
       try {
         lookup.artifact = await downloadNpmArtifact(lookup.artifact, { fetchImpl: options.fetchImpl })
       } catch {
         items.push(planItem(installation, [], [], undefined, { code: 'ARTIFACT_INTEGRITY_FAILED', message: 'Planned registry artifact could not be downloaded or verified' }))
         continue
       }
-    }
-    if (
-      installation.target === 'cli' &&
-      options.check !== true &&
-      installation.source.kind === 'unsupported' &&
-      (plannedStatus === 'update-available' || (plannedStatus === 'unknown' && installation.version.status === 'unknown'))
-    ) {
-      // Ownership probing is deferred until a mutation is actually possible.
-      // This keeps current/newer-than-registry paths free of package-manager
-      // subprocesses while still requiring positive ownership evidence before
-      // an update command is planned.
-      installation = await detectCliInstallation({
-        commandRunner,
-        cwd: options.cwd,
-        packageRoot: options.packageRoot,
-        includeCli: true,
-        readOnly: false,
-      })
     }
     const resolved = lookup.version
       ? {
@@ -126,7 +136,7 @@ export async function planUpdates (options: UpdateOptions = {}): Promise<UpdateP
             reason: 'git' as const,
           },
         }
-        items.push({ ...planItem(unsupported), manualCommands: installationGuidance(installation.target) })
+        items.push({ ...planItem(unsupported), manualCommands: installationGuidance(installation.target, resolved.version.latest) })
         continue
       }
       items.push(planItem(resolved, [], [], undefined, lookup.error))
@@ -136,7 +146,34 @@ export async function planUpdates (options: UpdateOptions = {}): Promise<UpdateP
     // strategy to discover an executor, construct commands, or inspect
     // writable transaction state.
     if (options.check === true) {
-      items.push(planItem(resolved))
+      let item = planItem(resolved)
+      // A read-only check still answers "what will change": for fallback
+      // installations it downloads the verified artifact to a temporary
+      // location, summarizes the skill/MCP diff, and removes the artifact
+      // again. Best-effort — a failed summary never blocks the check.
+      if (
+        resolved.source.kind === 'fallback' &&
+        (resolved.version.status === 'update-available' || resolved.version.status === 'unknown') &&
+        resolved.artifact?.kind === 'npm'
+      ) {
+        try {
+          const artifact = resolved.artifact.tarballPath
+            ? resolved.artifact
+            : await downloadNpmArtifact(resolved.artifact, { fetchImpl: options.fetchImpl })
+          // downloadNpmArtifact materializes the tarball path; the already-
+          // downloaded branch carries it by construction.
+          const changes = await summarizeFallbackChanges(resolved, artifact.tarballPath!)
+          if (changes) item = { ...item, changes }
+          if (!resolved.artifact.tarballPath) await cleanupNpmArtifact(artifact)
+        } catch { /* summary stays absent; the version report is unaffected */ }
+      }
+      // An unproven CLI launch still carries the exact-version recovery
+      // commands so the read-only report stays actionable.
+      items.push(
+        resolved.target === 'cli' && resolved.source.kind === 'unsupported'
+          ? { ...item, manualCommands: cliExactVersionManualCommands(resolved.version.latest, resolved.source.source) }
+          : item
+      )
       continue
     }
     const strategy = strategyFor(resolved)
@@ -275,7 +312,9 @@ export function summarizeResults (checkOnly: boolean, results: UpdateResult[]): 
 function statusForPlan (item: UpdatePlanItem, checkOnly: boolean): UpdateStatus {
   if (checkOnly) {
     if (!item.installed || item.source.kind === 'none') return 'not-installed'
-    if (item.source.kind === 'unsupported' && item.target !== 'cli') return 'unsupported'
+    // An unsupported source has no proven installation identity, so it must
+    // not inherit a version-derived status such as update-available.
+    if (item.source.kind === 'unsupported') return 'unsupported'
     switch (item.version.status) {
       case 'current': return 'current'
       case 'update-available': return 'update-available'
@@ -366,14 +405,14 @@ function syntheticInstallation (harness: HarnessType): UpdateInstallation {
   }
 }
 
-function installationGuidance (target: UpdateInstallation['target']): readonly string[] {
+function installationGuidance (target: UpdateInstallation['target'], latestVersion?: string): readonly string[] {
   switch (target) {
     case 'claude': return ['claude plugin marketplace add NodeSource/nsolid-plugin', 'claude plugin install nsolid-plugin@nodesource']
     case 'codex': return ['codex plugin marketplace add NodeSource/nsolid-plugin', 'codex plugin add nsolid-plugin@nodesource']
     case 'antigravity': return ['agy plugin install https://github.com/NodeSource/nsolid-plugin.git']
     case 'opencode': return ['nsolid-plugin setup --harness opencode', 'nsolid-plugin install --harness opencode']
     case 'pi': return ['pi install npm:nsolid-pi-plugin', 'nsolid-plugin setup --harness pi']
-    case 'cli': return ['npm install --global nsolid-plugin']
+    case 'cli': return cliExactVersionManualCommands(latestVersion, undefined)
   }
 }
 

@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { cp as realFsCp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { refreshOwnedInstallation } from '../../../src/update/fallback-transaction.js'
 import { appendFallbackJournalEntries, applyFallbackEntry, beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, fallbackJournalPath, markFallbackJournalMutating, reloadFallbackJournal, registerFallbackStage, restoreFallbackJournal, trackingDigest } from '../../../src/update/fallback-journal.js'
-import { valueDigest } from '../../../src/update/mcp-lookup.js'
+import { valueDigest, readMcpFieldDigests, harnessMcpKey } from '../../../src/update/mcp-lookup.js'
 import { randomUUID } from 'node:crypto'
 import type { FallbackTransactionIdentity } from '../../../src/update/types.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
-import { getSkillsDir, getTrackingFilePath } from '../../../src/utils/path.js'
+import { getAuthFilePath, getSkillsDir, getTrackingFilePath } from '../../../src/utils/path.js'
 import { readTrackingFile } from '../../../src/skills/skill-tracker.js'
 import { parseJsonc } from '../../../src/utils/config.js'
 
@@ -1380,5 +1383,165 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true })
     }
+  })
+})
+
+describe('credentialless fallback reconciliation', () => {
+  interface CredentiallessFixture {
+    skillPath: string
+    sourceRoot: string
+    bundlePath: string
+    configPath: string
+    bundle: { version: string }
+  }
+
+  /** Fixture matching a real credentialless install: skills tracked, zero tracked MCP servers, a new bundle that wants MCP servers. */
+  async function setupCredentiallessFixture (): Promise<CredentiallessFixture> {
+    const sharedDir = path.join(home, '.agents', 'skills')
+    const skillPath = path.join(sharedDir, 'tracked')
+    mkdirSync(skillPath, { recursive: true })
+    writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
+    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-credentialless-'))
+    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
+    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
+    const bundlePath = path.join(sourceRoot, 'bundle.json')
+    writeJson(bundlePath, {
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
+      mcpServers: [{ name: 'new-server', url: 'https://mcp.example.com/mcp', headers: { AUTH: 'auth-token-value' } }],
+    })
+    const configPath = path.join(home, '.claude.json')
+    writeJson(configPath, {})
+    writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: 'claude',
+      bundleVersion: '1.0.0',
+      bundleVersions: { claude: '1.0.0' },
+      skills: [{ name: 'tracked', path: skillPath, paths: { claude: skillPath }, installedAt: new Date().toISOString(), harnesses: ['claude'] }],
+      mcpServers: [],
+    })
+    return { skillPath, sourceRoot, bundlePath, configPath, bundle: { version: '1.0.1' } }
+  }
+
+  function validCredentialsJson (): Record<string, unknown> {
+    return {
+      serviceToken: 'service-token',
+      organizationId: 'org-1',
+      saasToken: 'saas-token',
+      consoleUrl: 'https://console.example.com',
+      mcpUrl: 'https://mcp.example.com/mcp',
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    }
+  }
+
+  it('fails closed without mutation when zero MCP servers are tracked and credentials are missing, then reconciles after credentials become available', async () => {
+    const fixture = await setupCredentiallessFixture()
+    const configBefore = readFileSync(fixture.configPath, 'utf8')
+
+    const blocked = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+    assert.equal(blocked.success, false)
+    assert.equal(blocked.error?.code, 'MCP_RECONCILIATION_REQUIRED')
+    assert.equal(blocked.rollbackAttempted, undefined, 'the reconciliation gate must abort before any mutation')
+
+    // Nothing moved: tracking, owned skills, MCP config, and bundle evidence are unchanged.
+    const blockedTracking = await readTrackingFile()
+    assert.equal(blockedTracking?.bundleVersions?.claude, '1.0.0')
+    assert.equal(blockedTracking?.mcpServers.length, 0)
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old')
+    assert.equal(readFileSync(fixture.configPath, 'utf8'), configBefore)
+
+    // The same fixture reconciles successfully once valid credentials exist.
+    writeJson(getAuthFilePath(), validCredentialsJson())
+    const retried = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+    assert.equal(retried.success, true, String(retried.error?.code ?? ''))
+    const tracking = await readTrackingFile()
+    assert.equal(tracking?.bundleVersions?.claude, '1.0.1')
+    const trackedServer = tracking?.mcpServers.find((entry) => entry.name === 'new-server')
+    assert.ok(trackedServer, 'the desired MCP server must be tracked after reconciliation')
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'new')
+    const config = parseJsonc(readFileSync(fixture.configPath, 'utf8')) as { mcpServers: Record<string, { url: string }> }
+    assert.equal(config.mcpServers['new-server'].url, 'https://mcp.example.com/mcp')
+    rmSync(fixture.sourceRoot, { recursive: true, force: true })
+  })
+
+  it('publishes a schema-bounded structured result envelope from the child CLI with --result', async () => {
+    const fixture = await setupCredentiallessFixture()
+    const trackingPath = getTrackingFilePath()
+    const identity: FallbackTransactionIdentity = {
+      installationId: 'claude:fallback',
+      harness: 'claude',
+      trackingPath,
+      trackingDigest: trackingDigest(trackingPath)!,
+      nonce: randomUUID(),
+      ownedSkillPaths: [fixture.skillPath],
+      ownedLinkPaths: [path.join(getHarnessSkillsPath('claude'), 'tracked')],
+      ownedMcpFields: [],
+      ownedMcpConfigPaths: [path.resolve(fixture.configPath)],
+      approvedDestinationRoots: [getSkillsDir(), getHarnessSkillsPath('claude')].map((value) => path.resolve(value)),
+    }
+    const workspace = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-child-result-'))
+    if (process.platform !== 'win32') chmodSync(workspace, 0o700)
+    const manifestPath = path.join(workspace, 'transaction.json')
+    writeJson(manifestPath, identity)
+    const resultPath = path.join(workspace, 'result.json')
+
+    const { pathToFileURL } = await import('node:url')
+    const require = createRequire(import.meta.url)
+    const cliPath = fileURLToPath(new URL('../../../src/update/refresh-owned-cli.ts', import.meta.url))
+    const child = spawn(process.execPath, ['--import', pathToFileURL(require.resolve('tsx/esm')).href, cliPath, '--transaction', manifestPath, '--result', resultPath], {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      cwd: path.resolve(fileURLToPath(import.meta.url), '../../../../..'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const [exitCode, stdout, stderr] = await new Promise<[number | null, string, string]>((resolve, reject) => {
+      let out = ''
+      let err = ''
+      child.stdout?.on('data', (chunk) => { out += String(chunk) })
+      child.stderr?.on('data', (chunk) => { err += String(chunk) })
+      child.on('error', reject)
+      child.on('close', (code) => resolve([code, out, err]))
+    })
+
+    assert.equal(exitCode, 1, `child should fail closed without credentials (stderr: ${stderr} stdout: ${stdout})`)
+    const stat = statSync(resultPath)
+    if (process.platform !== 'win32') assert.equal(stat.mode & 0o777, 0o600)
+    assert.equal(stat.size <= 4096, true, 'the envelope must stay bounded')
+    const envelope = JSON.parse(readFileSync(resultPath, 'utf8')) as Record<string, unknown>
+    assert.deepEqual(Object.keys(envelope).sort(), ['code', 'nonce', 'rollback', 'schema'], 'the envelope must not transport arbitrary child text')
+    assert.equal(envelope.schema, 1)
+    assert.equal(envelope.nonce, identity.nonce)
+    assert.equal(envelope.code, 'MCP_RECONCILIATION_REQUIRED')
+    assert.deepEqual(envelope.rollback, { attempted: false })
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old', 'the child must not mutate owned state')
+    rmSync(fixture.sourceRoot, { recursive: true, force: true })
+    rmSync(workspace, { recursive: true, force: true })
+  })
+  it('refreshes an owned MCP config whose tracked fields already match the desired render without touching the config bytes', async () => {
+    const fixture = await setupCredentiallessFixture()
+    const serverRecord = { type: 'http', url: 'https://mcp.example.com/mcp', headers: { AUTH: 'auth-token-value' } }
+    writeJson(fixture.configPath, { mcpServers: { 'new-server': serverRecord } })
+    const configBefore = readFileSync(fixture.configPath, 'utf8')
+    const fields = readMcpFieldDigests(fixture.configPath, 'new-server', { preferredKey: harnessMcpKey('claude') })
+    assert.ok(fields)
+    const trackingPath = getTrackingFilePath()
+    const current = JSON.parse(readFileSync(trackingPath, 'utf8')) as Record<string, unknown>
+    writeJson(trackingPath, {
+      ...current,
+      mcpServers: [{ name: 'new-server', configPath: path.resolve(fixture.configPath), harness: 'claude', configuredAt: new Date().toISOString(), fields }],
+    })
+    writeJson(getAuthFilePath(), validCredentialsJson())
+
+    const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+    assert.equal(result.success, true, JSON.stringify(result))
+    // Regression: a planned no-op field update must never move the live
+    // configuration into quarantine with no staged replacement.
+    assert.equal(readFileSync(fixture.configPath, 'utf8'), configBefore)
+    const tracking = await readTrackingFile()
+    assert.equal(tracking?.bundleVersions?.claude, '1.0.1')
+    const tracked = tracking?.mcpServers.find((entry) => entry.name === 'new-server')
+    assert.deepEqual(tracked?.fields, fields)
+    rmSync(fixture.sourceRoot, { recursive: true, force: true })
   })
 })

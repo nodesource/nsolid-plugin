@@ -125,6 +125,8 @@ The default `nsolid-plugin update` scope SHALL update only a positively identifi
 **When** the user runs `nsolid-plugin update`
 **Then** the command does not guess a package manager or modify the installation
 **And** reports the latest version when it can be resolved
+**And** never reports the launching workspace or local bundle version as an installed `currentVersion`, because no global installation identity was proven
+**And** a read-only check runs no npm/pnpm global-root ownership probe
 **And** prints safe exact-version manual commands for npm, pnpm, ephemeral execution, and the detected wrapper/source when known
 **And** the result status is `unsupported`
 **And** a mutating update exits with code `2` while a read-only check exits with code `0`
@@ -244,7 +246,10 @@ The updater SHALL preserve native/package ownership, bind discovery and executio
 **And** creates a restrictive temporary backup of the exact plugin registration, enabled state, user-owned plugin fields, and cached installed payload
 **And** confirms replacement unless `--yes` was supplied
 **And** invokes `codex plugin remove nsolid-plugin@<marketplace>` followed by `codex plugin add nsolid-plugin@<marketplace>` with fixed argument arrays
-**And** verifies the refreshed marketplace snapshot and resulting local payload match the planned commit and content digest
+**And** verifies the refreshed marketplace snapshot and resulting local payload match the planned commit and strict content digest
+**And** verifies the installed payload additionally matches the planned comparison digest under the named `codex-installed-v1` installed-comparison profile, which excludes only the root `.codex-marketplace-install.json` regular file written by the Codex marketplace installer
+**And** keeps the strict planned `contentDigest` as the immutable source evidence used by backup, rollback, drift, and native-evidence checks
+**And** treats a reserved-name symlink or directory on the installed side, a planned payload that already ships the reserved metadata path, an unrecognized comparison profile, or a missing/mismatched comparison digest as a content mismatch that rolls back
 **And** reapplies the prior enabled state and preserves unrelated Codex configuration
 **And** reports that a new Codex session is required
 **And** does not run the fallback installer
@@ -306,6 +311,7 @@ The updater SHALL preserve native/package ownership, bind discovery and executio
 **And** invokes `nsolid-plugin-refresh-owned --transaction <parent-manifest>` from the integrity-verified local tarball with a fixed argument array
 **And** runs the package executor from a restrictive temporary working directory where a workspace-local `nsolid-plugin` binary cannot shadow the resolved payload
 **And** the parent manifest binds the exact `installationId`, harness, canonical paths, tracking path and digest, and field-level MCP ownership approved in the plan
+**And** the human confirmation shows what will change (added/removed/refreshed skills and MCP servers) instead of the step-by-step plan, which remains available with `--verbose` and in the structured `--json` output
 **And** the internal refresh binary revalidates that identity and refuses absent, stale, sibling, broadened, ambiguous, or untracked ownership
 **And** does not invoke `opencode plugin`
 **And** completely replaces tracked skill directories, removes previously tracked skills absent from the new bundle, and merges only the new bundle's NodeSource MCP entries
@@ -358,6 +364,17 @@ Fallback mutation SHALL be authorized by an exact parent-owned installation mani
 **And** preserves unrelated OpenCode/fallback artifacts
 **And** reports whether rollback succeeded
 **And** exits with code `1`
+
+#### Scenario: Credentialless fallback refresh requires reconciliation
+
+**Given** a tracked direct/fallback installation has no valid NodeSource credentials
+**And** the newly planned bundle adds MCP servers beyond the tracked state
+**When** its fallback refresh runs
+**Then** the refresh fails before any mutation with code `MCP_RECONCILIATION_REQUIRED`
+**And** the safe message explains that reconciling the harness MCP state requires valid credentials and prints `nsolid-plugin setup --harness <harness>` guidance before retrying the update
+**And** no skills-only partial refresh or partial MCP merge occurs
+**And** tracked skills, MCP configuration, and bundle evidence remain unchanged
+**And** a later run with valid credentials can reconcile and complete the same update
 
 #### Scenario: Fallback child terminates after mutation
 
@@ -503,6 +520,17 @@ Update results SHALL support human-readable and machine-readable output without 
 **And** progress and diagnostics are written to standard error
 **And** the summary contains `exitCode` with the exact process code selected from `0`, `1`, or `2`
 **And** each result contains `installationId`, `target`, `ownership`, `status`, optional `currentVersion` and `latestVersion`, `changed`, optional restart guidance and rollback status, and sanitized errors
+
+#### Scenario: Fallback child failures surface a parent-approved code and message
+
+**Given** a direct/fallback refresh child process fails after the parent created its private transaction workspace and bound a nonce to the planned result path
+**When** the parent maps the child failure into the public result
+**Then** the child publishes a schema-versioned, bounded, nonce-bound result envelope inside the parent-created private workspace instead of relying on stdout/stderr text
+**And** the parent validates the envelope's containment, regular-file kind, ownership, permissions, size, schema, nonce, and allowlisted code before trusting it
+**And** a known child code is rendered through a parent-owned safe message template, so arbitrary child text can never appear in public output
+**And** raw child stdout/stderr is never forwarded into the public result, JSON, or verbose diagnostics
+**And** a missing, malformed, stale, wrong-nonce, unknown-code, oversized, symlinked, or spoofed result envelope keeps the existing generic fallback error
+**And** parent-owned journal recovery remains authoritative over any child rollback claim
 
 #### Scenario: Exit codes distinguish unavailable mutation from failure
 

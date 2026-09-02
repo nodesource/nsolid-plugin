@@ -1,4 +1,6 @@
 import type { HarnessType } from '../types.js'
+import type { ContainmentDirectoryIdentity } from './fallback-result-protocol.js'
+import type { PayloadNormalizationProfile } from './native-payload.js'
 
 export type UpdateTarget = 'cli' | HarnessType
 
@@ -89,12 +91,20 @@ export interface GitArtifactIdentity {
   contentDigest: string
   /** Repo-relative POSIX subdirectory holding the installable payload ('' = repository root). */
   payloadPath?: string
+  /** Digest of the same planned payload bytes under comparisonProfile; installed-payload equivalence ONLY. */
+  comparisonDigest?: string
+  /** Named normalization profile shared by plan and installed comparison; execution fails closed when missing or mismatched. */
+  comparisonProfile?: PayloadNormalizationProfile
 }
 
 export interface LocalArtifactIdentity {
   kind: 'local-snapshot'
   root: string
   contentDigest: string
+  /** Digest of the same planned payload bytes under comparisonProfile; installed-payload equivalence ONLY. */
+  comparisonDigest?: string
+  /** Named normalization profile shared by plan and installed comparison; execution fails closed when missing or mismatched. */
+  comparisonProfile?: PayloadNormalizationProfile
 }
 
 export type ResolvedArtifactIdentity = NpmArtifactIdentity | GitArtifactIdentity | LocalArtifactIdentity
@@ -225,6 +235,12 @@ export interface UpdateOptions {
   noColor?: boolean
   cwd?: string
   packageRoot?: string
+  /**
+   * Launcher path used to prove CLI installation ownership. Package-private
+   * seam: production defaults to `process.argv[1]`; tests inject a fixture
+   * launcher instead of mutating global process state.
+   */
+  executablePath?: string
   /** Explicit npm registry for the update lookup and execution plan. */
   registry?: string
   fetchImpl?: typeof fetch
@@ -324,6 +340,27 @@ export interface UpdatePlanItem {
   fallbackTransaction?: FallbackTransactionIdentity
   /** Temporary directories this plan item's process created (for example a manifest staging dir); removal must only ever target these. */
   temporaryDirectories?: readonly string[]
+  /**
+   * Human-oriented summary of what the update will change (added/removed/
+   * refreshed skills and MCP servers). The CLI renders this instead of the
+   * step-by-step technical plan; --verbose shows the full plan and the
+   * structured --json output keeps every step.
+   */
+  changes?: {
+    skillsAdded: readonly string[]
+    skillsRemoved: readonly string[]
+    skillsUpdated: number
+    mcpAdded: readonly string[]
+    mcpRemoved: readonly string[]
+    mcpUpdated: number
+  }
+  /**
+   * Identities of the directories holding the structured fallback child
+   * result, recorded at creation time so the parent can reject a directory
+   * that was replaced (for example by a symlink) before reading the result.
+   * Absent on items planned by older code or by non-fallback strategies.
+   */
+  resultContainment?: readonly ContainmentDirectoryIdentity[]
 }
 
 export interface UpdatePlan {

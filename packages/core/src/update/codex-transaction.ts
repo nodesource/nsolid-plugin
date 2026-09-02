@@ -7,7 +7,7 @@ import { compareVersions, isStableVersion } from './version.js'
 import { copyOwnedPath, createSiblingBackupPath, ownedPathKind, removeOwnedPath } from './fs-transaction.js'
 import type { SiblingBackupPath } from './fs-transaction.js'
 import { nativePayloadDigest } from './native-evidence.js'
-import { nativePayloadTreeDigest, sha256Hex } from './native-payload.js'
+import { isPayloadNormalizationProfile, nativePayloadTreeDigest, sha256Hex } from './native-payload.js'
 import { runTransactionCommands } from './transaction-commands.js'
 import { codexUserOwnedFieldsMatch, readCodexPlugin, restoreCodexUserOwnedFields } from './codex-config.js'
 
@@ -208,8 +208,18 @@ export async function executeCodexTransaction (
         }
       }
       if (item.artifact && (item.artifact.kind === 'git' || item.artifact.kind === 'local-snapshot')) {
-        const digest = selectedPayload ? nativePayloadDigest(selectedPayload) : undefined
-        if (!selectedPayload || !digest || digest !== item.artifact.contentDigest) {
+        // Installed-vs-plan equivalence uses the planned comparison digest
+        // under a matching named normalization profile (only proven harness
+        // metadata is normalized). The strict contentDigest stays the
+        // immutable-source evidence and is never compared against installed
+        // bytes; plans without a comparison identity fail closed, and an
+        // unrecognized profile is rejected instead of digesting strictly.
+        const expectedProfile = item.artifact.comparisonProfile
+        const expectedDigest = item.artifact.comparisonDigest
+        const digest = selectedPayload && expectedProfile && isPayloadNormalizationProfile(expectedProfile)
+          ? nativePayloadDigest(selectedPayload, { profile: expectedProfile })
+          : undefined
+        if (!selectedPayload || !expectedProfile || !expectedDigest || !digest || digest !== expectedDigest) {
           rollbackAttempted = true
           rollbackSucceeded = await restoreFiles(backupSnapshot())
           return {

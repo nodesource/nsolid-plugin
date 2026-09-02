@@ -122,6 +122,10 @@ The updater preserves credentials, user-owned configuration, unrelated MCP entri
 
 Without a global install, use `npx -y nsolid-plugin setup --harness <harness>` and `npx -y nsolid-plugin install --harness <harness>`.
 
+When the CLI is launched from a workspace checkout, a local path, `npx`, Volta, or another wrapper, it cannot prove which (if any) global installation it belongs to, so `update` reports the launch as `unsupported`: a read-only `update --check` exits `0` (and does not probe npm/pnpm global roots), a mutating `update` exits `2` without modifying anything, and both print safe exact-version manual install commands for npm and pnpm.
+
+A fallback refresh that would add MCP servers while no valid NodeSource credentials are available fails before any change with `MCP_RECONCILIATION_REQUIRED`; run `nsolid-plugin setup --harness opencode` (or the tracked harness) to authenticate, then retry the update. The refresh never applies a skills-only partial update in that state.
+
 Use direct CLI install as the primary install path for OpenCode. For Claude Code, Codex CLI, and Antigravity CLI, prefer the native plugin commands below and keep `nsolid-plugin install` for fallback or repair. For Pi Agent, skills come from `nsolid-pi-plugin`; the CLI writes Pi MCP config only.
 
 ### Claude Code

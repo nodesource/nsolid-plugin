@@ -369,6 +369,11 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
       for (const planEntry of plan.entries) {
         if (!planHasByteChanges(planEntry)) continue
         if (journal && isJournalEntry(journal, planEntry.configPath)) {
+          // The apply gate mirrors the staging gate: an entry whose render
+          // produced no byte change has no staged payload, and applying it
+          // would move the live configuration into quarantine with nothing
+          // to replace it. Skip it — the live bytes already match the plan.
+          if (plannedMcpBytes.get(path.resolve(planEntry.configPath)) === undefined) continue
           journal = await applyFallbackEntry(journal, planEntry.configPath)
         } else {
           const planned = plannedMcpBytes.get(path.resolve(planEntry.configPath))

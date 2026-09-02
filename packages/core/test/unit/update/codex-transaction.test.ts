@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { writeTomlFileSync } from '../../../src/utils/config.js'
 import { restoreCodexUserOwnedFields } from '../../../src/update/codex-config.js'
 import { executeCodexTransaction, readCodexPayloadVersion } from '../../../src/update/codex-transaction.js'
 import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
+import { nativePayloadTreeDigest, type PayloadNormalizationProfile } from '../../../src/update/native-payload.js'
 import type { UpdatePlanItem } from '../../../src/update/types.js'
 
 let home: string
@@ -51,6 +52,35 @@ function item (cachePath?: string): UpdatePlanItem {
     ],
     rollbackSteps: [],
     requiresConfirmation: true,
+  }
+}
+
+// Shared planned payload (v1.0.2) written both as the immutable plan source
+// and as the faithful installed payload by the fake Codex commands.
+const PLANNED_PAYLOAD_FILES: ReadonlyArray<readonly [string, string]> = [
+  ['bundle.json', JSON.stringify({ name: 'nsolid-plugin', version: '1.0.2', skills: [] }) + '\n'],
+  ['skills/example/SKILL.md', '# example\n'],
+]
+
+function writePlannedPayload (root: string): void {
+  for (const [relative, content] of PLANNED_PAYLOAD_FILES) {
+    mkdirSync(path.join(root, path.dirname(relative)), { recursive: true })
+    writeFileSync(path.join(root, relative), content)
+  }
+}
+
+function writeInstalledPayload (root: string): void {
+  writePlannedPayload(root)
+}
+
+function comparisonArtifact (plannedRoot: string, overrides: { comparisonDigest?: string; comparisonProfile?: string } = {}): NonNullable<UpdatePlanItem['artifact']> {
+  return {
+    kind: 'git',
+    repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+    commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+    contentDigest: nativePayloadTreeDigest(plannedRoot)!,
+    comparisonDigest: overrides.comparisonDigest ?? nativePayloadTreeDigest(plannedRoot, { profile: 'codex-installed-v1' })!,
+    comparisonProfile: (overrides.comparisonProfile ?? 'codex-installed-v1') as PayloadNormalizationProfile,
   }
 }
 
@@ -126,6 +156,7 @@ describe('Codex update transaction', () => {
     mkdirSync(newPayload, { recursive: true })
     writeFileSync(path.join(newPayload, 'bundle.json'), newBundle)
     const plannedDigest = nativePayloadDigest(newPayload)!
+    const plannedComparisonDigest = nativePayloadDigest(newPayload, { profile: 'codex-installed-v1' })!
     rmSync(newPayload, { recursive: true, force: true })
     const candidate = item(cachePath)
     candidate.artifact = {
@@ -133,6 +164,8 @@ describe('Codex update transaction', () => {
       repository: 'https://github.com/NodeSource/nsolid-plugin.git',
       commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
       contentDigest: plannedDigest,
+      comparisonDigest: plannedComparisonDigest,
+      comparisonProfile: 'codex-installed-v1',
     }
 
     const result = await executeCodexTransaction(candidate, {
@@ -146,6 +179,345 @@ describe('Codex update transaction', () => {
     })
 
     assert.equal(result.success, true)
+  })
+
+  it('accepts reinstall with Codex harness metadata when the planned comparison identity matches', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    // Planned bytes come from the immutable commit (clean payload); Codex adds
+    // its own provenance file at the payload root during the real install.
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-planned-'))
+    try {
+      const plannedFiles = new Map([
+        ['bundle.json', Buffer.from(JSON.stringify({ name: 'nsolid-plugin', version: '1.0.2', skills: [] }))],
+        ['skills/example/SKILL.md', Buffer.from('# example\n')],
+      ])
+      for (const [relative, content] of plannedFiles) {
+        mkdirSync(path.join(plannedRoot, path.dirname(relative)), { recursive: true })
+        writeFileSync(path.join(plannedRoot, relative), content)
+      }
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: nativePayloadTreeDigest(plannedRoot)!,
+        comparisonDigest: nativePayloadTreeDigest(plannedRoot, { profile: 'codex-installed-v1' })!,
+        comparisonProfile: 'codex-installed-v1',
+      }
+
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) {
+            for (const [relative, content] of plannedFiles) {
+              mkdirSync(path.join(cachePath, path.dirname(relative)), { recursive: true })
+              writeFileSync(path.join(cachePath, relative), content)
+            }
+            writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
+          }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, true)
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(readCodexPayloadVersion(cachePath, 'nsolid-plugin@nodesource'), '1.0.2')
+      assert.match(readFileSync(path.join(cachePath, '.codex-marketplace-install.json'), 'utf8'), /marketplace/)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed when a plan carries no named comparison identity', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-noprofile-'))
+    try {
+      const plannedBundle = JSON.stringify({ name: 'nsolid-plugin', version: '1.0.2', skills: [] })
+      writeFileSync(path.join(plannedRoot, 'bundle.json'), plannedBundle)
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      // Legacy-style artifact: strict evidence only, no comparison identity.
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: nativePayloadTreeDigest(plannedRoot)!,
+      }
+
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) writeFileSync(path.join(cachePath, 'bundle.json'), plannedBundle)
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CONTENT_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects real payload tampering under the comparison profile and rolls back', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-tamper-'))
+    try {
+      const plannedFiles = new Map([
+        ['bundle.json', Buffer.from(JSON.stringify({ name: 'nsolid-plugin', version: '1.0.2', skills: [] }))],
+        ['skills/example/SKILL.md', Buffer.from('# example\n')],
+      ])
+      for (const [relative, content] of plannedFiles) {
+        mkdirSync(path.join(plannedRoot, path.dirname(relative)), { recursive: true })
+        writeFileSync(path.join(plannedRoot, relative), content)
+      }
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: nativePayloadTreeDigest(plannedRoot)!,
+        comparisonDigest: nativePayloadTreeDigest(plannedRoot, { profile: 'codex-installed-v1' })!,
+        comparisonProfile: 'codex-installed-v1',
+      }
+
+      // The version matches, the harness metadata matches, but a real payload
+      // byte was substituted: the normalized comparison must still reject it.
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) {
+            for (const [relative, content] of plannedFiles) {
+              mkdirSync(path.join(cachePath, path.dirname(relative)), { recursive: true })
+              writeFileSync(path.join(cachePath, relative), content)
+            }
+            writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
+            writeFileSync(path.join(cachePath, 'skills/example/SKILL.md'), '# substituted\n')
+          }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CONTENT_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+      assert.equal(existsSync(path.join(cachePath, 'skills/example/SKILL.md')), false)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a symlink installed at the reserved harness metadata path and rolls back', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-symlink-'))
+    try {
+      writePlannedPayload(plannedRoot)
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      candidate.artifact = comparisonArtifact(plannedRoot)
+
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) {
+            writeInstalledPayload(cachePath)
+            // A crafted symlink must not hide behind the normalization profile.
+            symlinkSync('../../shared/meta.json', path.join(cachePath, '.codex-marketplace-install.json'))
+          }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CONTENT_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+      // A dangling symlink would make existsSync report false even without
+      // rollback; verify the crafted entry is truly gone from the tree.
+      assert.equal(readdirSync(cachePath).includes('.codex-marketplace-install.json'), false)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a directory installed at the reserved harness metadata path and rolls back', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-dir-'))
+    try {
+      writePlannedPayload(plannedRoot)
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      candidate.artifact = comparisonArtifact(plannedRoot)
+
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) {
+            writeInstalledPayload(cachePath)
+            mkdirSync(path.join(cachePath, '.codex-marketplace-install.json'))
+            writeFileSync(path.join(cachePath, '.codex-marketplace-install.json', 'nested.txt'), 'payload-ish\n')
+          }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CONTENT_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+      assert.equal(existsSync(path.join(cachePath, '.codex-marketplace-install.json')), false)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects unrecognized comparison profiles even when strict bytes would match', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-unknown-profile-'))
+    try {
+      writePlannedPayload(plannedRoot)
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      // A silently-strict implementation would accept this plan: the installed
+      // bytes below match the strict digest exactly. The unknown profile must
+      // be rejected instead of digested as strict evidence.
+      candidate.artifact = comparisonArtifact(plannedRoot, {
+        comparisonDigest: nativePayloadTreeDigest(plannedRoot)!,
+        comparisonProfile: 'codex-installed-v2-future',
+      })
+
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) writeInstalledPayload(cachePath)
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CONTENT_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a comparison digest that does not match its named profile and rolls back', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-wrong-identity-'))
+    try {
+      writePlannedPayload(plannedRoot)
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      // The digest was computed over different bytes than the plan carries, so
+      // no faithful install can produce it under the named profile.
+      writeFileSync(path.join(plannedRoot, 'skills', 'extra.txt'), 'stray\n')
+      const forgedDigest = nativePayloadTreeDigest(plannedRoot, { profile: 'codex-installed-v1' })!
+      rmSync(path.join(plannedRoot, 'skills', 'extra.txt'))
+      candidate.artifact = comparisonArtifact(plannedRoot, { comparisonDigest: forgedDigest })
+
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) {
+            writeInstalledPayload(cachePath)
+            writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
+          }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CONTENT_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('restores prior harness metadata byte-exact through strict backup digests', async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    const priorMetadata = '{"source":"marketplace","prior":true}\n'
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+    writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), priorMetadata)
+
+    const plannedRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-f4-rollback-'))
+    try {
+      const candidate = item(cachePath)
+      candidate.version = { ...candidate.version, latest: '1.0.2' }
+      candidate.artifact = {
+        kind: 'git',
+        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+        contentDigest: nativePayloadTreeDigest(plannedRoot)!,
+        comparisonDigest: nativePayloadTreeDigest(plannedRoot, { profile: 'codex-installed-v1' })!,
+        comparisonProfile: 'codex-installed-v1',
+      }
+
+      // A wrong payload version forces a post-mutation rollback; the prior
+      // cache (including its harness metadata) must be restored byte-exact.
+      const result = await executeCodexTransaction(candidate, {
+        run: async (command) => {
+          if (command.args.includes('add')) {
+            writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '0.9.0', skills: [] }))
+            writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace","rewritten":true}\n')
+          }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      })
+
+      assert.equal(result.error?.code, 'CODEX_VERSION_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+      assert.equal(readFileSync(path.join(cachePath, '.codex-marketplace-install.json'), 'utf8'), priorMetadata)
+    } finally {
+      rmSync(plannedRoot, { recursive: true, force: true })
+    }
   })
 
   it('snapshots only the selected plugin cache when metadata has no package root', async () => {

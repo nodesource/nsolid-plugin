@@ -1,5 +1,6 @@
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -15,6 +16,8 @@ import { cleanupNpmArtifact } from '../version-source.js'
 import { managerArgsForIdentity, verifyLocalArtifact } from '../package-manager.js'
 import { readTrackingFile } from '../../skills/skill-tracker.js'
 import { harnessMcpKey, readMcpFieldDigests } from '../mcp-lookup.js'
+import { validateBundle } from '../../validate.js'
+import { childResultArgs, containmentDirectoryMatches, fallbackChildResultMessage, readValidatedFallbackChildResult, recordContainmentDirectoryIdentity, FALLBACK_CHILD_RESULT_FILENAME, type ContainmentDirectoryIdentity } from '../fallback-result-protocol.js'
 
 export const fallbackStrategy: UpdateStrategy = {
   target: 'opencode',
@@ -71,11 +74,13 @@ export const fallbackStrategy: UpdateStrategy = {
     if (executableIdentity.kind === 'unsupported') {
       return planItem(installation, [], [], undefined, { code: 'UNSAFE_FALLBACK_EXECUTOR', message: 'Fallback update requires a verified absolute npm or pnpm executable identity' })
     }
-    const manifestPath = await createManifest(identity)
+    const { manifestPath, resultPath, resultContainment } = await createManifest(identity)
     const version = installation.version.latest!
+    const changes = await summarizeFallbackChanges(installation, installation.artifact.tarballPath)
+    const childCommand = ['nsolid-plugin-refresh-owned', '--transaction', manifestPath, ...childResultArgs(resultPath)]
     const managerArgs = executor === 'npm-exec'
-      ? ['exec', '--yes', `--package=${installation.artifact.tarballPath}`, '--', 'nsolid-plugin-refresh-owned', '--transaction', manifestPath]
-      : [`--package=${installation.artifact.tarballPath}`, 'dlx', 'nsolid-plugin-refresh-owned', '--transaction', manifestPath]
+      ? ['exec', '--yes', `--package=${installation.artifact.tarballPath}`, '--', ...childCommand]
+      : [`--package=${installation.artifact.tarballPath}`, 'dlx', ...childCommand]
     const spawn = managerArgsForIdentity(executableIdentity, managerArgs)
     const command = { executable: spawn.executable, executableIdentity, args: spawn.args, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS }
     const paths = installation.metadata?.trackedSkills?.map((skill) => skill.path) ?? []
@@ -96,7 +101,9 @@ export const fallbackStrategy: UpdateStrategy = {
     // removes exactly the directory this process created.
     return {
       ...planned,
+      changes,
       temporaryDirectories: [path.dirname(manifestPath)],
+      resultContainment: [resultContainment],
     }
   },
 
@@ -106,15 +113,32 @@ export const fallbackStrategy: UpdateStrategy = {
     const step = item.steps.find((entry) => entry.kind === 'command')
     if (!step || step.kind !== 'command') return failedResult(item, { code: 'INVALID_PLAN', message: 'Fallback update plan has no command' })
     const workspace = await mkdtemp(path.join(tmpdir(), 'nsolid-plugin-update-'))
+    // Fresh per-execution result location: a same-plan retry can never replay
+    // a stale envelope, and the parent never deletes anything by pathname, so
+    // there is no check/delete race against a swapped directory.
+    const freshResultDir = await mkdtemp(path.join(tmpdir(), 'nsolid-plugin-result-'))
+    let freshResultIdentity: ContainmentDirectoryIdentity | undefined
     let journal: FallbackJournal | undefined
     let preserveRecoveryArtifacts = false
     try {
       await chmod(workspace, 0o700)
+      await chmod(freshResultDir, 0o700)
+      freshResultIdentity = await recordContainmentDirectoryIdentity(freshResultDir)
+      const freshResultPath = path.join(freshResultDir, FALLBACK_CHILD_RESULT_FILENAME)
       // Anchor npm/pnpm's project discovery inside the private directory so
       // parent-level /tmp/package.json, .npmrc, or node_modules/.bin entries
       // cannot influence exact-package execution.
       await writeFile(path.join(workspace, 'package.json'), '{"private":true}\n', { mode: 0o600 })
       await writeFile(path.join(workspace, '.npmrc'), '', { mode: 0o600 })
+      // Refuse to run when a recorded containment directory was swapped: the
+      // transaction manifest the child will read lives there, and the fresh
+      // result directory must still be the one this process created. Failing
+      // here precedes journal creation, so a refused execution leaves no
+      // journal state behind.
+      if ((item.resultContainment ?? []).some((identity) => !containmentDirectoryMatches(identity, identity.directory)) ||
+          (freshResultIdentity !== undefined && !containmentDirectoryMatches(freshResultIdentity, freshResultIdentity.directory))) {
+        return failedResult(item, { code: 'FALLBACK_COMMAND_FAILED', message: 'Fallback transaction workspace changed after planning' }, { attempted: false })
+      }
       if (item.artifact?.kind === 'npm' && !verifyLocalArtifact(item.artifact)) {
         return failedResult(item, { code: 'ARTIFACT_INTEGRITY_FAILED', message: 'The planned fallback tarball no longer matches its registry integrity' })
       }
@@ -131,8 +155,16 @@ export const fallbackStrategy: UpdateStrategy = {
           return failedResult(item, { code: 'FALLBACK_BACKUP_FAILED', message: 'Fallback parent snapshot could not be completed' }, { attempted: false })
         }
       }
+      // Refuse to run when a recorded containment directory was swapped: the
+      // transaction manifest the child will read lives there, so a replaced
+      // directory means the child would consume a transaction this parent
+      // never planned.
+      if ((item.resultContainment ?? []).some((identity) => !containmentDirectoryMatches(identity, identity.directory))) {
+        return failedResult(item, { code: 'FALLBACK_COMMAND_FAILED', message: 'Fallback transaction workspace changed after planning' }, { attempted: false })
+      }
       const result = await context.commandRunner.run({
         ...step.command,
+        args: resultArgsWithPath(step.command.args, freshResultPath),
         cwd: workspace,
         env: {
           ...step.command.env,
@@ -148,9 +180,25 @@ export const fallbackStrategy: UpdateStrategy = {
             message: 'Fallback refresh timed out and descendant termination could not be confirmed; recovery artifacts were preserved',
           }, { attempted: false })
         }
-        const rollback = parseRollbackState(`${result.stdout}\n${result.stderr}`)
+        // Structured child result: read and fully validate the nonce-bound
+        // envelope before any output-based inference. Raw child stdout/stderr
+        // is never promoted to public state; it only feeds the legacy
+        // rollback hint for older children that publish no envelope.
+        const structured = item.fallbackTransaction?.nonce !== undefined
+          ? await readValidatedFallbackChildResult(freshResultPath, item.fallbackTransaction.nonce, { containmentDirectories: freshResultIdentity ? [freshResultIdentity] : [] })
+          : undefined
+        const structuredMessage = structured === undefined ? undefined : fallbackChildResultMessage(structured.code)
+        const childRollbackClaim = structured?.rollback ?? parseRollbackState(`${result.stdout}\n${result.stderr}`)
         if (journal) journal = await reloadFallbackJournal(journal)
         const parentRecovered = journal ? await restoreFallbackJournal(journal) : undefined
+        // Parent-owned journal recovery remains authoritative over any child
+        // rollback claim: while a parent journal exists, its verified restore
+        // outcome is the public rollback state; the child claim only applies
+        // when the parent holds no journal (older flows, no transaction).
+        const rollback = journal
+          ? { attempted: true, succeeded: parentRecovered === true }
+          : childRollbackClaim ?? { attempted: false }
+        const rollbackFailed = rollback.attempted && rollback.succeeded === false
         return failedResult(
           item,
           {
@@ -158,14 +206,20 @@ export const fallbackStrategy: UpdateStrategy = {
               ? 'MISSING_EXECUTABLE'
               : result.timedOut
                 ? 'FALLBACK_COMMAND_TIMEOUT'
-                : rollback?.attempted && rollback.succeeded === false ? 'FALLBACK_ROLLBACK_FAILED' : 'FALLBACK_COMMAND_FAILED',
+                : rollbackFailed
+                  ? 'FALLBACK_ROLLBACK_FAILED'
+                  : structured !== undefined && structuredMessage !== undefined
+                    ? structured.code
+                    : 'FALLBACK_COMMAND_FAILED',
             message: result.spawnErrorCode === 'ENOENT'
               ? `${step.command.executable} executable was not found on PATH`
-              : rollback?.attempted && rollback.succeeded === false
-                ? 'Fallback refresh command failed and its rollback was incomplete'
-                : 'Fallback refresh command failed',
+              : result.timedOut
+                ? 'Fallback refresh command timed out'
+                : rollbackFailed
+                  ? 'Fallback refresh command failed and its rollback was incomplete'
+                  : structuredMessage ?? 'Fallback refresh command failed',
           },
-          parentRecovered === false ? { attempted: true, succeeded: false } : rollback ?? (journal ? { attempted: true, succeeded: parentRecovered === true } : { attempted: false })
+          rollback
         )
       }
       if (journal) {
@@ -195,7 +249,13 @@ export const fallbackStrategy: UpdateStrategy = {
       await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
       return resultFromPlan(item, 'updated', { resultingVersion: item.version.latest, rollback: { attempted: false } })
     } finally {
-      if (!preserveRecoveryArtifacts) await rm(workspace, { recursive: true, force: true }).catch(() => {})
+      if (!preserveRecoveryArtifacts) {
+        await rm(workspace, { recursive: true, force: true }).catch(() => {})
+        // Pathname cleanup of a parent-created mkdtemp directory is safe by
+        // rm semantics: recursive removal never follows symlinks, so a
+        // swapped path can only delete what the swapper placed there.
+        await rm(freshResultDir, { recursive: true, force: true }).catch(() => {})
+      }
       if (!preserveRecoveryArtifacts) {
         for (const directory of item.temporaryDirectories ?? []) {
           await rm(directory, { recursive: true, force: true }).catch(() => {})
@@ -203,6 +263,36 @@ export const fallbackStrategy: UpdateStrategy = {
       }
     }
   },
+}
+
+/**
+ * Human-oriented diff of what the update will change, computed from the
+ * tracked state and the verified tarball's bundle descriptor. Best-effort by
+ * design: an unreadable tarball must never block the plan itself — the full
+ * technical detail remains in the steps and the structured output.
+ */
+export async function summarizeFallbackChanges (installation: UpdateInstallation, tarballPath: string): Promise<UpdatePlanItem['changes'] | undefined> {
+  try {
+    const raw = await new Promise<string>((resolve, reject) => {
+      execFile('tar', ['-xOf', tarballPath, 'package/bundle.json'], { encoding: 'utf8', maxBuffer: 1 << 20 }, (error, stdout) => error ? reject(error) : resolve(stdout))
+    })
+    const bundle = validateBundle(JSON.parse(raw))
+    const trackedSkills = installation.metadata?.trackedSkills ?? []
+    const trackedNames = new Set(trackedSkills.map((skill) => skill.name))
+    const newNames = bundle.skills.map((skill) => skill.name)
+    const trackedMcp = installation.metadata?.trackedMcpNames ?? []
+    const trackedMcpSet = new Set(trackedMcp)
+    const newMcp = bundle.mcpServers.map((server) => server.name)
+    const skillsAdded = newNames.filter((name) => !trackedNames.has(name))
+    const skillsRemoved = [...trackedNames].filter((name) => !newNames.includes(name))
+    const skillsUpdated = newNames.filter((name) => trackedNames.has(name)).length
+    const mcpAdded = newMcp.filter((name) => !trackedMcpSet.has(name))
+    const mcpRemoved = trackedMcp.filter((name) => !newMcp.includes(name))
+    const mcpUpdated = newMcp.filter((name) => trackedMcpSet.has(name)).length
+    return { skillsAdded, skillsRemoved, skillsUpdated, mcpAdded, mcpRemoved, mcpUpdated }
+  } catch {
+    return undefined
+  }
 }
 
 function createFallbackIdentity (installation: UpdateInstallation) {
@@ -242,11 +332,30 @@ function createFallbackIdentity (installation: UpdateInstallation) {
   } as const
 }
 
-async function createManifest (identity: NonNullable<ReturnType<typeof createFallbackIdentity>>): Promise<string> {
+async function createManifest (identity: NonNullable<ReturnType<typeof createFallbackIdentity>>): Promise<{ manifestPath: string; resultPath: string; resultContainment: ContainmentDirectoryIdentity }> {
+  // The private 0700 staging directory is created and owned by this process;
+  // the structured result path lives inside it so parent validation can bind
+  // the envelope to workspace ownership and cleanup removes it with the
+  // workspace.
   const directory = await mkdtemp(path.join(tmpdir(), 'nsolid-plugin-manifest-'))
+  // mkdtemp already applies 0700; the explicit chmod keeps the private-mode
+  // guarantee independent of platform defaults that could widen it.
+  await chmod(directory, 0o700)
   const manifestPath = path.join(directory, 'transaction.json')
   await writeFile(manifestPath, JSON.stringify(identity, null, 2) + '\n', { mode: 0o600 })
-  return manifestPath
+  const resultContainment = await recordContainmentDirectoryIdentity(directory)
+  return { manifestPath, resultPath: path.join(directory, FALLBACK_CHILD_RESULT_FILENAME), resultContainment }
+}
+
+/** Point the planned child command at a fresh per-execution result path; older plans without --result gain it safely. */
+function resultArgsWithPath (args: readonly string[] | undefined, resultPath: string): string[] {
+  const list = args === undefined ? [] : [...args]
+  const index = list.indexOf('--result')
+  if (index >= 0 && index + 1 < list.length) {
+    list[index + 1] = resultPath
+    return list
+  }
+  return [...list, '--result', resultPath]
 }
 
 function parseRollbackState (output: string): UpdateResult['rollback'] | undefined {

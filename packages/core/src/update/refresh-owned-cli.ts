@@ -4,6 +4,7 @@ import path from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { refreshOwnedInstallation } from './fallback-transaction.js'
+import { writeFallbackChildResult } from './fallback-result-protocol.js'
 import { resolvePackageRoot } from './version.js'
 import type { FallbackTransactionIdentity } from './types.js'
 import { HARNESS_VALUES } from '../types.js'
@@ -15,6 +16,10 @@ if (!transactionPath) {
   console.error('nsolid-plugin-refresh-owned requires --transaction <manifest>')
   process.exit(2)
 }
+// Optional structured result path: newer parents plan it inside their private
+// workspace; older parents never pass it and the envelope is skipped safely.
+const resultIndex = args.indexOf('--result')
+const resultPath = resultIndex >= 0 ? args[resultIndex + 1] : undefined
 
 let transaction: FallbackTransactionIdentity
 try {
@@ -44,6 +49,15 @@ try {
   process.exit(1)
 }
 if (!result.success) {
+  // Publish the structured, nonce-bound envelope before the legacy human
+  // output so the parent can surface an allowlisted code without trusting
+  // this process's stdout/stderr. The envelope carries no free-form text.
+  if (resultPath && transaction.nonce) {
+    const rollback = result.rollbackAttempted === true
+      ? { attempted: true, succeeded: result.rollbackSucceeded === true }
+      : { attempted: false }
+    await writeFallbackChildResult(resultPath, transaction.nonce, result.error?.code ?? '', rollback)
+  }
   console.error(result.error?.message ?? 'Owned refresh failed')
   if (result.rollbackAttempted) console.error(`rollback: ${result.rollbackSucceeded ? 'succeeded' : 'failed'}`)
   else console.error('rollback: not-attempted')

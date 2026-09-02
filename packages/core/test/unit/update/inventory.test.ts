@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { detectInstallations } from '../../../src/update/inventory.js'
+import { detectCliInstallation, detectInstallations } from '../../../src/update/inventory.js'
 import { resolveMarketplaceVersion } from '../../../src/update/version-source.js'
 import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 import { checkUpdates, planUpdates, update } from '../../../src/update/coordinator.js'
@@ -434,5 +434,341 @@ describe('update installation inventory', () => {
     const antigravity = detected.find((installation) => installation.target === 'antigravity')
 
     assert.equal(antigravity?.source.kind, 'antigravity-git')
+  })
+})
+
+describe('CLI installation provenance', () => {
+  function cliPackageRoot (root: string, version: string): string {
+    writeJson(path.join(root, 'package.json'), { name: 'nsolid-plugin', version })
+    writeJson(path.join(root, 'bundle.json'), { name: 'nsolid-plugin', version })
+    return root
+  }
+
+  function cliLauncher (root: string, relative = path.join('dist', 'src', 'cli.js')): string {
+    const launcher = path.join(root, relative)
+    mkdirSync(path.dirname(launcher), { recursive: true })
+    writeFileSync(launcher, '#!/usr/bin/env node\n')
+    return launcher
+  }
+
+  function noProbeRunner () {
+    return {
+      run: async () => {
+        throw new Error('read-only inventory must not probe package managers')
+      },
+    }
+  }
+
+  it('reports an unproven workspace launcher as unsupported without a current version', async () => {
+    const root = cliPackageRoot(path.join(home, 'repo', 'packages', 'core'), '1.0.3')
+    const launcher = cliLauncher(root)
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'none')
+    if (installation.source.kind !== 'unsupported') assert.fail(JSON.stringify(installation.source))
+    assert.equal(installation.source.source, launcher)
+    assert.equal(installation.version.current, undefined)
+  })
+
+  it('proves an npm global installation only through its matching prefix bin link', async () => {
+    const prefix = path.join(home, 'node-v24')
+    const root = cliPackageRoot(path.join(prefix, 'lib', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    const entrypoint = cliLauncher(root)
+    const launcher = path.join(prefix, 'bin', 'nsolid-plugin')
+    mkdirSync(path.dirname(launcher), { recursive: true })
+    symlinkSync(entrypoint, launcher)
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'global-package')
+    if (installation.source.kind !== 'global-package') assert.fail(JSON.stringify(installation.source))
+    assert.equal(installation.source.packageManager, 'npm')
+    assert.equal(installation.version.current, '90.0.1')
+  })
+
+  it('does not treat a workspace path ending in lib/node_modules as npm global ownership', async () => {
+    const root = cliPackageRoot(path.join(home, 'workspace', 'lib', 'node_modules', 'nsolid-plugin'), '1.0.3')
+    const launcher = cliLauncher(root)
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'none')
+    assert.equal(installation.source.kind, 'unsupported')
+    assert.equal(installation.version.current, undefined)
+  })
+
+  it('keeps Volta package images and their shim launchers unsupported', async () => {
+    const root = cliPackageRoot(path.join(home, '.volta', 'tools', 'image', 'packages', 'nsolid-plugin', 'lib', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    const realLauncher = cliLauncher(root)
+
+    const imageInstallation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: realLauncher,
+    })
+    assert.equal(imageInstallation.ownership, 'none', 'a Volta tool image never proves npm-global ownership')
+    assert.equal(imageInstallation.source.kind, 'unsupported')
+    assert.equal(imageInstallation.version.current, undefined)
+
+    const shim = path.join(home, '.volta', 'bin', 'nsolid-plugin')
+    mkdirSync(path.dirname(shim), { recursive: true })
+    symlinkSync(realLauncher, shim)
+    const shimInstallation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: shim,
+    })
+    assert.equal(shimInstallation.ownership, 'none')
+    assert.equal(shimInstallation.source.kind, 'unsupported')
+    assert.equal(shimInstallation.version.current, undefined)
+  })
+
+  it('keeps a fabricated npm prefix without a bin link unsupported', async () => {
+    // A tree that only ends in lib/node_modules/nsolid-plugin (no
+    // <prefix>/bin/nsolid-plugin shim resolving into the payload) cannot
+    // claim npm-global ownership by suffix alone.
+    const root = cliPackageRoot(path.join(home, 'fake-prefix', 'lib', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    const launcher = cliLauncher(root)
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+    assert.equal(installation.ownership, 'none')
+    assert.equal(installation.source.kind, 'unsupported')
+    assert.equal(installation.version.current, undefined)
+  })
+
+  it('skips the positive ownership probe for Volta image launchers in mutating inventory', async () => {
+    const root = cliPackageRoot(path.join(home, '.volta', 'tools', 'image', 'packages', 'nsolid-plugin', 'lib', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    const launcher = cliLauncher(root)
+    let calls = 0
+    const installation = await detectCliInstallation({
+      commandRunner: {
+        run: async () => {
+          calls += 1
+          return { exitCode: 0, stdout: path.join(home, '.volta', 'tools', 'image', 'packages', 'nsolid-plugin', 'lib'), stderr: '', timedOut: false }
+        },
+      },
+      packageRoot: root,
+      readOnly: false,
+      executablePath: launcher,
+    })
+    assert.equal(calls, 0, 'a definitely-unsupported launcher must fail closed before any manager probe')
+    assert.equal(installation.ownership, 'none')
+    assert.equal(installation.source.kind, 'unsupported')
+    assert.equal(installation.version.current, undefined)
+  })
+
+  it('proves a real pnpm global symlink into its versioned store without probing', async () => {
+    const pnpmHome = path.join(home, '.local', 'share', 'pnpm')
+    const globalVersion = path.join(pnpmHome, 'global', '5')
+    const storeRoot = cliPackageRoot(path.join(globalVersion, '.pnpm', 'nsolid-plugin@90.0.1', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    const entrypoint = cliLauncher(storeRoot)
+    const root = path.join(globalVersion, 'node_modules', 'nsolid-plugin')
+    mkdirSync(path.dirname(root), { recursive: true })
+    symlinkSync(storeRoot, root, 'dir')
+    const launcher = path.join(pnpmHome, 'nsolid-plugin')
+    symlinkSync(entrypoint, launcher)
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'global-package')
+    if (installation.source.kind !== 'global-package') assert.fail(JSON.stringify(installation.source))
+    assert.equal(installation.source.packageManager, 'pnpm')
+    assert.equal(installation.version.current, '90.0.1')
+  })
+
+  it('keeps npx cache, Volta image, and mismatched-root launches unsupported without a current version', async () => {
+    const cases = [
+      {
+        name: 'npx cache',
+        root: cliPackageRoot(path.join(home, '.npm', '_npx', 'abc123', 'node_modules', 'nsolid-plugin'), '90.0.1'),
+      },
+      {
+        name: 'volta package image',
+        root: cliPackageRoot(path.join(home, '.volta', 'tools', 'image', 'packages', 'nsolid-plugin'), '90.0.0'),
+      },
+    ].map((entry) => ({ ...entry, launcher: cliLauncher(entry.root) }))
+    const mismatchedRoot = cliPackageRoot(path.join(home, 'repo', 'packages', 'core'), '1.0.3')
+    cases.push({ name: 'launcher outside running root', root: mismatchedRoot, launcher: cliLauncher(path.join(home, 'elsewhere')) })
+
+    for (const { name, root, launcher } of cases) {
+      const installation = await detectCliInstallation({
+        commandRunner: noProbeRunner(),
+        packageRoot: root,
+        readOnly: true,
+        executablePath: launcher,
+      })
+
+      assert.equal(installation.source.kind, 'unsupported', name)
+      assert.equal(installation.ownership, 'none', name)
+      assert.equal(installation.version.current, undefined, name)
+    }
+  })
+
+  it('still requires the real ownership probe when a mutation is planned', async () => {
+    const root = cliPackageRoot(path.join(home, 'node-v24', 'lib', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    const launcher = cliLauncher(root)
+    let calls = 0
+
+    const installation = await detectCliInstallation({
+      commandRunner: {
+        run: async () => {
+          calls++
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        },
+      },
+      packageRoot: root,
+      readOnly: false,
+      executablePath: launcher,
+    })
+
+    // Structural evidence is check-only: a mutating plan demands the real
+    // probe, and the failing probe leaves the installation unsupported.
+    assert.ok(calls > 0)
+    assert.equal(installation.source.kind, 'unsupported')
+    assert.equal(installation.version.current, undefined)
+  })
+
+  it('recognizes a Windows npm .cmd shim next to the npm prefix as owned npm', async () => {
+    // npm on Windows installs the .cmd/.ps1 shim in the prefix root itself,
+    // next to node_modules (no separate bin directory).
+    const prefix = path.join(home, 'nodejs')
+    const root = cliPackageRoot(path.join(prefix, 'node_modules', 'nsolid-plugin'), '90.0.1')
+    cliLauncher(root)
+    const shim = path.join(prefix, 'nsolid-plugin.cmd')
+    writeFileSync(shim, '@ECHO off\r\n"%~dp0node_modules\\nsolid-plugin\\dist\\src\\cli.js" %*\r\n')
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: shim,
+    })
+
+    assert.equal(installation.ownership, 'global-package')
+    if (installation.source.kind !== 'global-package') assert.fail(JSON.stringify(installation.source))
+    assert.equal(installation.source.packageManager, 'npm')
+    assert.equal(installation.version.current, '90.0.1')
+  })
+
+  it('recognizes a Windows pnpm .cmd shim in the pnpm home as owned pnpm', async () => {
+    const pnpmHome = path.join(home, '.local', 'share', 'pnpm')
+    const globalVersion = path.join(pnpmHome, 'global', '5')
+    const storeRoot = cliPackageRoot(path.join(globalVersion, '.pnpm', 'nsolid-plugin@90.0.1', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    cliLauncher(storeRoot)
+    const root = path.join(globalVersion, 'node_modules', 'nsolid-plugin')
+    mkdirSync(path.dirname(root), { recursive: true })
+    symlinkSync(storeRoot, root, 'dir')
+    const shim = path.join(pnpmHome, 'nsolid-plugin.cmd')
+    writeFileSync(shim, '@ECHO off\r\n"%~dp0global\\5\\node_modules\\nsolid-plugin\\dist\\src\\cli.js" %*\r\n')
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: shim,
+    })
+
+    assert.equal(installation.ownership, 'global-package')
+    if (installation.source.kind !== 'global-package') assert.fail(JSON.stringify(installation.source))
+    assert.equal(installation.source.packageManager, 'pnpm')
+    assert.equal(installation.version.current, '90.0.1')
+  })
+
+  it('keeps a workspace .cmd shim outside any documented global layout unsupported', async () => {
+    const root = cliPackageRoot(path.join(home, 'workspace', 'lib', 'node_modules', 'nsolid-plugin'), '1.0.3')
+    cliLauncher(root)
+    // The shim sits at the workspace root: neither the npm prefix root (next
+    // to node_modules), the prefix bin directory, nor the pnpm home.
+    const shim = path.join(home, 'workspace', 'nsolid-plugin.cmd')
+    writeFileSync(shim, '@ECHO off\r\n"%~dp0lib\\node_modules\\nsolid-plugin\\dist\\src\\cli.js" %*\r\n')
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: shim,
+    })
+
+    assert.equal(installation.ownership, 'none')
+    assert.equal(installation.source.kind, 'unsupported')
+    assert.equal(installation.version.current, undefined)
+  })
+
+  it('recognizes the resolved pnpm store layout through a pnpm-home sh script', async () => {
+    // Node resolves the payload module through the global link, so production
+    // observes the RESOLVED versioned-store path as the package root, and the
+    // pnpm launcher is a regular sh script at the pnpm home whose body embeds
+    // that store path. PNPM_HOME is user-configurable and does not need to be
+    // named "pnpm".
+    const pnpmHome = path.join(home, 'tooling', 'pnpm-home')
+    const storeRoot = cliPackageRoot(path.join(pnpmHome, 'global', '5', '.pnpm', 'nsolid-plugin@90.0.1', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    cliLauncher(storeRoot)
+    const root = path.join(pnpmHome, 'global', '5', 'node_modules', 'nsolid-plugin')
+    mkdirSync(path.dirname(root), { recursive: true })
+    symlinkSync(storeRoot, root, 'dir')
+    const shim = path.join(pnpmHome, 'nsolid-plugin')
+    writeFileSync(shim, `#!/bin/sh\nexec node "${storeRoot}/dist/src/cli.js" "$@"\n`, { mode: 0o755 })
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: storeRoot,
+      readOnly: true,
+      executablePath: shim,
+    })
+
+    assert.equal(installation.ownership, 'global-package')
+    if (installation.source.kind !== 'global-package') assert.fail(JSON.stringify(installation.source))
+    assert.equal(installation.source.packageManager, 'pnpm')
+    assert.equal(installation.version.current, '90.0.1')
+  })
+
+  it('rejects a pnpm-home shim whose body references a different payload', async () => {
+    const pnpmHome = path.join(home, '.local', 'share', 'pnpm')
+    const storeRoot = cliPackageRoot(path.join(pnpmHome, 'global', '5', '.pnpm', 'nsolid-plugin@90.0.1', 'node_modules', 'nsolid-plugin'), '90.0.1')
+    cliLauncher(storeRoot)
+    const root = path.join(pnpmHome, 'global', '5', 'node_modules', 'nsolid-plugin')
+    mkdirSync(path.dirname(root), { recursive: true })
+    symlinkSync(storeRoot, root, 'dir')
+    const shim = path.join(pnpmHome, 'nsolid-plugin')
+    writeFileSync(shim, `#!/bin/sh\nexec node "${pnpmHome}/global/3/.pnpm/other-plugin@1.0.0/node_modules/other-plugin/cli.js" "$@"\n`, { mode: 0o755 })
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: storeRoot,
+      readOnly: true,
+      executablePath: shim,
+    })
+
+    assert.equal(installation.ownership, 'none', 'a shim bound to another payload must not prove ownership')
+    assert.equal(installation.source.kind, 'unsupported')
+    assert.equal(installation.version.current, undefined)
   })
 })

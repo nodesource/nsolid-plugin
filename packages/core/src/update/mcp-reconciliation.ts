@@ -1,4 +1,5 @@
 import type { McpServerRef } from '../types.js'
+import { valueDigest } from './mcp-lookup.js'
 
 export interface TrackedMcpServer {
   name: string
@@ -121,7 +122,14 @@ export function planMcpReconciliation (input: McpReconciliationInput): McpReconc
     for (const [field, expectedDigest] of Object.entries(trackedFields)) {
       target.ownedFieldDigests.push({ server: server.name, field, expectedDigest })
       if (Object.hasOwn(desiredValue, field)) {
-        target.updateFields.push({ server: server.name, field, value: desiredValue[field] })
+        // Digest-aware: a field whose tracked digest already matches the
+        // desired value must not be planned as an update. A no-op update
+        // would render bytes identical to the live file, which in turn
+        // leaves the apply stage without staged bytes — and applying a
+        // journaled config entry with no staged replacement deletes it.
+        if (valueDigest(desiredValue[field]) !== expectedDigest) {
+          target.updateFields.push({ server: server.name, field, value: desiredValue[field] })
+        }
       } else {
         target.removeFields.push({ server: server.name, field })
       }

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import type { ResolvedArtifactIdentity, UpdateError, UpdateInstallationMetadata, UpdateSource } from './types.js'
 import { nativePayloadTreeDigest } from './native-payload.js'
+import type { PayloadDigestOptions } from './native-payload.js'
 
 const FULL_COMMIT = /^[0-9a-f]{40}$/i
 
@@ -37,9 +38,14 @@ export function nativeSourceHonorsArtifact (
  * execution must compare this exact function's output: the marketplace
  * resolution digests the payload subtree of the immutable commit and the
  * installed plugin directory is digested the same way here.
+ *
+ * Without options this is strict source evidence. A named normalization
+ * profile may be requested only for installed-payload equivalence comparison
+ * against a plan that carries the same named profile; it never replaces the
+ * strict digest for drift, authorization, backup, or rollback checks.
  */
-export function nativePayloadDigest (root: string): string | undefined {
-  return nativePayloadTreeDigest(root)
+export function nativePayloadDigest (root: string, options: PayloadDigestOptions = {}): string | undefined {
+  return nativePayloadTreeDigest(root, options)
 }
 
 export function nativeEvidenceMatches (metadata: UpdateInstallationMetadata | undefined): boolean {

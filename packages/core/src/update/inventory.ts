@@ -26,6 +26,12 @@ export interface InventoryOptions {
   commandRunner: CommandRunner
   cwd?: string
   packageRoot?: string
+  /**
+   * Launcher path used to prove CLI installation ownership. Production
+   * defaults to `process.argv[1]`; tests inject a fixture launcher instead of
+   * mutating global process state.
+   */
+  executablePath?: string
   includeCli?: boolean
   readOnly?: boolean
   deferCliOwnership?: boolean
@@ -62,25 +68,39 @@ export async function detectInstallations (options: InventoryOptions): Promise<U
 
 export async function detectCliInstallation (options: InventoryOptions, probeOwnership = true): Promise<UpdateInstallation> {
   const packageRoot = path.resolve(options.packageRoot ?? defaultPackageRoot())
+  const executablePath = options.executablePath ?? process.argv[1]
   const running = safeRunningVersion(packageRoot)
-  const ownership = probeOwnership
+  // Launcher shapes that are intrinsically ephemeral or wrapper-owned must
+  // fail closed on EVERY seam, including the positive ownership probe: a
+  // Volta image or npx cache must never turn into a global-package identity
+  // just because a package manager answers a root query.
+  const definitelyUnsupported = isDefinitelyUnsupportedCliLauncher(executablePath)
+  const ownership = probeOwnership && !definitelyUnsupported
     ? await detectGlobalPackageOwnership({
       commandRunner: options.commandRunner,
       packageRoot,
-      executablePath: process.argv[1],
+      executablePath,
       readOnly: options.readOnly,
     })
     : undefined
+  // Read-only checks and deferred mutation inventory must not spawn package
+  // managers. Structural evidence supplies the running version for status
+  // classification only; a mutating update still re-probes ownership before
+  // any global command is planned.
+  const structural = ownership?.ownership === undefined && (options.readOnly === true || probeOwnership === false)
+    ? structuralGlobalManager(packageRoot, executablePath)
+    : undefined
+  const manager = ownership?.ownership?.manager ?? structural
 
-  const source: UpdateSource = ownership?.ownership
+  const source: UpdateSource = manager
     ? {
         kind: 'global-package',
-        packageManager: ownership.ownership.manager,
+        packageManager: manager,
         packageName: 'nsolid-plugin',
       }
     : {
         kind: 'unsupported',
-        source: process.argv[1] || 'unknown',
+        source: executablePath || 'unknown',
         reason: 'unsupported-manager',
       }
 
@@ -97,12 +117,174 @@ export async function detectCliInstallation (options: InventoryOptions, probeOwn
   return {
     installationId: 'cli:global',
     target: 'cli',
-    ownership: ownership?.ownership ? 'global-package' : 'none',
+    ownership: manager ? 'global-package' : 'none',
     installed: true,
     source,
-    version: classifyVersions(running?.cliVersion, undefined),
+    // Without positive ownership evidence the running bundle's version is not
+    // the global installation's version and must not be reported as one.
+    version: manager ? classifyVersions(running?.cliVersion, undefined) : classifyVersions(undefined, undefined),
     metadata,
   }
+}
+
+/**
+ * Launcher shapes that are intrinsically ephemeral or wrapper-owned. This
+ * check must run before any generic global-layout matching: an npx cache or a
+ * Volta shim can itself sit below directories named `node_modules` or `lib`
+ * without proving ownership of the running package.
+ */
+export function isDefinitelyUnsupportedCliLauncher (executablePath: string | undefined): boolean {
+  if (!executablePath) return true
+  const normalized = path.resolve(executablePath).replace(/\\/g, '/').toLowerCase()
+  return normalized.includes('/.npm/_npx/') ||
+    normalized.includes('/node_modules/.bin/') ||
+    normalized.includes('/.volta/bin/') ||
+    normalized.includes('/.volta/tools/image/')
+}
+
+/**
+ * Structural check-time evidence that the running bundle is a global npm or
+ * pnpm installation. The pre-realpath package root must match a documented
+ * manager layout, while the launcher's realpath must resolve into the same
+ * package payload:
+ * - npm: `<prefix>/lib/node_modules/nsolid-plugin`, invoked through the
+ *   corresponding `<prefix>/bin/nsolid-plugin` link (Windows: the generated
+ *   .cmd/.ps1 shim in the prefix root whose body references the payload).
+ * - pnpm: `<pnpm home>/global[/N]/node_modules/nsolid-plugin` (the stable
+ *   link) or the RESOLVED versioned-store layout Node surfaces when the
+ *   payload module is loaded through that link
+ *   (`<pnpm home>/global/<N>/.pnpm/<name>@<version>/node_modules/<name>`).
+ *   The launcher must resolve into the payload or be the pnpm-home shim
+ *   whose body references it.
+ * Everything else stays unproven so unowned launches fail closed.
+ *
+ * Accepted residual (D2 constrains check-time to structural evidence only):
+ * a prefix fabricated by hand WITH a bin link resolving into its own payload
+ * is structurally indistinguishable from a real npm-global install without
+ * spawning the manager; the same holds for a fabricated `<pnpm>/global/`
+ * tree with an in-tree launcher. Mutating flows re-probe with real manager
+ * evidence before any change; a fabrication only affects what `--check`
+ * reports.
+ */
+function structuralGlobalManager (packageRoot: string, executablePath: string | undefined): 'npm' | 'pnpm' | undefined {
+  if (!executablePath || !existsSync(executablePath) || isDefinitelyUnsupportedCliLauncher(executablePath)) return undefined
+  const rawRoot = path.resolve(packageRoot)
+  const rawLauncher = path.resolve(executablePath)
+  const resolvedRoot = safeRealpath(rawRoot)
+  const resolvedLauncher = safeRealpath(rawLauncher)
+  if (path.basename(rawRoot) !== 'nsolid-plugin' || path.basename(resolvedRoot) !== 'nsolid-plugin') return undefined
+
+  // pnpm before the generic containment gate: ownership is proven from
+  // either the stable pre-realpath link or the RESOLVED versioned-store
+  // layout, bound to a launcher that resolves into this payload or is the
+  // pnpm-home shim whose body references it. A pnpm-shaped root with an
+  // unproven launcher fails closed instead of falling through to npm.
+  const pnpm = pnpmOwnershipProven(rawRoot, resolvedRoot, rawLauncher, resolvedLauncher)
+  if (pnpm === true) return 'pnpm'
+  if (pnpm === false) return undefined
+
+  // Windows-style npm/pnpm launchers are generated .cmd/.ps1 shim files that
+  // live NEXT TO the global layout (outside the package payload) and carry
+  // the payload path in their body. Symlink launchers (POSIX prefix/bin,
+  // pnpm home, Volta images) must resolve into the payload instead. A shim
+  // file whose body does not reference the package payload is not treated as
+  // a generated launcher, so it still fails the containment requirement.
+  const launcherIsShim = isGeneratedLauncherShim(rawLauncher)
+  if (!launcherIsShim && !isSameOrContained(resolvedLauncher, resolvedRoot)) return undefined
+
+  // npm requires linkage from the matching prefix bin directory. A workspace
+  // whose path merely ends in lib/node_modules/nsolid-plugin therefore cannot
+  // claim global ownership by pointing at its own in-tree launcher, and a
+  // Volta tool image never proves npm-global ownership.
+  const rawNodeModules = path.dirname(rawRoot)
+  if (path.basename(rawNodeModules) === 'node_modules') {
+    const lib = path.dirname(rawNodeModules)
+    if (path.basename(lib) === 'lib') {
+      const prefix = path.dirname(lib)
+      const launcherFromPrefixBin = path.dirname(rawLauncher) === path.join(prefix, 'bin') && path.basename(rawLauncher).replace(/\.(?:cmd|ps1|exe)$/i, '') === 'nsolid-plugin'
+      if (launcherFromPrefixBin) return 'npm'
+    }
+  }
+
+  // npm on Windows installs the .cmd/.ps1 shim in the prefix root itself,
+  // next to node_modules (no separate bin directory). The shim shape check
+  // keeps this branch exercisable on every platform through crafted fixtures.
+  if ((process.platform === 'win32' || launcherIsShim) && path.basename(rawNodeModules) === 'node_modules') {
+    const npmPrefix = path.dirname(rawNodeModules)
+    const launcherFromPrefix = path.dirname(rawLauncher) === npmPrefix && path.basename(rawLauncher).replace(/\.(?:cmd|ps1|exe)$/i, '') === 'nsolid-plugin'
+    if (launcherFromPrefix) return 'npm'
+  }
+  return undefined
+}
+
+/**
+ * pnpm ownership proof: undefined = not pnpm-shaped; true = proven; false =
+ * pnpm-shaped but the launcher could not be bound to this payload (fail
+ * closed instead of falling through to the npm classifier). Node resolves
+ * the payload module through the global link, so the resolved store layout
+ * is the shape production actually observes; the pre-realpath link shape
+ * remains valid for callers that can supply it.
+ */
+function pnpmOwnershipProven (rawRoot: string, resolvedRoot: string, rawLauncher: string, resolvedLauncher: string | undefined): boolean | undefined {
+  const homes = new Set<string>()
+  const linkHome = pnpmLayoutHome(rawRoot)
+  if (linkHome !== undefined) homes.add(linkHome)
+  const storeHome = pnpmLayoutHome(resolvedRoot)
+  if (storeHome !== undefined) homes.add(storeHome)
+  const pnpmHome = [...homes][0]
+  if (pnpmHome === undefined) return undefined
+  if (resolvedLauncher !== undefined && isSameOrContained(resolvedLauncher, resolvedRoot)) return true
+  const shimName = path.basename(rawLauncher).replace(/\.(?:cmd|ps1|exe)$/i, '')
+  if (shimName === 'nsolid-plugin' && path.dirname(rawLauncher) === pnpmHome) {
+    // Windows-generated .cmd/.ps1 shims are bound by their generated body
+    // shape (node_modules\<pkg> entrypoint); POSIX pnpm sh scripts embed an
+    // absolute payload path in their body.
+    if (isGeneratedLauncherShim(rawLauncher) || pnpmHomeShimReferencesPayload(rawLauncher, rawRoot, resolvedRoot)) return true
+  }
+  // A pnpm-shaped root with an unproven launcher must not fall through.
+  return false
+}
+
+/** pnpm global layout home: <home>/global[/N]/<node_modules|.pnpm store>/.../nsolid-plugin */
+function pnpmLayoutHome (candidate: string): string | undefined {
+  const normalized = candidate.replace(/\\/g, '/')
+  const match = /^(.*)\/global\/(?:\d+\/)?(?:node_modules\/nsolid-plugin|\.pnpm\/[^/]+\/node_modules\/nsolid-plugin)$/.exec(normalized)
+  if (!match) return undefined
+  const home = match[1]
+  if (!home) return undefined
+  return home.split('/').join(path.sep)
+}
+
+/** The POSIX pnpm-home sh script must embed an absolute payload path in its body. */
+function pnpmHomeShimReferencesPayload (launcher: string, rawRoot: string, resolvedRoot: string): boolean {
+  try {
+    const body = readFileSync(launcher, 'utf8')
+    return [rawRoot, resolvedRoot].some((root) => body.includes(root) || body.includes(root.replace(/\\/g, '/')))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * True when the launcher is a generated npm/pnpm Windows shim whose body
+ * references this package's payload directory. npm generates cmd/ps1 shims
+ * that embed the installed entrypoint (`node_modules\nsolid-plugin\...`);
+ * pnpm generates equivalent shims. The body reference is what binds the
+ * otherwise-standalone shim file to the exact package payload.
+ */
+function isGeneratedLauncherShim (launcher: string): boolean {
+  if (!/\.(?:cmd|ps1)$/i.test(path.basename(launcher))) return false
+  try {
+    return /node_modules[\\/]+nsolid-plugin/i.test(readFileSync(launcher, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+function isSameOrContained (candidate: string, parent: string): boolean {
+  if (!candidate || !parent) return false
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate))
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 function detectClaudeInstallations (): UpdateInstallation[] {
