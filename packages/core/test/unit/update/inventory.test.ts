@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { detectCliInstallation, detectInstallations } from '../../../src/update/inventory.js'
@@ -386,7 +386,7 @@ describe('update installation inventory', () => {
   })
 
   it('does not require npm or pnpm to report a fallback update in check mode', async () => {
-    const skillPath = path.join(home, '.agents', 'skills', 'tracked')
+    const skillPath = path.join(home, '.config', 'opencode', 'skills', 'tracked')
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -404,6 +404,25 @@ describe('update installation inventory', () => {
     })
     assert.equal(summary.results[0]?.status, 'update-available')
     assert.equal(summary.success, true)
+  })
+
+  it('never classifies an unrelated absolute tracking path as fallback-owned', async () => {
+    const victim = path.join(home, 'user-owned', 'tracked')
+    mkdirSync(victim, { recursive: true })
+    writeFileSync(path.join(victim, 'keep.txt'), 'keep\n')
+    writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: 'claude',
+      bundleVersions: { claude: '1.0.0' },
+      skills: [{ name: 'tracked', path: victim, paths: { claude: victim }, installedAt: new Date().toISOString(), harnesses: ['claude'] }],
+      mcpServers: [],
+    })
+
+    const detected = await detectInstallations({ includeCli: false, cwd: home, commandRunner: runner() })
+    const fallback = detected.find((installation) => installation.installationId === 'claude:fallback')
+    assert.equal(fallback?.source.kind, 'unsupported')
+    assert.equal(readFileSync(path.join(victim, 'keep.txt'), 'utf8'), 'keep\n')
   })
 
   it('does not emit a Pi fallback target for MCP-only tracking', async () => {
@@ -426,14 +445,48 @@ describe('update installation inventory', () => {
   it('ignores an unrelated Antigravity import manifest when checking ambiguity', async () => {
     const pluginRoot = path.join(home, '.gemini', 'config', 'plugins', 'nsolid-plugin')
     mkdirSync(pluginRoot, { recursive: true })
+    writeJson(path.join(pluginRoot, 'plugin.json'), { name: 'nsolid-plugin' })
     writeJson(path.join(pluginRoot, 'bundle.json'), { version: '1.0.0' })
-    writeJson(path.join(home, '.gemini', 'config', 'import_manifest.json'), { imports: [{ name: 'nsolid-plugin' }] })
+    writeJson(path.join(home, '.gemini', 'config', 'import_manifest.json'), { imports: [{ name: 'nsolid-plugin', source: 'antigravity' }] })
     writeJson(path.join(home, '.gemini', 'antigravity-cli', 'import_manifest.json'), { imports: [{ name: 'unrelated-plugin' }] })
 
     const detected = await detectInstallations({ includeCli: false, cwd: home, commandRunner: runner() })
     const antigravity = detected.find((installation) => installation.target === 'antigravity')
 
     assert.equal(antigravity?.source.kind, 'antigravity-git')
+  })
+
+  it('rejects Antigravity substring imports and foreign conventional roots', async () => {
+    const pluginRoot = path.join(home, '.gemini', 'config', 'plugins', 'nsolid-plugin')
+    mkdirSync(pluginRoot, { recursive: true })
+    writeJson(path.join(pluginRoot, 'plugin.json'), { name: 'my-nsolid-plugin-helper' })
+    writeJson(path.join(pluginRoot, 'bundle.json'), { version: '9.9.9' })
+    writeJson(path.join(home, '.gemini', 'config', 'import_manifest.json'), {
+      imports: { 'my-nsolid-plugin-helper': { name: 'nsolid-plugin', source: 'https://github.com/foreign/plugin.git' } },
+    })
+
+    const detected = await detectInstallations({ includeCli: false, cwd: home, commandRunner: runner() })
+    const antigravity = detected.find((installation) => installation.target === 'antigravity')
+    assert.notEqual(antigravity?.source.kind, 'antigravity-git')
+  })
+
+  it('rejects Antigravity imports without canonical source provenance', async () => {
+    const pluginRoot = path.join(home, '.gemini', 'config', 'plugins', 'nsolid-plugin')
+    const manifestPath = path.join(home, '.gemini', 'config', 'import_manifest.json')
+    mkdirSync(pluginRoot, { recursive: true })
+    writeJson(path.join(pluginRoot, 'plugin.json'), { name: 'nsolid-plugin' })
+    writeJson(path.join(pluginRoot, 'bundle.json'), { version: '9.9.9' })
+
+    const unprovenImports = [
+      { imports: { 'nsolid-plugin': true } },
+      { imports: [{ name: 'nsolid-plugin' }] },
+    ]
+    for (const manifest of unprovenImports) {
+      writeJson(manifestPath, manifest)
+      const detected = await detectInstallations({ includeCli: false, cwd: home, commandRunner: runner() })
+      const antigravity = detected.find((installation) => installation.target === 'antigravity')
+      assert.notEqual(antigravity?.source.kind, 'antigravity-git', JSON.stringify(manifest))
+    }
   })
 })
 
@@ -720,6 +773,81 @@ describe('CLI installation provenance', () => {
     assert.equal(installation.ownership, 'none')
     assert.equal(installation.source.kind, 'unsupported')
     assert.equal(installation.version.current, undefined)
+  })
+
+  it('recognizes a real Windows npm-global launch through the payload entrypoint', async () => {
+    // npm on Windows generates the prefix shim, and the shim invokes node with
+    // the payload entrypoint, so process.argv[1] is
+    // <prefix>/node_modules/nsolid-plugin/dist/src/cli.js — not the shim.
+    const prefix = path.join(home, 'npm-global')
+    const root = cliPackageRoot(path.join(prefix, 'node_modules', 'nsolid-plugin'), '90.0.1')
+    const launcher = cliLauncher(root)
+    writeFileSync(path.join(prefix, 'nsolid-plugin.cmd'), '@ECHO off\r\n"%~dp0node_modules\\nsolid-plugin\\dist\\src\\cli.js" %*\r\n')
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'global-package')
+    if (installation.source.kind !== 'global-package') assert.fail(JSON.stringify(installation.source))
+    assert.equal(installation.source.packageManager, 'npm')
+    assert.equal(installation.version.current, '90.0.1')
+  })
+
+  it('keeps a payload entrypoint without a generated prefix shim unsupported', async () => {
+    // A node_modules tree containing the payload but no npm-generated shim is
+    // a project-local install (or a fabricated prefix), never a proven global.
+    const prefix = path.join(home, 'project', 'node_modules')
+    const root = cliPackageRoot(path.join(prefix, 'nsolid-plugin'), '1.0.3')
+    const launcher = cliLauncher(root)
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'none')
+    assert.equal(installation.source.kind, 'unsupported')
+    assert.equal(installation.version.current, undefined)
+  })
+
+  it('keeps a fabricated prefix whose shim body does not reference the payload unsupported', async () => {
+    const prefix = path.join(home, 'fabricated')
+    const root = cliPackageRoot(path.join(prefix, 'node_modules', 'nsolid-plugin'), '1.0.3')
+    const launcher = cliLauncher(root)
+    writeFileSync(path.join(prefix, 'nsolid-plugin.cmd'), '@ECHO off\r\necho unrelated\r\n')
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'none')
+    assert.equal(installation.source.kind, 'unsupported')
+  })
+
+  it('keeps a payload-internal launcher that is not the documented bin entrypoint unsupported', async () => {
+    const prefix = path.join(home, 'npm-global-wrong-entry')
+    const root = cliPackageRoot(path.join(prefix, 'node_modules', 'nsolid-plugin'), '1.0.3')
+    const launcher = cliLauncher(root, path.join('dist', 'src', 'other.js'))
+    writeFileSync(path.join(prefix, 'nsolid-plugin.cmd'), '@ECHO off\r\n"%~dp0node_modules\\nsolid-plugin\\dist\\src\\cli.js" %*\r\n')
+
+    const installation = await detectCliInstallation({
+      commandRunner: noProbeRunner(),
+      packageRoot: root,
+      readOnly: true,
+      executablePath: launcher,
+    })
+
+    assert.equal(installation.ownership, 'none')
+    assert.equal(installation.source.kind, 'unsupported')
   })
 
   it('recognizes the resolved pnpm store layout through a pnpm-home sh script', async () => {

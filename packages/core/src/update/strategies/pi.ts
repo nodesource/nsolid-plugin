@@ -26,6 +26,9 @@ export const piStrategy: UpdateStrategy = {
         manualCommands: [`pi update npm:nsolid-pi-plugin ${approve ? '--approve' : '--no-approve'}`],
       }
     }
+    if (installation.artifact?.kind !== 'npm' || !installation.artifact.tarballPath) {
+      return planItem(installation, [], [], undefined, { code: 'ARTIFACT_IDENTITY_REQUIRED', message: 'Pi update requires the verified registry tarball captured during planning' })
+    }
     const identity = resolveExecutableIdentity('pi')
     if (identity.kind === 'unsupported') {
       return {
@@ -33,7 +36,7 @@ export const piStrategy: UpdateStrategy = {
         manualCommands: [`pi update npm:nsolid-pi-plugin ${approve ? '--approve' : '--no-approve'}`],
       }
     }
-    const spawn = managerArgsForIdentity(identity, ['update', 'npm:nsolid-pi-plugin', approve ? '--approve' : '--no-approve'])
+    const spawn = managerArgsForIdentity(identity, ['update', installation.artifact.tarballPath, approve ? '--approve' : '--no-approve'])
     const registry = installation.artifact?.kind === 'npm' ? installation.artifact.registry : undefined
     return planItem(
       installation,

@@ -36,6 +36,8 @@ interface RegistrationSnapshot {
   digest?: string
   /** Verified on-disk copy inside the recovery bundle (existed files only). */
   backupPath?: string
+  /** Canonical digest of everything except the selected plugin/marketplace. */
+  foreignDigest?: string
   postDigest?: string | null
 }
 
@@ -112,13 +114,14 @@ export async function executeClaudeTransaction (
       if (existsSync(target) && statSync(target).isFile()) {
         const bytes = await readFile(target)
         const digest = sha256(bytes)
+        const foreignDigest = foreignRegistrationDigest(bytes, spec.pluginId, target)
         const backupPath = path.join(recoveryRoot, 'registration', `${String(index).padStart(4, '0')}.bin`)
         writeDurableFile(backupPath, bytes)
         const stored = readFileSync(backupPath)
         if (sha256(stored) !== digest) throw new Error('registration backup verification failed')
-        registration.push({ path: target, existed: true, bytes, digest, backupPath })
+        registration.push({ path: target, existed: true, bytes, digest, backupPath, foreignDigest })
       } else {
-        registration.push({ path: target, existed: false })
+        registration.push({ path: target, existed: false, foreignDigest: foreignRegistrationDigest(undefined, spec.pluginId, target) })
       }
     }
     const previousRoot = installedClaudePayloadRoot(spec.configPath, spec.pluginId, spec.scope)
@@ -205,6 +208,16 @@ export async function executeClaudeTransaction (
     payload.postRoot = installedClaudePayloadRoot(spec.configPath, spec.pluginId, spec.scope, spec.expectedVersion)
     payload.postDigest = payload.postRoot ? stateDigest(payload.postRoot) : null
     for (const entry of registration) entry.postDigest = existsSync(entry.path) ? stateDigest(entry.path) : null
+
+    for (const entry of registration) {
+      const current = existsSync(entry.path) ? readFileSync(entry.path) : undefined
+      if (entry.foreignDigest !== undefined && foreignRegistrationDigest(current, spec.pluginId, entry.path) !== entry.foreignDigest) {
+        return await fail(spec, payload, registration, recoveryRoot, { success: false, rollbackAttempted: true }, {
+          code: 'CLAUDE_FOREIGN_STATE_CHANGED',
+          message: 'Claude changed unrelated plugin, marketplace, or enabled-plugin state',
+        }, keepBackup, dependencies)
+      }
+    }
 
     if (spec.artifact && (spec.artifact.kind === 'git' || spec.artifact.kind === 'local-snapshot')) {
       if (!payload.postRoot || !payload.postDigest || payload.postDigest !== spec.artifact.contentDigest) {
@@ -398,6 +411,38 @@ export function installedClaudePayloadRoot (
   } catch {
     return undefined
   }
+}
+
+function foreignRegistrationDigest (bytes: Buffer | undefined, pluginId: string, targetPath: string): string {
+  const ownedIds = new Set([pluginId])
+  if (/marketplace/i.test(path.basename(targetPath))) ownedIds.add(pluginId.split('@').at(-1) ?? '')
+  const leaves: Array<[string, unknown]> = []
+  let parsed: unknown
+  try { parsed = bytes ? JSON.parse(bytes.toString('utf8')) : {} } catch { return sha256(bytes ?? Buffer.alloc(0)) }
+  const visit = (value: unknown, segments: string[]): void => {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (!isOwnedClaudeRecord(entry, ownedIds)) visit(entry, segments)
+      }
+      return
+    }
+    if (value && typeof value === 'object') {
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))) {
+        if (!ownedIds.has(key)) visit(entry, [...segments, key])
+      }
+      return
+    }
+    leaves.push([segments.join('\0'), value])
+  }
+  visit(parsed, [])
+  return sha256(Buffer.from(JSON.stringify(leaves)))
+}
+
+function isOwnedClaudeRecord (value: unknown, ownedIds: ReadonlySet<string>): boolean {
+  if (typeof value === 'string') return ownedIds.has(value)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return ['id', 'name', 'plugin', 'pluginId', 'marketplace'].some((key) => typeof record[key] === 'string' && ownedIds.has(record[key] as string))
 }
 
 /** Canonical digest of a registration file or payload directory tree. */

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { readJsonFile, readTomlFile } from '../utils/config.js'
-import { getTrackingFilePath, resolveHome } from '../utils/path.js'
+import { getSkillsDir, getTrackingFilePath, resolveHome } from '../utils/path.js'
 import { isValidTrackingData } from '../skills/skill-tracker.js'
 import { packageNameFromNpmSource, PI_PLUGIN_PACKAGE_NAME } from '../harnesses/pi-plugin-detector.js'
 import { isNsolidPluginId } from '../harnesses/plugin-name.js'
@@ -21,6 +21,7 @@ import { detectGlobalPackageOwnership, readPackageVersion as readNamedPackageVer
 import { readCodexPayloadVersion, resolveCodexPluginCachePath } from './codex-transaction.js'
 import { classifyVersionSet, classifyVersions, isStableVersion, readRunningVersionInfo, resolvePackageRoot } from './version.js'
 import { nativePayloadTreeDigest } from './native-payload.js'
+import { isSafeDirectChild } from './fallback-ownership.js'
 
 export interface InventoryOptions {
   commandRunner: CommandRunner
@@ -214,6 +215,27 @@ function structuralGlobalManager (packageRoot: string, executablePath: string | 
     const launcherFromPrefix = path.dirname(rawLauncher) === npmPrefix && path.basename(rawLauncher).replace(/\.(?:cmd|ps1|exe)$/i, '') === 'nsolid-plugin'
     if (launcherFromPrefix) return 'npm'
   }
+
+  // A real Windows npm-global launch runs the payload entrypoint directly:
+  // the generated prefix shim invokes node with
+  // `<prefix>/node_modules/nsolid-plugin/dist/src/cli.js`, so process.argv[1]
+  // is the payload path rather than the shim. Recognize that shape only when
+  // the launcher is the documented bin entrypoint of THIS payload (already
+  // containment-checked above) AND the prefix carries a generated npm shim
+  // whose body references this package — the shim binds the prefix to an
+  // actual npm-global installation, so a project-local node_modules tree, a
+  // fabricated prefix without the shim, or an arbitrary dist/src/cli.js path
+  // stays unsupported. Mutating flows still re-probe with real manager
+  // evidence before any change.
+  if (path.basename(rawNodeModules) === 'node_modules') {
+    const npmPrefix = path.dirname(rawNodeModules)
+    const relative = path.relative(resolvedRoot, resolvedLauncher).replaceAll('\\', '/')
+    const isDocumentedBinEntrypoint = relative === 'dist/src/cli.js'
+    const prefixShimProven = isGeneratedLauncherShim(path.join(npmPrefix, 'nsolid-plugin.cmd')) ||
+      isGeneratedLauncherShim(path.join(npmPrefix, 'nsolid-plugin.ps1')) ||
+      (process.platform === 'win32' && prefixShimReferencesPayload(path.join(npmPrefix, 'nsolid-plugin')))
+    if (isDocumentedBinEntrypoint && prefixShimProven) return 'npm'
+  }
   return undefined
 }
 
@@ -276,6 +298,19 @@ function isGeneratedLauncherShim (launcher: string): boolean {
   if (!/\.(?:cmd|ps1)$/i.test(path.basename(launcher))) return false
   try {
     return /node_modules[\\/]+nsolid-plugin/i.test(readFileSync(launcher, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Body check for an extensionless npm shim (Windows generates one alongside
+ * the .cmd/.ps1 pair): it counts as prefix evidence only when its body
+ * references this package's payload directory.
+ */
+function prefixShimReferencesPayload (shimPath: string): boolean {
+  try {
+    return /node_modules[\\/]+nsolid-plugin/i.test(readFileSync(shimPath, 'utf8'))
   } catch {
     return false
   }
@@ -522,7 +557,10 @@ async function detectFallbackInstallations (): Promise<UpdateInstallation[]> {
     const bundleVersion = isStableVersion(scopedVersion)
       ? scopedVersion
       : isStableVersion(legacyVersion) ? legacyVersion : undefined
-    const ownershipProven = rawTrackedSkills.length === trackedSkills.length && trackedSkills.every((entry) => path.isAbsolute(entry.path))
+    const skillRoot = harness === 'opencode'
+      ? path.resolve(process.env.NSOLID_OPENCODE_SKILLS_DIR ?? resolveHome('~/.config/opencode/skills'))
+      : getSkillsDir()
+    const ownershipProven = rawTrackedSkills.length === trackedSkills.length && trackedSkills.every((entry) => isSafeDirectChild(entry.path, [skillRoot]))
     const source: UpdateSource = ownershipProven && trackedSkills.length > 0
       ? { kind: 'fallback', bundleVersion }
       : { kind: 'unsupported', source: `${harness}:tracking`, reason: 'untracked' }
@@ -851,12 +889,12 @@ export function detectAntigravityLayout (): {
     },
   ]
   const valid = candidates.filter((candidate) =>
-    existsSync(candidate.pluginRoot) && existsSync(candidate.manifestPath) && manifestContainsPlugin(candidate.manifestPath))
+    existsSync(candidate.pluginRoot) && existsSync(candidate.manifestPath) && manifestContainsPlugin(candidate.manifestPath, candidate.pluginRoot))
   // A generic import manifest belongs to the layout only when it contains
   // NodeSource evidence. Merely having both product manifests on disk is
   // common and must not be reported as an ambiguous N|Solid installation.
   const present = candidates.filter((candidate) =>
-    existsSync(candidate.pluginRoot) || (existsSync(candidate.manifestPath) && manifestContainsPlugin(candidate.manifestPath)))
+    existsSync(candidate.pluginRoot) || (existsSync(candidate.manifestPath) && manifestContainsPlugin(candidate.manifestPath, candidate.pluginRoot)))
   if (present.length > 1) return { reason: 'multiple Antigravity plugin layouts are present' }
   if (valid.length === 1) return valid[0]
   const touched = present[0]
@@ -864,12 +902,17 @@ export function detectAntigravityLayout (): {
   return {}
 }
 
-function manifestContainsPlugin (manifestPath: string): boolean {
+function manifestContainsPlugin (manifestPath: string, pluginRoot: string): boolean {
+  const plugin = safeReadJson(path.join(pluginRoot, 'plugin.json'))
+  if (plugin?.name !== 'nsolid-plugin') return false
   const data = safeReadJson(manifestPath)
   const imports = data?.imports
-  if (Array.isArray(imports)) return imports.some((entry) => isRecord(entry) && (entry.name === 'nsolid-plugin' || entry.plugin === 'nsolid-plugin'))
+  const hasExactIdentity = (entry: unknown): boolean => isRecord(entry) &&
+    (entry.name === 'nsolid-plugin' || entry.plugin === 'nsolid-plugin') &&
+    (entry.source === 'antigravity' || (typeof entry.source === 'string' && /^https:\/\/github\.com\/NodeSource\/nsolid-plugin(?:\.git)?$/i.test(entry.source)))
+  if (Array.isArray(imports)) return imports.some(hasExactIdentity)
   if (isRecord(imports)) {
-    return Object.entries(imports).some(([key, value]) => key === 'nsolid-plugin' || key.includes('nsolid-plugin') || (isRecord(value) && (value.name === 'nsolid-plugin' || value.plugin === 'nsolid-plugin')))
+    return Object.entries(imports).some(([key, value]) => key === 'nsolid-plugin' && hasExactIdentity(value))
   }
   return false
 }

@@ -7,6 +7,7 @@ import type {
   UpdateStatus,
   VersionInfo,
 } from '../types.js'
+import { publicPlanSteps } from '../plan-projection.js'
 
 export function planItem (
   installation: UpdateInstallation,
@@ -44,6 +45,10 @@ export function resultFromPlan (item: UpdatePlanItem, status: UpdateStatus, extr
     changed: status === 'updated',
     restartHint: item.restartHint,
     manualCommands: item.manualCommands,
+    steps: publicPlanSteps(item.steps),
+    // Always emitted with a stable shape so structured-output consumers see
+    // one schema: a non-mutating result carries an explicitly empty change set.
+    changes: item.changes ?? { skillsAdded: [], skillsRemoved: [], skillsUpdated: 0, mcpAdded: [], mcpRemoved: [], mcpUpdated: 0 },
     rollbackCommand: item.metadata?.rollbackCommand,
     ...extra,
   }

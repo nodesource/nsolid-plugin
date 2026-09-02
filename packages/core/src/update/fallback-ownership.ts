@@ -4,19 +4,21 @@ import { readMcpFieldDigests, type PreferredMcpKey } from './mcp-lookup.js'
 import { getHarnessSkillsPath } from '../skills/skill-linker.js'
 import type { TrackingData } from '../skills/skill-tracker.js'
 import type { FallbackTransactionIdentity } from './types.js'
+import { assertSafeSkillName } from '../utils/skill-name.js'
 
 export function matchesTrackedOwnership (tracking: TrackingData, identity: FallbackTransactionIdentity): boolean {
   const linkRoot = path.resolve(getHarnessSkillsPath(identity.harness))
-  if (identity.ownedLinkPaths.some((value) => !isSameOrContained(path.resolve(value), linkRoot))) return false
+  if (identity.ownedLinks.some((entry) => !isSafeDirectChild(entry.path, [linkRoot]))) return false
+  if (identity.ownedSkills.some((entry) => !isSafeDirectChild(entry.path, identity.approvedDestinationRoots))) return false
   const scopedSkills = tracking.skills.filter((entry) => entry.harnesses.includes(identity.harness))
   const trackedPaths = new Set(scopedSkills
     .map((entry) => entry.paths?.[identity.harness] ?? entry.path)
     .filter((value): value is string => typeof value === 'string')
     .map((value) => path.resolve(value)))
-  const ownedSkillPaths = new Set(identity.ownedSkillPaths.map((value) => path.resolve(value)))
+  const ownedSkillPaths = new Set(identity.ownedSkills.map((entry) => path.resolve(entry.path)))
   if (ownedSkillPaths.size !== trackedPaths.size || ![...ownedSkillPaths].every((value) => trackedPaths.has(value))) return false
-  const expectedLinkPaths = new Set(scopedSkills.map((entry) => path.resolve(linkRoot, entry.name)))
-  const ownedLinkPaths = new Set(identity.ownedLinkPaths.map((value) => path.resolve(value)))
+  const expectedLinkPaths = new Set(identity.harness === 'opencode' ? [] : scopedSkills.map((entry) => path.resolve(linkRoot, entry.name)))
+  const ownedLinkPaths = new Set(identity.ownedLinks.map((entry) => path.resolve(entry.path)))
   if (ownedLinkPaths.size !== expectedLinkPaths.size || ![...ownedLinkPaths].every((value) => expectedLinkPaths.has(value))) return false
   const expectedMcpFields = tracking.mcpServers
     .filter((entry) => entry.harness === identity.harness && entry.fields)
@@ -37,6 +39,17 @@ export function matchesTrackedOwnership (tracking: TrackingData, identity: Fallb
     if (entry.harness !== identity.harness || entry.name !== field.server || path.resolve(entry.configPath) !== path.resolve(field.configPath)) return false
     return entry.fields?.[field.field] === field.expectedDigest
   }))
+}
+
+export function isSafeDirectChild (candidate: string, roots: readonly string[]): boolean {
+  const resolved = path.resolve(candidate)
+  if (!isCanonicalPath(resolved) || !roots.some((root) => path.dirname(resolved) === path.resolve(root))) return false
+  try {
+    assertSafeSkillName(path.basename(resolved))
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function isCanonicalPath (value: string): boolean {

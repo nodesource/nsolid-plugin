@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { deriveShimEntrypoint, resolveExecutableIdentity, runCommand, windowsTaskkillPath } from '../../../src/update/command-runner.js'
@@ -33,6 +33,49 @@ describe('update command runner', () => {
 
     assert.equal(result.timedOut, true)
     assert.equal(result.treeTerminated, true)
+  })
+
+  it('terminates a detached descendant before confirming a timeout', { skip: process.platform === 'win32' }, async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-detached-descendant-'))
+    const lateWrite = path.join(root, 'late-write.txt')
+    const childCode = `const fs=require('node:fs');setTimeout(()=>fs.writeFileSync(${JSON.stringify(lateWrite)},'late'),400);setInterval(()=>{},10000)`
+    const parentCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(childCode)}],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},10000)`
+    try {
+      const result = await runCommand({ executable: process.execPath, args: ['-e', parentCode], timeoutMs: 100 })
+      await new Promise((resolve) => setTimeout(resolve, 600))
+
+      assert.equal(result.timedOut, true)
+      assert.equal(result.treeTerminated, true)
+      assert.equal(existsSync(lateWrite), false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('terminates a detached descendant that was reparented before timeout', { skip: process.platform !== 'linux' }, async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-reparented-descendant-'))
+    const pidFile = path.join(root, 'descendant.pid')
+    const lateWrite = path.join(root, 'late-write.txt')
+    const descendantCode = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setTimeout(()=>fs.writeFileSync(${JSON.stringify(lateWrite)},'late'),500);setInterval(()=>{},10000)`
+    const intermediateCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(descendantCode)}],{detached:true,stdio:'ignore'}).unref()`
+    const parentCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(intermediateCode)}],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},10000)`
+    let descendantPid: number | undefined
+    try {
+      const result = await runCommand({ executable: process.execPath, args: ['-e', parentCode], timeoutMs: 200 })
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      descendantPid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : undefined
+
+      assert.equal(result.timedOut, true)
+      assert.equal(result.treeTerminated, true)
+      assert.equal(existsSync(lateWrite), false)
+      const terminatedPid = descendantPid
+      if (terminatedPid !== undefined) assert.throws(() => process.kill(terminatedPid, 0))
+    } finally {
+      if (descendantPid !== undefined) {
+        try { process.kill(descendantPid, 'SIGKILL') } catch { /* already terminated */ }
+      }
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('derives a verified npm Windows shim through mixed-case Path and PATHEXT', { skip: process.platform !== 'win32' }, () => {

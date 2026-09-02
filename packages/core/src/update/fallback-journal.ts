@@ -60,12 +60,19 @@ export async function beginFallbackJournal (manifest: FallbackTransactionIdentit
   if (!currentTrackingDigest || currentTrackingDigest !== manifest.trackingDigest || !await manifestMatchesTrackingFile(manifest)) {
     throw new Error('FALLBACK_TRACKING_DRIFT')
   }
+  for (const entry of [...manifest.ownedSkills, ...manifest.ownedLinks]) {
+    const kind = await pathKind(entry.path)
+    const digest = kind === 'missing' ? undefined : await pathDigest(entry.path)
+    if (kind !== entry.kind || digest !== entry.digest) throw new Error('FALLBACK_TRACKING_DRIFT')
+  }
   const journalPath = fallbackJournalPath(trackingPath)
   const snapshotDirectory = await mkdtemp(path.join(path.dirname(trackingPath), '.nsolid-plugin-update-'))
+  const plannedEvidence = new Map([...manifest.ownedSkills, ...manifest.ownedLinks]
+    .map((entry) => [path.resolve(entry.path), entry] as const))
   const paths = [...new Set([
     trackingPath,
-    ...manifest.ownedSkillPaths,
-    ...manifest.ownedLinkPaths,
+    ...manifest.ownedSkills.map((entry) => entry.path),
+    ...manifest.ownedLinks.map((entry) => entry.path),
     ...manifest.ownedMcpConfigPaths,
   ].map((value) => path.resolve(value)))]
   const entries: FallbackJournalEntry[] = []
@@ -75,7 +82,12 @@ export async function beginFallbackJournal (manifest: FallbackTransactionIdentit
       const backup = path.join(snapshotDirectory, String(index))
       const digest = kind !== 'missing' ? await pathDigest(target) : undefined
       if (kind !== 'missing' && !digest) throw new Error(`cannot digest ${target}`)
+      const planned = plannedEvidence.get(target)
+      if (planned && (planned.kind !== kind || planned.digest !== digest)) throw new Error(`planned fallback path changed: ${target}`)
       if (kind !== 'missing') await cp(target, backup, { recursive: true, force: true, verbatimSymlinks: true, dereference: false })
+      if (planned && kind !== 'missing' && (await pathDigest(backup) !== planned.digest || await pathDigest(target) !== planned.digest)) {
+        throw new Error(`fallback path changed while it was being snapshotted: ${target}`)
+      }
       entries.push({ path: target, kind, existed: kind !== 'missing', digest, backup: kind !== 'missing' ? backup : undefined, expectedCurrentDigest: digest ?? null })
     }
     const journal: FallbackJournal = {
@@ -119,12 +131,8 @@ export async function appendFallbackJournalEntries (journal: FallbackJournal, ta
       throw new Error(`Fallback destination ${resolved} has an unsafe name`)
     }
     const kind = await pathKind(resolved)
-    const index = entries.length
-    const backup = path.join(journal.snapshotDirectory, String(index))
-    const digest = kind !== 'missing' ? await pathDigest(resolved) : undefined
-    if (kind !== 'missing' && !digest) throw new Error(`cannot digest ${resolved}`)
-    if (kind !== 'missing') await cp(resolved, backup, { recursive: true, force: true, verbatimSymlinks: true, dereference: false })
-    entries.push({ path: resolved, kind, existed: kind !== 'missing', digest, backup: kind !== 'missing' ? backup : undefined, expectedCurrentDigest: digest ?? null })
+    if (kind !== 'missing') throw new Error('UNTRACKED_DESTINATION')
+    entries.push({ path: resolved, kind, existed: false, expectedCurrentDigest: null })
   }
   if (entries.length === journal.entries.length) return journal
   const updated = { ...journal, entries }
@@ -463,10 +471,16 @@ export async function pathDigest (target: string): Promise<string | undefined> {
 
 function isSafeJournal (journal: FallbackJournal): boolean {
   if (!journal || journal.version !== 2 || !['prepared', 'mutating', 'committed'].includes(journal.phase) || !journal.manifest || !Array.isArray(journal.entries)) return false
-  if (!Array.isArray(journal.manifest.ownedSkillPaths) || !Array.isArray(journal.manifest.ownedLinkPaths) || !Array.isArray(journal.manifest.ownedMcpFields) || !Array.isArray(journal.manifest.ownedMcpConfigPaths)) return false
+  if (!Array.isArray(journal.manifest.ownedSkills) || !Array.isArray(journal.manifest.ownedLinks) || !Array.isArray(journal.manifest.ownedMcpFields) || !Array.isArray(journal.manifest.ownedMcpConfigPaths)) return false
   if (journal.manifest.ownedMcpConfigPaths.some((value) => typeof value !== 'string')) return false
   if (journal.manifest.ownedMcpFields.some((field) => !field || typeof field.configPath !== 'string' || typeof field.server !== 'string' || typeof field.field !== 'string' || typeof field.expectedDigest !== 'string')) return false
-  if (journal.manifest.ownedSkillPaths.some((value) => typeof value !== 'string') || journal.manifest.ownedLinkPaths.some((value) => typeof value !== 'string')) return false
+  const pathEvidenceIsInvalid = (entry: unknown): boolean => {
+    if (!entry || typeof entry !== 'object') return true
+    const value = entry as { path?: unknown; kind?: unknown; digest?: unknown }
+    if (typeof value.path !== 'string' || !['missing', 'file', 'directory', 'symlink', 'other'].includes(String(value.kind))) return true
+    return value.kind === 'missing' ? value.digest !== undefined : typeof value.digest !== 'string'
+  }
+  if (journal.manifest.ownedSkills.some(pathEvidenceIsInvalid) || journal.manifest.ownedLinks.some(pathEvidenceIsInvalid)) return false
   if (typeof journal.manifest.trackingPath !== 'string' || typeof journal.manifest.trackingDigest !== 'string' || typeof journal.manifest.harness !== 'string' || typeof journal.manifest.installationId !== 'string') return false
   if (journal.manifest.nonce !== undefined && typeof journal.manifest.nonce !== 'string') return false
   if (typeof journal.journalPath !== 'string' || typeof journal.snapshotDirectory !== 'string') return false
@@ -485,8 +499,8 @@ function isSafeJournal (journal: FallbackJournal): boolean {
   if (!journal.manifest.installationId || journal.manifest.installationId !== `${journal.manifest.harness}:fallback`) return false
   const expectedPaths = new Set([
     trackingPath,
-    ...journal.manifest.ownedSkillPaths,
-    ...journal.manifest.ownedLinkPaths,
+    ...journal.manifest.ownedSkills.map((entry) => entry.path),
+    ...journal.manifest.ownedLinks.map((entry) => entry.path),
     ...journal.manifest.ownedMcpConfigPaths,
   ].map((value) => path.resolve(value)))
   if ([...expectedPaths].some((value) => !isCanonicalPath(value))) return false

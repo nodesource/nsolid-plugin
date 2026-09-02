@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process'
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { accessSync, constants, existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import type { CommandResult, CommandRunner, CommandSpec, ResolvedExecutable } from './types.js'
 import { redactSecrets } from './redaction.js'
 
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000
 export const MAX_COMMAND_OUTPUT = 64 * 1024
+const COMMAND_TREE_TOKEN_ENV = 'NSOLID_COMMAND_TREE_TOKEN'
 
 export function sanitizeOutput (value: string): string {
   return redactSecrets(value).slice(0, MAX_COMMAND_OUTPUT)
@@ -78,6 +80,12 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
     ? [identity.entrypoint, ...spec.args]
     : [...spec.args]
   const executable = identity.kind === 'node' ? process.execPath : identity.executable
+  // A detached grandchild can be reparented before timeout handling begins,
+  // at which point PPID-only discovery can no longer connect it to the command.
+  // Give every POSIX command a unique inherited lineage marker so termination
+  // can still enumerate descendants after reparenting.
+  const treeToken = process.platform === 'win32' ? undefined : randomUUID()
+  const spawnEnv = treeToken ? { ...env, [COMMAND_TREE_TOKEN_ENV]: treeToken } : env
 
   return await new Promise((resolve) => {
     let stdout = ''
@@ -89,7 +97,7 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
 
     const child = spawn(executable, spawnArgs, {
       cwd: spec.cwd,
-      env,
+      env: spawnEnv,
       shell: false,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -113,7 +121,7 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
       // any caller proceeds to rollback.
       const pid = child.pid
       if (pid !== undefined) {
-        timeoutTermination = terminateTree(pid)
+        timeoutTermination = terminateTree(pid, treeToken)
         timeoutTermination.then((terminated) => {
           treeTerminated = terminated
           finish(null, undefined, terminated ? undefined : 'TREE_TERMINATION_UNCONFIRMED')
@@ -383,7 +391,7 @@ function binValueMatches (binValue: string, inPackageRelative: string, namesEqua
  * on POSIX signals the process group. Callers must only proceed to rollback
  * after this reports the tree was terminated.
  */
-async function terminateTree (pid: number): Promise<boolean> {
+async function terminateTree (pid: number, treeToken?: string): Promise<boolean> {
   if (process.platform === 'win32') {
     // `taskkill /T` includes descendants. Do not report success until taskkill
     // itself exits successfully and the original pid is no longer observable.
@@ -409,14 +417,27 @@ async function terminateTree (pid: number): Promise<boolean> {
     })
     return exitCode === 0 && await waitForProcessExit(pid)
   }
-  // POSIX children are spawned detached, making their pid the process-group
-  // id. Signal and confirm the group, escalating once to SIGKILL if needed.
+  // Capture the ancestry before signaling: a descendant may have called
+  // setsid() and escaped the original process group while retaining its PPID.
+  const tracked = await collectPosixProcessTree(pid)
+  const marked = treeToken ? await processesWithTreeToken(treeToken) : undefined
+  const enumerationAvailable = tracked !== undefined && marked !== undefined
+  const observed = new Set([pid, ...(tracked ?? []), ...(marked ?? [])])
   try {
     process.kill(-pid, 'SIGTERM')
   } catch { /* group may not exist */ }
-  if (await waitForProcessGroupExit(pid, 500)) return true
+  signalProcesses(observed, 'SIGTERM')
+  if (enumerationAvailable && treeToken && await waitForPosixTreeExit(pid, observed, treeToken, 'SIGTERM', 500)) return true
+  // Refresh while parents are still observable so children created during
+  // timeout handling are included before the final, non-catchable signal.
+  const refreshed = await collectPosixProcessTree(pid, observed)
+  if (refreshed) for (const descendant of refreshed) observed.add(descendant)
+  const refreshedMarked = treeToken ? await processesWithTreeToken(treeToken) : undefined
+  if (refreshedMarked) for (const descendant of refreshedMarked) observed.add(descendant)
   try { process.kill(-pid, 'SIGKILL') } catch { /* group may already be gone */ }
-  return await waitForProcessGroupExit(pid, 500)
+  signalProcesses(observed, 'SIGKILL')
+  return enumerationAvailable && refreshed !== undefined && refreshedMarked !== undefined && treeToken !== undefined &&
+    await waitForPosixTreeExit(pid, observed, treeToken, 'SIGKILL', 1_000)
 }
 
 export function windowsTaskkillPath (systemRoot = 'C:\\Windows'): string {
@@ -428,8 +449,142 @@ async function waitForProcessExit (pid: number, timeoutMs = 1_000): Promise<bool
   return await waitUntilGone(() => process.kill(pid, 0), timeoutMs)
 }
 
-async function waitForProcessGroupExit (pid: number, timeoutMs: number): Promise<boolean> {
-  return await waitUntilGone(() => process.kill(-pid, 0), timeoutMs)
+async function waitForPosixTreeExit (
+  pid: number,
+  tracked: Set<number>,
+  treeToken: string,
+  signal: NodeJS.Signals,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const marked = await processesWithTreeToken(treeToken)
+    if (marked === undefined) return false
+    for (const descendant of marked) tracked.add(descendant)
+    signalProcesses(marked, signal)
+    if (marked.size === 0 && processGroupIsGone(pid) && [...tracked].every(processIsGone)) return true
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  const marked = await processesWithTreeToken(treeToken)
+  if (marked === undefined) return false
+  for (const descendant of marked) tracked.add(descendant)
+  signalProcesses(marked, signal)
+  return marked.size === 0 && processGroupIsGone(pid) && [...tracked].every(processIsGone)
+}
+
+function processGroupIsGone (pid: number): boolean {
+  try { process.kill(-pid, 0); return false } catch { return true }
+}
+
+function processIsGone (pid: number): boolean {
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const state = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/, 1)[0]
+      if (state === 'Z' || state === 'X') return true
+    } catch { return true }
+  }
+  try { process.kill(pid, 0); return false } catch { return true }
+}
+
+async function processesWithTreeToken (treeToken: string): Promise<Set<number> | undefined> {
+  return process.platform === 'linux'
+    ? linuxProcessesWithTreeToken(treeToken)
+    : await psProcessesWithTreeToken(treeToken)
+}
+
+function linuxProcessesWithTreeToken (treeToken: string): Set<number> | undefined {
+  let entries: string[]
+  try { entries = readdirSync('/proc') } catch { return undefined }
+  const marker = `${COMMAND_TREE_TOKEN_ENV}=${treeToken}`
+  const matches = new Set<number>()
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    try {
+      const environment = readFileSync(`/proc/${entry}/environ`, 'utf8').split('\0')
+      if (environment.includes(marker)) matches.add(Number(entry))
+    } catch { /* process exited or belongs to another user */ }
+  }
+  return matches
+}
+
+async function psProcessesWithTreeToken (treeToken: string): Promise<Set<number> | undefined> {
+  return await new Promise((resolve) => {
+    const matches = new Set<number>()
+    const marker = `${COMMAND_TREE_TOKEN_ENV}=${treeToken}`
+    const ps = spawn('/bin/ps', ['eww', '-axo', 'pid=,command='], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    let output = ''
+    ps.stdout?.setEncoding('utf8')
+    ps.stdout?.on('data', (chunk: string) => { output += chunk })
+    ps.once('error', () => resolve(undefined))
+    ps.once('exit', (code) => {
+      if (code !== 0) return resolve(undefined)
+      for (const line of output.split('\n')) {
+        const match = /^\s*(\d+)\s+/.exec(line)
+        if (match && line.includes(marker)) matches.add(Number(match[1]))
+      }
+      resolve(matches)
+    })
+  })
+}
+
+function signalProcesses (pids: ReadonlySet<number>, signal: NodeJS.Signals): void {
+  for (const childPid of pids) {
+    try { process.kill(childPid, signal) } catch { /* process may already be gone */ }
+  }
+}
+
+async function collectPosixProcessTree (rootPid: number, existing: ReadonlySet<number> = new Set()): Promise<Set<number> | undefined> {
+  const parents = process.platform === 'linux' ? linuxProcessParents() : await psProcessParents()
+  if (!parents) return undefined
+  const collected = new Set<number>([rootPid, ...existing])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [child, parent] of parents) {
+      if (collected.has(parent) && !collected.has(child)) {
+        collected.add(child)
+        changed = true
+      }
+    }
+  }
+  return collected
+}
+
+function linuxProcessParents (): Map<number, number> | undefined {
+  const parents = new Map<number, number>()
+  let entries: string[] = []
+  try { entries = readdirSync('/proc') } catch { return undefined }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    try {
+      const stat = readFileSync(`/proc/${entry}/stat`, 'utf8')
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)
+      const child = Number(entry)
+      const parent = Number(fields[1])
+      if (Number.isSafeInteger(child) && Number.isSafeInteger(parent)) parents.set(child, parent)
+    } catch { /* process exited during the snapshot */ }
+  }
+  return parents
+}
+
+async function psProcessParents (): Promise<Map<number, number> | undefined> {
+  return await new Promise((resolve) => {
+    const parents = new Map<number, number>()
+    const ps = spawn('/bin/ps', ['-axo', 'pid=,ppid='], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    let output = ''
+    ps.stdout?.setEncoding('utf8')
+    ps.stdout?.on('data', (chunk: string) => { output += chunk })
+    ps.once('error', () => resolve(undefined))
+    ps.once('exit', (code) => {
+      if (code !== 0) return resolve(undefined)
+      for (const line of output.split('\n')) {
+        const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+        if (match) parents.set(Number(match[1]), Number(match[2]))
+      }
+      resolve(parents)
+    })
+  })
 }
 
 async function waitUntilGone (probe: () => void, timeoutMs: number): Promise<boolean> {

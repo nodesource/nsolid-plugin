@@ -85,6 +85,26 @@ function comparisonArtifact (plannedRoot: string, overrides: { comparisonDigest?
 }
 
 describe('Codex update transaction', () => {
+  it('rejects a cache-root symlink before backup or mutation', async () => {
+    const external = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-external-cache-'))
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(path.dirname(cachePath), { recursive: true })
+    writeFileSync(path.join(external, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+    symlinkSync(external, cachePath, process.platform === 'win32' ? 'junction' : 'dir')
+    try {
+      const result = await executeCodexTransaction(item(cachePath), {
+        run: async () => { throw new Error('command must not run for a linked cache root') },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CACHE_KIND_UNSUPPORTED')
+      assert.equal(result.rollbackAttempted, false)
+      assert.match(readFileSync(path.join(external, 'bundle.json'), 'utf8'), /1\.0\.0/)
+    } finally {
+      rmSync(external, { recursive: true, force: true })
+    }
+  })
+
   it('matches equivalent TOML plugin table headers without splitting quoted keys', () => {
     const variants = [
       { pluginId: 'nsolid-plugin', header: '[plugins.nsolid-plugin]' },

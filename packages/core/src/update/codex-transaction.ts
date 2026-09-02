@@ -56,6 +56,13 @@ export async function executeCodexTransaction (
       error: { code: 'CODEX_CONFIG_KIND_UNSUPPORTED', message: 'Codex configuration must be a regular file for transactional replacement' },
     }
   }
+  if (cacheKind !== 'missing' && cacheKind !== 'directory') {
+    return {
+      success: false,
+      rollbackAttempted: false,
+      error: { code: 'CODEX_CACHE_KIND_UNSUPPORTED', message: 'Codex cache root must be a real directory, not a link or reparse point' },
+    }
+  }
 
   // Allocate backup storage before any mutation. A missing parent directory
   // (e.g. `~/.codex` absent while the config is missing) makes mkdtemp reject

@@ -109,6 +109,12 @@ export interface LocalArtifactIdentity {
 
 export type ResolvedArtifactIdentity = NpmArtifactIdentity | GitArtifactIdentity | LocalArtifactIdentity
 
+export interface FallbackPathEvidence {
+  path: string
+  kind: 'missing' | 'file' | 'directory' | 'symlink' | 'other'
+  digest?: string
+}
+
 export interface FallbackTransactionIdentity {
   installationId: string
   harness: HarnessType
@@ -116,8 +122,10 @@ export interface FallbackTransactionIdentity {
   trackingDigest: string
   /** Shared secret authenticating the child transaction (never authorizing restores). */
   nonce?: string
-  ownedSkillPaths: readonly string[]
-  ownedLinkPaths: readonly string[]
+  /** Planned kind/digest evidence for every tracked skill, captured before approval. */
+  ownedSkills: readonly FallbackPathEvidence[]
+  /** Planned kind/digest evidence for every harness link, captured before approval. */
+  ownedLinks: readonly FallbackPathEvidence[]
   ownedMcpFields: readonly {
     configPath: string
     server: string
@@ -322,6 +330,18 @@ export interface UpdateError {
   message: string
 }
 
+/**
+ * Public projection of a plan step for structured output. It deliberately
+ * carries no command environment, working directory, spawn identity, or
+ * timeout: those are internal execution state, and every transient
+ * temporary path inside them is redacted by the projection in
+ * plan-projection.ts.
+ */
+export type PublicPlanStep =
+  | { kind: 'command'; description: string; executable: string; args: readonly string[] }
+  | { kind: 'filesystem'; description: string; operation: 'backup' | 'replace' | 'reconcile' | 'restore' | 'cleanup'; paths: readonly string[] }
+  | { kind: 'validation'; description: string; checks: readonly string[] }
+
 export interface UpdatePlanItem {
   installationId: string
   target: UpdateTarget
@@ -388,6 +408,13 @@ export interface UpdateResult {
   restartHint?: string
   rollbackCommand?: string
   manualCommands?: readonly string[]
+  /**
+   * Technical plan projection for the structured output (secrets and
+   * transient internal state redacted); steps as planned, not as executed.
+   */
+  steps?: readonly PublicPlanStep[]
+  /** Human-oriented change summary of the planned update, as planned. */
+  changes?: UpdatePlanItem['changes']
   rollback?: {
     attempted: boolean
     succeeded?: boolean

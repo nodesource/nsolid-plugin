@@ -22,7 +22,7 @@ import { editMcpTomlBytes, McpTomlEditError } from './mcp-toml-edit.js'
 import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerField, readMcpServerRecord, valueDigest } from './mcp-lookup.js'
 import { readPackageVersion } from './package-manager.js'
 import { isStableVersion } from './version.js'
-import { isCanonicalPath, matchesTrackedOwnership, mcpRecordIsExclusivelyOwned } from './fallback-ownership.js'
+import { isCanonicalPath, isSafeDirectChild, matchesTrackedOwnership, mcpRecordIsExclusivelyOwned } from './fallback-ownership.js'
 
 export interface FallbackRefreshOptions {
   harness: HarnessType
@@ -40,7 +40,7 @@ export interface FallbackRefreshResult {
 
 export async function refreshOwnedInstallation (options: FallbackRefreshOptions): Promise<FallbackRefreshResult> {
   if (options.transaction) {
-    const validation = validateTransactionIdentity(options.transaction)
+    const validation = await validateTransactionIdentity(options.transaction)
     if (validation) return failure(validation.code, validation.message)
   }
   const tracking = await readTrackingFile()
@@ -242,7 +242,14 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
           ...bundle.skills.map((skill) => path.join(destination, skill.name)),
           ...(linkDir ? bundle.skills.map((skill) => path.join(linkDir, skill.name)) : []),
         ]
-        journal = await appendFallbackJournalEntries(journal, newTargets)
+        try {
+          journal = await appendFallbackJournalEntries(journal, newTargets)
+        } catch (error) {
+          if (error instanceof Error && error.message === 'UNTRACKED_DESTINATION') {
+            throw new FallbackTransactionError('UNTRACKED_DESTINATION', 'A fallback destination appeared after planning and is not NodeSource-owned')
+          }
+          throw error
+        }
       }
 
       // ---- STAGE: skills, links, MCP bytes, and tracking bytes are prepared
@@ -541,12 +548,12 @@ async function atomicWriteFile (targetPath: string, bytes: Buffer): Promise<void
   await rename(temporary, targetPath)
 }
 
-function validateTransactionIdentity (identity: FallbackTransactionIdentity): UpdateError | undefined {
+async function validateTransactionIdentity (identity: FallbackTransactionIdentity): Promise<UpdateError | undefined> {
   if (!identity.installationId || identity.installationId !== `${identity.harness}:fallback`) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction manifest has an invalid installation identity' }
   if (!path.isAbsolute(identity.trackingPath) || !trackingDigest(identity.trackingPath)) return { code: 'FALLBACK_TRACKING_DRIFT', message: 'Fallback tracking file is absent or cannot be hashed' }
   if (trackingDigest(identity.trackingPath) !== identity.trackingDigest) return { code: 'FALLBACK_TRACKING_DRIFT', message: 'Fallback tracking file changed after planning' }
-  if (identity.ownedSkillPaths.some((value) => !isCanonicalPath(value))) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe skill path' }
-  if (identity.ownedLinkPaths.some((value) => !isCanonicalPath(value))) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe link path' }
+  if (!Array.isArray(identity.ownedSkills) || identity.ownedSkills.some((entry) => !isValidPathEvidence(entry))) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe skill path' }
+  if (!Array.isArray(identity.ownedLinks) || identity.ownedLinks.some((entry) => !isValidPathEvidence(entry))) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe link path' }
   for (const field of identity.ownedMcpFields) {
     if (!isCanonicalPath(field.configPath) || !existsSync(field.configPath)) return { code: 'FALLBACK_MCP_DRIFT', message: 'Owned MCP configuration changed after planning' }
     const current = readMcpServerField(field.configPath, field.server, field.field, { preferredKey: harnessMcpKey(identity.harness) })
@@ -565,7 +572,8 @@ function validateTransactionIdentity (identity: FallbackTransactionIdentity): Up
   // Destination roots are approved at planning time. If the environment now
   // resolves a skill or link destination outside those roots, the manifest no
   // longer describes this machine: block before any mutation.
-  const approvedRoots = (identity.approvedDestinationRoots ?? []).map((value) => path.resolve(value))
+  if (!Array.isArray(identity.approvedDestinationRoots)) return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains no destination roots' }
+  const approvedRoots = identity.approvedDestinationRoots.map((value) => path.resolve(value))
   if (approvedRoots.length === 0 || approvedRoots.some((value) => !isCanonicalPath(value))) {
     return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe destination root' }
   }
@@ -581,7 +589,29 @@ function validateTransactionIdentity (identity: FallbackTransactionIdentity): Up
       return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'The harness link destination is outside the approved destination roots' }
     }
   }
+  if (identity.ownedSkills.some((entry) => !isSafeDirectChild(entry.path, approvedRoots))) {
+    return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains a skill outside the approved destination roots' }
+  }
+  const linkRoots = identity.harness === 'opencode' ? approvedRoots : [path.resolve(getHarnessSkillsPath(identity.harness))]
+  if (identity.ownedLinks.some((entry) => !isSafeDirectChild(entry.path, linkRoots))) {
+    return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains a link outside the approved destination roots' }
+  }
+  for (const entry of [...identity.ownedSkills, ...identity.ownedLinks]) {
+    const kind = await pathKind(entry.path)
+    const digest = kind === 'missing' ? undefined : await pathDigest(entry.path)
+    if (kind !== entry.kind || digest !== entry.digest) {
+      return { code: 'FALLBACK_TRACKING_DRIFT', message: 'Fallback owned path changed after planning' }
+    }
+  }
   return undefined
+}
+
+function isValidPathEvidence (entry: unknown): entry is FallbackTransactionIdentity['ownedSkills'][number] {
+  if (!entry || typeof entry !== 'object') return false
+  const value = entry as { path?: unknown; kind?: unknown; digest?: unknown }
+  if (typeof value.path !== 'string' || !isCanonicalPath(value.path)) return false
+  if (!['missing', 'file', 'directory', 'symlink', 'other'].includes(String(value.kind))) return false
+  return value.kind === 'missing' ? value.digest === undefined : typeof value.digest === 'string'
 }
 
 function readValidCredentials (): Credentials | null {

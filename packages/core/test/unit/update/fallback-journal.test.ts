@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSy
 import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { appendFallbackJournalEntries, applyFallbackEntry, beginFallbackJournal, captureFallbackJournalState, claimFallbackJournalMutation, commitFallbackJournal, markFallbackJournalMutating, pathDigest, recoverFallbackJournal, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, trackingDigest } from '../../../src/update/fallback-journal.js'
+import { appendFallbackJournalEntries, applyFallbackEntry, beginFallbackJournal, captureFallbackJournalState, claimFallbackJournalMutation, commitFallbackJournal, fallbackJournalPath, markFallbackJournalMutating, pathDigest, pathKind, recoverFallbackJournal, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getSkillsDir, getTrackingFilePath } from '../../../src/utils/path.js'
 import type { FallbackTransactionIdentity } from '../../../src/update/types.js'
@@ -48,8 +48,8 @@ describe('fallback journal ownership validation', () => {
       trackingPath,
       trackingDigest: trackingDigest(trackingPath)!,
       nonce: randomUUID(),
-      ownedSkillPaths: [skillPath],
-      ownedLinkPaths: [path.join(getHarnessSkillsPath('claude'), 'tracked')],
+      ownedSkills: [await pathEvidence(skillPath)],
+      ownedLinks: [await pathEvidence(path.join(getHarnessSkillsPath('claude'), 'tracked'))],
       ownedMcpFields: [],
       ownedMcpConfigPaths: [path.join(home, '.claude.json')],
       approvedDestinationRoots: [path.join(home, '.agents', 'skills'), getHarnessSkillsPath('claude')],
@@ -59,7 +59,7 @@ describe('fallback journal ownership validation', () => {
     writeFileSync(victim, 'keep')
     const malicious = {
       ...journal,
-      manifest: { ...journal.manifest, ownedSkillPaths: [...journal.manifest.ownedSkillPaths, victim] },
+      manifest: { ...journal.manifest, ownedSkills: [...journal.manifest.ownedSkills, await pathEvidence(victim)] },
       entries: [...journal.entries, { path: victim, backup: path.join(journal.snapshotDirectory, 'attacker'), existed: false, kind: 'file' as const }],
     }
 
@@ -68,7 +68,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('refuses appended new-destination entries outside the approved destination roots', async () => {
-    const { manifest } = setupValidFixture()
+    const { manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     const foreign = path.join(home, 'elsewhere', 'added')
     mkdirSync(path.dirname(foreign), { recursive: true })
@@ -83,7 +83,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('refuses appended new-destination entries whose basename is not a safe skill name', async () => {
-    const { manifest } = setupValidFixture()
+    const { manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     const unsafe = path.join(home, '.agents', 'skills', 'wei..rd')
     const digest = await pathDigest(unsafe)
@@ -94,8 +94,27 @@ describe('fallback journal ownership validation', () => {
     assert.equal(await restoreFallbackJournal(journal), false)
   })
 
+  it('rejects owned skill bytes that change after planning but before journaling', async () => {
+    const { manifest, skillPath } = await setupValidFixture()
+    writeFileSync(path.join(skillPath, 'SKILL.md'), '# user edit after approval\n')
+
+    await assert.rejects(beginFallbackJournal(manifest), /FALLBACK_TRACKING_DRIFT/)
+    assert.equal(existsSync(fallbackJournalPath(manifest.trackingPath)), false)
+  })
+
+  it('rejects a user destination that appears before the child appends it', async () => {
+    const { manifest } = await setupValidFixture()
+    const { journal } = await beginFallbackJournal(manifest)
+    const destination = path.join(getSkillsDir(), 'new-skill')
+    mkdirSync(destination, { recursive: true })
+    writeFileSync(path.join(destination, 'user-file.txt'), 'keep\n')
+
+    await assert.rejects(appendFallbackJournalEntries(journal, [destination]), /UNTRACKED_DESTINATION/)
+    assert.equal(readFileSync(path.join(destination, 'user-file.txt'), 'utf8'), 'keep\n')
+  })
+
   it('restores the snapshotted bytes of owned state after a mutation', async () => {
-    const { trackingPath, skillPath, linkPath, manifest, trackingJson } = setupValidFixture()
+    const { trackingPath, skillPath, linkPath, manifest, trackingJson } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     writeFileSync(path.join(skillPath, 'SKILL.md'), '# mutated\n')
     writeFileSync(linkPath, 'mutated\n')
@@ -115,7 +134,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('refuses to overwrite state that changed after the authorized mutation snapshot', async () => {
-    const { linkPath, manifest } = setupValidFixture()
+    const { linkPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     writeFileSync(linkPath, 'child mutation\n')
     journal = await captureFallbackJournalState(journal)
@@ -128,7 +147,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('recovers a crash after the swap was applied but before commit', async () => {
-    const { trackingPath, skillPath, manifest, trackingJson } = setupValidFixture()
+    const { trackingPath, skillPath, manifest, trackingJson } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     assert.equal(await claimFallbackJournalMutation(manifest, 2_147_483_647), true)
@@ -147,7 +166,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('recovers a crash in the middle of a swap: target missing, stage intact', async () => {
-    const { trackingPath, skillPath, manifest } = setupValidFixture()
+    const { trackingPath, skillPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     await claimFallbackJournalMutation(manifest, 2_147_483_647)
@@ -165,7 +184,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed and preserves artifacts when live bytes are unregistered drift', async () => {
-    const { trackingPath, skillPath, manifest } = setupValidFixture()
+    const { trackingPath, skillPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     await claimFallbackJournalMutation(manifest, 2_147_483_647)
@@ -179,7 +198,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed when a user edits the target after an applied swap', async () => {
-    const { trackingPath, skillPath, manifest } = setupValidFixture()
+    const { trackingPath, skillPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     await claimFallbackJournalMutation(manifest, 2_147_483_647)
@@ -197,7 +216,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed when the staged payload no longer matches its registered digest', async () => {
-    const { skillPath, manifest } = setupValidFixture()
+    const { skillPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     await claimFallbackJournalMutation(manifest, 2_147_483_647)
@@ -212,7 +231,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed when the snapshotted backup no longer matches the registered digest', async () => {
-    const { trackingPath, manifest, trackingJson } = setupValidFixture()
+    const { trackingPath, manifest, trackingJson } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     await claimFallbackJournalMutation(manifest, 2_147_483_647)
@@ -227,7 +246,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed when an applied staged replacement is deleted concurrently', async () => {
-    const { trackingPath, skillPath, manifest } = setupValidFixture()
+    const { trackingPath, skillPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     await claimFallbackJournalMutation(manifest, 2_147_483_647)
@@ -246,7 +265,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('recovers a deletion crash using the durably persisted quarantine', async () => {
-    const { trackingPath, skillPath, manifest, trackingJson } = setupValidFixture()
+    const { trackingPath, skillPath, manifest, trackingJson } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     await claimFallbackJournalMutation(manifest, 2_147_483_647)
@@ -269,7 +288,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('does not recover while the claimed child process is still alive', async () => {
-    const { trackingPath, manifest } = setupValidFixture()
+    const { trackingPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     assert.equal(await claimFallbackJournalMutation(manifest), true)
@@ -279,7 +298,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('refuses to claim the mutation without the journal nonce', async () => {
-    const { manifest } = setupValidFixture()
+    const { manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await markFallbackJournalMutating(journal)
     const impostor = { ...manifest, nonce: randomUUID() }
@@ -289,7 +308,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed on version 1 journals without cleaning their snapshots', async () => {
-    const { trackingPath, manifest, skillPath } = setupValidFixture()
+    const { trackingPath, manifest, skillPath } = await setupValidFixture()
     const legacySnapshot = mkdtempSync(path.join(path.dirname(trackingPath), '.nsolid-plugin-update-'))
     const legacy = {
       version: 1,
@@ -309,7 +328,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('rejects a nested user-owned link path whose basename matches the expected link', async () => {
-    const { manifest } = setupValidFixture()
+    const { manifest } = await setupValidFixture()
     const expectedLink = path.join(getHarnessSkillsPath('claude'), 'tracked')
     const nested = path.join(getHarnessSkillsPath('claude'), 'user-owned', 'tracked')
     mkdirSync(path.dirname(nested), { recursive: true })
@@ -317,7 +336,7 @@ describe('fallback journal ownership validation', () => {
     const { journal } = await beginFallbackJournal(manifest)
     const malicious = {
       ...journal,
-      manifest: { ...journal.manifest, ownedLinkPaths: [nested] },
+      manifest: { ...journal.manifest, ownedLinks: [await pathEvidence(nested)] },
       entries: journal.entries.map((entry) => path.resolve(entry.path) === path.resolve(expectedLink)
         ? { path: nested, backup: path.join(journal.snapshotDirectory, 'attacker'), existed: false, kind: 'file' as const }
         : entry),
@@ -328,7 +347,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('commits a valid journal and removes its journal and snapshot artifacts', async () => {
-    const { manifest } = setupValidFixture()
+    const { manifest } = await setupValidFixture()
     const { journal } = await beginFallbackJournal(manifest)
 
     await commitFallbackJournal(journal)
@@ -339,7 +358,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('aborts the swap when the live file drifted after registration', async () => {
-    const { linkPath, manifest } = setupValidFixture()
+    const { linkPath, manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     journal = await registerFallbackStage(journal, linkPath, { bytes: Buffer.from('# new bundle\n') })
     writeFileSync(linkPath, 'concurrent user edit\n')
@@ -355,12 +374,12 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('aborts the swap when the live directory drifted after registration', async () => {
-    const { manifest } = setupValidFixture()
+    const { manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     const dirPath = path.join(getSkillsDir(), 'tracked-dir')
+    journal = await appendFallbackJournalEntries(journal, [dirPath])
     mkdirSync(dirPath, { recursive: true })
     writeFileSync(path.join(dirPath, 'SKILL.md'), '# v1\n')
-    journal = await appendFallbackJournalEntries(journal, [dirPath])
     const stageSource = mkdtempSync(path.join(path.dirname(dirPath), '.stage-src-'))
     mkdirSync(path.join(stageSource, 'payload'), { recursive: true })
     writeFileSync(path.join(stageSource, 'payload', 'SKILL.md'), '# v2\n')
@@ -375,7 +394,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('refuses to swap over a missing destination created concurrently', async () => {
-    const { manifest } = setupValidFixture()
+    const { manifest } = await setupValidFixture()
     let { journal } = await beginFallbackJournal(manifest)
     const freshPath = path.join(getSkillsDir(), 'fresh-skill')
     journal = await appendFallbackJournalEntries(journal, [freshPath])
@@ -394,7 +413,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed when the snapshot directory points at the tracking directory itself', async () => {
-    const { trackingPath, manifest, trackingJson } = setupValidFixture()
+    const { trackingPath, manifest, trackingJson } = await setupValidFixture()
     const { journal } = await beginFallbackJournal(manifest)
     const trackingDir = path.dirname(trackingPath)
     const sibling = path.join(trackingDir, 'sibling.txt')
@@ -415,7 +434,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed when the snapshot directory is a symlink escaping the tracking directory', { skip: process.platform === 'win32' }, async () => {
-    const { trackingPath, manifest } = setupValidFixture()
+    const { trackingPath, manifest } = await setupValidFixture()
     const { journal } = await beginFallbackJournal(manifest)
     const victim = path.join(home, 'victim-dir')
     mkdirSync(victim)
@@ -435,7 +454,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('fails closed when the snapshot directory name does not match the mkdtemp shape', async () => {
-    const { trackingPath, manifest } = setupValidFixture()
+    const { trackingPath, manifest } = await setupValidFixture()
     const { journal } = await beginFallbackJournal(manifest)
     const trackingDir = path.dirname(trackingPath)
     const suffixless = { ...journal, snapshotDirectory: path.join(trackingDir, '.nsolid-plugin-update-') }
@@ -456,7 +475,7 @@ describe('fallback journal ownership validation', () => {
     // POSIX mkdtemp only promises suffix characters from the portable filename
     // set, which includes `.` and `-`: a valid snapshot produced by such a
     // libc must still pass validation and restore.
-    const { trackingPath, skillPath, linkPath, manifest, trackingJson } = setupValidFixture()
+    const { trackingPath, skillPath, linkPath, manifest, trackingJson } = await setupValidFixture()
     const { journal } = await beginFallbackJournal(manifest)
     const renamed = path.join(path.dirname(journal.snapshotDirectory), '.nsolid-plugin-update-a.c-01')
     renameSync(journal.snapshotDirectory, renamed)
@@ -484,7 +503,7 @@ describe('fallback journal ownership validation', () => {
   })
 
   it('aborts the restore without touching live paths when a non-tracking backup was tampered with', async () => {
-    const { skillPath, manifest } = setupValidFixture()
+    const { skillPath, manifest } = await setupValidFixture()
     const { journal } = await beginFallbackJournal(manifest)
     const skillEntry = journal.entries.find((entry) => path.resolve(entry.path) === path.resolve(skillPath))!
     writeFileSync(path.join(skillEntry.backup!, 'SKILL.md'), '# tampered\n')
@@ -497,7 +516,7 @@ describe('fallback journal ownership validation', () => {
   })
 })
 
-function setupValidFixture (): { trackingPath: string; skillPath: string; linkPath: string; manifest: FallbackTransactionIdentity; trackingJson: string } {
+async function setupValidFixture (): Promise<{ trackingPath: string; skillPath: string; linkPath: string; manifest: FallbackTransactionIdentity; trackingJson: string }> {
   const trackingPath = getTrackingFilePath()
   const skillPath = path.join(home, '.agents', 'skills', 'tracked')
   const linkPath = path.join(getHarnessSkillsPath('claude'), 'tracked')
@@ -520,11 +539,17 @@ function setupValidFixture (): { trackingPath: string; skillPath: string; linkPa
     trackingPath,
     trackingDigest: trackingDigest(trackingPath)!,
     nonce: randomUUID(),
-    ownedSkillPaths: [skillPath],
-    ownedLinkPaths: [linkPath],
+    ownedSkills: [await pathEvidence(skillPath)],
+    ownedLinks: [await pathEvidence(linkPath)],
     ownedMcpFields: [],
     ownedMcpConfigPaths: [path.join(home, '.claude.json')],
     approvedDestinationRoots: [path.join(home, '.agents', 'skills'), getHarnessSkillsPath('claude')],
   }
   return { trackingPath, skillPath, linkPath, manifest, trackingJson }
+}
+
+async function pathEvidence (target: string) {
+  const kind = await pathKind(target)
+  const digest = kind === 'missing' ? undefined : await pathDigest(target)
+  return { path: path.resolve(target), kind, digest }
 }

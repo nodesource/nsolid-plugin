@@ -127,6 +127,17 @@ function antigravitySource (): UpdateSource {
 
 function piInstallation (root: string, source: UpdateSource): UpdateInstallation {
   const candidate = installation('pi', source)
+  const tarballPath = path.join(root, 'nsolid-pi-plugin-1.0.1.tgz')
+  writeFileSync(tarballPath, 'verified tarball fixture')
+  candidate.artifact = {
+    kind: 'npm',
+    packageName: 'nsolid-pi-plugin',
+    version: '1.0.1',
+    registry: 'https://registry.npmjs.org/',
+    tarball: 'https://registry.npmjs.org/nsolid-pi-plugin/-/nsolid-pi-plugin-1.0.1.tgz',
+    tarballPath,
+    integrity: 'sha512-dGVzdA==',
+  }
   const packageRoot = path.join(root, 'npm', 'node_modules', 'nsolid-pi-plugin')
   const evidencePath = path.join(root, 'npm', 'package-lock.json')
   mkdirSync(packageRoot, { recursive: true })
@@ -507,7 +518,7 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
       if (!step || step.kind !== 'command') return
       assertSameExecutable(step.command.executable, exe)
       assertNativeIdentity(step.command.executableIdentity, exe)
-      assert.deepEqual(step.command.args, ['update', 'npm:nsolid-pi-plugin', '--approve'])
+      assert.deepEqual(step.command.args, ['update', path.join(root, 'nsolid-pi-plugin-1.0.1.tgz'), '--approve'])
       assert.equal(step.command.cwd, '/tmp/project')
     } finally {
       rmSync(root, { recursive: true, force: true })

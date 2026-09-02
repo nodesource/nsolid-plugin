@@ -112,6 +112,66 @@ describe('Claude native replacement transaction', () => {
     }
   })
 
+  it('rejects an exit-zero update that removes unrelated registry and enabled-plugin entries', async () => {
+    const fixture = setupInstallation()
+    const claudeConfigPath = path.join(fixture.home, '.claude.json')
+    const registry = JSON.parse(readFileSync(fixture.registryPath, 'utf8')) as { plugins: Record<string, unknown> }
+    registry.plugins['other-plugin@vendor'] = [{ version: '3.0.0', installPath: path.join(fixture.home, 'other'), scope: 'user' }]
+    const registryWithForeign = JSON.stringify(registry) + '\n'
+    const configWithForeign = JSON.stringify({ enabledPlugins: { 'nsolid-plugin@nodesource': true, 'other-plugin@vendor': true }, theme: 'dark' }) + '\n'
+    writeFileSync(fixture.registryPath, registryWithForeign)
+    writeFileSync(claudeConfigPath, configWithForeign)
+    try {
+      const result = await executeClaudeTransaction({
+        commands: [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }],
+        registrationPaths: [fixture.registryPath, fixture.marketplacesPath, claudeConfigPath],
+        configPath: fixture.registryPath,
+        pluginId: 'nsolid-plugin@nodesource',
+        scope: 'user',
+        expectedVersion: '1.0.0',
+      }, runner(() => {
+        const nextRegistry = JSON.parse(readFileSync(fixture.registryPath, 'utf8')) as { plugins: Record<string, unknown> }
+        delete nextRegistry.plugins['other-plugin@vendor']
+        writeFileSync(fixture.registryPath, JSON.stringify(nextRegistry) + '\n')
+        writeFileSync(claudeConfigPath, JSON.stringify({ enabledPlugins: { 'nsolid-plugin@nodesource': true }, theme: 'dark' }) + '\n')
+        return okResult
+      }))
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CLAUDE_FOREIGN_STATE_CHANGED')
+      assert.equal(result.rollbackSucceeded, true)
+      assert.equal(readFileSync(fixture.registryPath, 'utf8'), registryWithForeign)
+      assert.equal(readFileSync(claudeConfigPath, 'utf8'), configWithForeign)
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a successful update that preserves unrelated registry and enabled-plugin entries', async () => {
+    const fixture = setupInstallation()
+    const claudeConfigPath = path.join(fixture.home, '.claude.json')
+    const registry = JSON.parse(readFileSync(fixture.registryPath, 'utf8')) as { plugins: Record<string, unknown> }
+    registry.plugins['other-plugin@vendor'] = [{ version: '3.0.0', installPath: path.join(fixture.home, 'other'), scope: 'user' }]
+    writeFileSync(fixture.registryPath, JSON.stringify(registry) + '\n')
+    writeFileSync(claudeConfigPath, JSON.stringify({ enabledPlugins: { 'nsolid-plugin@nodesource': true, 'other-plugin@vendor': true } }) + '\n')
+    try {
+      const result = await executeClaudeTransaction({
+        commands: [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }],
+        registrationPaths: [fixture.registryPath, fixture.marketplacesPath, claudeConfigPath],
+        configPath: fixture.registryPath,
+        pluginId: 'nsolid-plugin@nodesource',
+        scope: 'user',
+        expectedVersion: '1.0.0',
+      }, runner(() => okResult))
+
+      assert.equal(result.success, true)
+      assert.match(readFileSync(fixture.registryPath, 'utf8'), /other-plugin@vendor/)
+      assert.match(readFileSync(claudeConfigPath, 'utf8'), /other-plugin@vendor/)
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
   it('reports CLAUDE_CONTENT_MISMATCH and rolls back when the installed payload diverges', async () => {
     const fixture = setupInstallation()
     try {

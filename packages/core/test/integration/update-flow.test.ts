@@ -357,4 +357,38 @@ describe('update flow coordinator', () => {
       rmSync(sentinelDir, { recursive: true, force: true })
     }
   })
+
+  it('emits the technical plan and installable guidance in update --json from the compiled CLI', async (t) => {
+    const distCli = path.join(packageRoot, 'dist', 'src', 'cli.js')
+    if (!existsSync(distCli) && process.env.NSOLID_TEST_REQUIRE_BUILD === '1') assert.fail('compiled CLI is required but packages/core/dist/src/cli.js is missing')
+    if (!existsSync(distCli)) return t.skip('compiled CLI is not built; run pnpm build first')
+
+    const run = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [distCli, 'update', '--json', '--harness', 'pi'], {
+        cwd: path.resolve(packageRoot, '..', '..'),
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+      })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      child.on('close', (code) => resolve({ code, stdout, stderr }))
+    })
+
+    // The whole stdout must parse as exactly one valid JSON document: the
+    // structured output carries the technical plan without human text.
+    assert.equal(run.code, 2, `expected exit 2 for a not-installed harness, stdout: ${run.stdout}, stderr: ${run.stderr}`)
+    const summary = JSON.parse(run.stdout.trim()) as {
+      exitCode: number
+      results: Array<{ installationId: string; status: string; target: string; steps?: unknown[]; changes?: unknown; manualCommands?: string[] }>
+    }
+    const pi = summary.results.find((result) => result.installationId === 'pi:none')
+    assert.ok(pi, 'the absent requested harness must produce a pi result')
+    assert.equal(pi.status, 'not-installed')
+    assert.equal(pi.target, 'pi')
+    assert.deepEqual(pi.manualCommands, ['pi install npm:nsolid-pi-plugin', 'nsolid-plugin setup --harness pi'])
+    assert.ok(Array.isArray(pi.steps), 'the technical plan (steps) must be present in the structured output')
+    assert.deepEqual(pi.changes, { skillsAdded: [], skillsRemoved: [], skillsUpdated: 0, mcpAdded: [], mcpRemoved: [], mcpUpdated: 0 }, 'the changes field must be present with a stable shape')
+    assert.deepEqual(pi.steps, [])
+  })
 })

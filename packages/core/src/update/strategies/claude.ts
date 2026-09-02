@@ -4,6 +4,7 @@ import { managerArgsForIdentity } from '../package-manager.js'
 import { nativeExecutionGuard } from '../native-evidence.js'
 import { executeClaudeTransaction } from '../claude-transaction.js'
 import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
+import { resolveHome } from '../../utils/path.js'
 
 export const claudeStrategy: UpdateStrategy = {
   target: 'claude',
@@ -67,7 +68,10 @@ export const claudeStrategy: UpdateStrategy = {
     if (commands.length === 0 || item.source.kind !== 'claude-marketplace') return failedResult(item, { code: 'INVALID_PLAN', message: 'Claude update plan has no command' })
     const transaction = await executeClaudeTransaction({
       commands,
-      registrationPaths: (item.metadata?.nativeEvidence ?? []).map((entry) => entry.path),
+      registrationPaths: [...new Set([
+        ...(item.metadata?.nativeEvidence ?? []).map((entry) => entry.path),
+        resolveHome('~/.claude.json'),
+      ])],
       configPath: item.metadata?.configPath,
       pluginId: item.source.pluginId,
       scope: item.source.scope,

@@ -1,6 +1,5 @@
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -16,6 +15,7 @@ import { cleanupNpmArtifact } from '../version-source.js'
 import { managerArgsForIdentity, verifyLocalArtifact } from '../package-manager.js'
 import { readTrackingFile } from '../../skills/skill-tracker.js'
 import { harnessMcpKey, readMcpFieldDigests } from '../mcp-lookup.js'
+import { readTarEntryText } from '../tarball.js'
 import { validateBundle } from '../../validate.js'
 import { childResultArgs, containmentDirectoryMatches, fallbackChildResultMessage, readValidatedFallbackChildResult, recordContainmentDirectoryIdentity, FALLBACK_CHILD_RESULT_FILENAME, type ContainmentDirectoryIdentity } from '../fallback-result-protocol.js'
 
@@ -31,7 +31,7 @@ export const fallbackStrategy: UpdateStrategy = {
       }
     }
     if (!isMutableVersion(installation)) return planItem(installation)
-    const identity = createFallbackIdentity(installation)
+    const identity = await createFallbackIdentity(installation)
     if (!identity) {
       const unsupportedInstallation = {
         ...installation,
@@ -187,7 +187,7 @@ export const fallbackStrategy: UpdateStrategy = {
         const structured = item.fallbackTransaction?.nonce !== undefined
           ? await readValidatedFallbackChildResult(freshResultPath, item.fallbackTransaction.nonce, { containmentDirectories: freshResultIdentity ? [freshResultIdentity] : [] })
           : undefined
-        const structuredMessage = structured === undefined ? undefined : fallbackChildResultMessage(structured.code)
+        const structuredMessage = structured === undefined ? undefined : fallbackChildResultMessage(structured.code, item.target)
         const childRollbackClaim = structured?.rollback ?? parseRollbackState(`${result.stdout}\n${result.stderr}`)
         if (journal) journal = await reloadFallbackJournal(journal)
         const parentRecovered = journal ? await restoreFallbackJournal(journal) : undefined
@@ -269,13 +269,14 @@ export const fallbackStrategy: UpdateStrategy = {
  * Human-oriented diff of what the update will change, computed from the
  * tracked state and the verified tarball's bundle descriptor. Best-effort by
  * design: an unreadable tarball must never block the plan itself — the full
- * technical detail remains in the steps and the structured output.
+ * technical detail remains in the steps and the structured output. The
+ * bundle is read in-process so the summary never executes a PATH-resolved
+ * binary and never blocks on an unmanaged child process.
  */
 export async function summarizeFallbackChanges (installation: UpdateInstallation, tarballPath: string): Promise<UpdatePlanItem['changes'] | undefined> {
   try {
-    const raw = await new Promise<string>((resolve, reject) => {
-      execFile('tar', ['-xOf', tarballPath, 'package/bundle.json'], { encoding: 'utf8', maxBuffer: 1 << 20 }, (error, stdout) => error ? reject(error) : resolve(stdout))
-    })
+    const raw = await readTarEntryText(tarballPath, 'package/bundle.json')
+    if (raw === undefined) return undefined
     const bundle = validateBundle(JSON.parse(raw))
     const trackedSkills = installation.metadata?.trackedSkills ?? []
     const trackedNames = new Set(trackedSkills.map((skill) => skill.name))
@@ -295,7 +296,7 @@ export async function summarizeFallbackChanges (installation: UpdateInstallation
   }
 }
 
-function createFallbackIdentity (installation: UpdateInstallation) {
+async function createFallbackIdentity (installation: UpdateInstallation) {
   const trackingPath = getTrackingFilePath()
   const digest = trackingDigest(trackingPath)
   if (!digest) return undefined
@@ -309,14 +310,24 @@ function createFallbackIdentity (installation: UpdateInstallation) {
   if (configPath) trackedConfigPaths.push(path.resolve(configPath))
   const canonical = getAdapter(harness).getMcpConfigPath()
   const ownedMcpConfigPaths = [...new Set([...trackedConfigPaths, ...(canonical ? [path.resolve(canonical)] : [])])]
+  const skillPaths = skills.map((skill) => path.resolve(skill.path))
+  const linkPaths = harness === 'opencode' ? [] : skills.map((skill) => path.resolve(getHarnessSkillsPath(harness), skill.name))
+  let ownedSkills
+  let ownedLinks
+  try {
+    ownedSkills = await capturePathEvidence(skillPaths)
+    ownedLinks = await capturePathEvidence(linkPaths)
+  } catch {
+    return undefined
+  }
   return {
     installationId: installation.installationId,
     harness,
     trackingPath,
     trackingDigest: digest,
     nonce: randomUUID(),
-    ownedSkillPaths: skills.map((skill) => path.resolve(skill.path)),
-    ownedLinkPaths: skills.map((skill) => path.join(getHarnessSkillsPath(harness), skill.name)),
+    ownedSkills,
+    ownedLinks,
     ownedMcpFields: trackedFields.length > 0
       ? trackedFields.map((field) => ({ ...field, configPath: path.resolve(field.configPath) }))
       : configPath
@@ -332,7 +343,17 @@ function createFallbackIdentity (installation: UpdateInstallation) {
   } as const
 }
 
-async function createManifest (identity: NonNullable<ReturnType<typeof createFallbackIdentity>>): Promise<{ manifestPath: string; resultPath: string; resultContainment: ContainmentDirectoryIdentity }> {
+async function capturePathEvidence (paths: readonly string[]) {
+  return await Promise.all(paths.map(async (value) => {
+    const resolved = path.resolve(value)
+    const kind = await pathKind(resolved)
+    const digest = kind === 'missing' ? undefined : await pathDigest(resolved)
+    if (kind !== 'missing' && !digest) throw new Error(`Cannot capture fallback path evidence for ${resolved}`)
+    return { path: resolved, kind, digest }
+  }))
+}
+
+async function createManifest (identity: Awaited<NonNullable<ReturnType<typeof createFallbackIdentity>>>): Promise<{ manifestPath: string; resultPath: string; resultContainment: ContainmentDirectoryIdentity }> {
   // The private 0700 staging directory is created and owned by this process;
   // the structured result path lives inside it so parent validation can bind
   // the envelope to workspace ownership and cleanup removes it with the

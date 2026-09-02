@@ -27,9 +27,17 @@ export class McpEditError extends Error {
 export function detectJsonMcpKey (raw: string, preferred: JsonMcpKey = 'mcpServers'): JsonMcpKey {
   const tree = parseTree(raw)
   if (!tree || tree.type !== 'object') return preferred
-  if (findNodeAtLocation(tree, [preferred])) return preferred
+  const preferredNode = findNodeAtLocation(tree, [preferred])
+  if (preferredNode) {
+    if (preferredNode.type !== 'object') throw new McpEditError('MCP_BLOCK_INVALID', `Existing ${preferred} value is not an object`)
+    return preferred
+  }
   const alternate: JsonMcpKey = preferred === 'mcpServers' ? 'mcp' : 'mcpServers'
-  if (findNodeAtLocation(tree, [alternate])) return alternate
+  const alternateNode = findNodeAtLocation(tree, [alternate])
+  if (alternateNode) {
+    if (alternateNode.type !== 'object') throw new McpEditError('MCP_BLOCK_INVALID', `Existing ${alternate} value is not an object`)
+    return alternate
+  }
   return preferred
 }
 
@@ -84,28 +92,7 @@ export function editMcpJsonBytes (raw: string, edit: McpByteEdit, options?: { mc
     }
     const mcpNode = findNodeAtLocation(tree, [mcpKey])
     if (mcpNode && mcpNode.type !== 'object') {
-      // The MCP container exists but is not an object (null, array, string,
-      // number). Ownership-needing edits cannot be proven: fail closed without
-      // touching any byte. An install-only edit may replace the container.
-      if (hasStructuralEdits) {
-        throw new McpEditError('MCP_BLOCK_INVALID', `The ${mcpKey} container is ${mcpNode.type} and cannot hold owned edits`)
-      }
-      let current = raw
-      const modification: ModificationOptions = { formattingOptions: formattingOptionsFor(raw) }
-      const replace = (path: JSONPath, value: unknown): void => {
-        const edits = modify(current, path, value, modification)
-        if (edits && edits.length > 0) current = applyEdits(current, edits)
-      }
-      if (!edit.removeBlock) {
-        replace([mcpKey], {})
-        for (const [name, value] of Object.entries(edit.upsertServers ?? {})) {
-          replace([mcpKey, name], value)
-        }
-      }
-      for (const legacyKey of edit.removeKeys ?? []) {
-        current = removeRootProperty(current, legacyKey)
-      }
-      return current
+      throw new McpEditError('MCP_BLOCK_INVALID', `The ${mcpKey} container is ${mcpNode.type} and cannot be replaced safely`)
     }
     if (!mcpNode) {
       if (hasStructuralEdits) {

@@ -8,7 +8,7 @@ import { cp as realFsCp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { refreshOwnedInstallation } from '../../../src/update/fallback-transaction.js'
-import { appendFallbackJournalEntries, applyFallbackEntry, beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, fallbackJournalPath, markFallbackJournalMutating, reloadFallbackJournal, registerFallbackStage, restoreFallbackJournal, trackingDigest } from '../../../src/update/fallback-journal.js'
+import { appendFallbackJournalEntries, applyFallbackEntry, beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, fallbackJournalPath, markFallbackJournalMutating, pathDigest, pathKind, reloadFallbackJournal, registerFallbackStage, restoreFallbackJournal, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { valueDigest, readMcpFieldDigests, harnessMcpKey } from '../../../src/update/mcp-lookup.js'
 import { randomUUID } from 'node:crypto'
 import type { FallbackTransactionIdentity } from '../../../src/update/types.js'
@@ -20,6 +20,12 @@ import { parseJsonc } from '../../../src/utils/config.js'
 let home: string
 let previousHome: string | undefined
 let previousUserProfile: string | undefined
+
+async function pathEvidence (target: string) {
+  const kind = await pathKind(target)
+  const digest = kind === 'missing' ? undefined : await pathDigest(target)
+  return { path: path.resolve(target), kind, digest }
+}
 
 beforeEach(() => {
   home = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-transaction-'))
@@ -784,8 +790,8 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       trackingPath,
       trackingDigest: trackingDigest(trackingPath)!,
       nonce: randomUUID(),
-      ownedSkillPaths: [skillPath],
-      ownedLinkPaths: [linkPath],
+      ownedSkills: [await pathEvidence(skillPath)],
+      ownedLinks: [await pathEvidence(linkPath)],
       ownedMcpFields,
       ownedMcpConfigPaths: ownedMcpConfigPaths.map((value) => path.resolve(value)),
       approvedDestinationRoots: [getSkillsDir(), getHarnessSkillsPath(harness)].map((value) => path.resolve(value)),
@@ -1040,8 +1046,8 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
         trackingPath,
         trackingDigest: trackingDigest(trackingPath)!,
         nonce: randomUUID(),
-        ownedSkillPaths: [skillPath],
-        ownedLinkPaths: [path.join(getHarnessSkillsPath('opencode'), 'tracked')],
+        ownedSkills: [await pathEvidence(skillPath)],
+        ownedLinks: [],
         ownedMcpFields: [
           { configPath: canonicalPath, server: 'alpha-console', field: 'url', expectedDigest: valueDigest(preferredUrl) },
           { configPath: canonicalPath, server: 'alpha-console', field: 'headers', expectedDigest: valueDigest(preferredRecord.headers) },
@@ -1475,8 +1481,8 @@ describe('credentialless fallback reconciliation', () => {
       trackingPath,
       trackingDigest: trackingDigest(trackingPath)!,
       nonce: randomUUID(),
-      ownedSkillPaths: [fixture.skillPath],
-      ownedLinkPaths: [path.join(getHarnessSkillsPath('claude'), 'tracked')],
+      ownedSkills: [await pathEvidence(fixture.skillPath)],
+      ownedLinks: [await pathEvidence(path.join(getHarnessSkillsPath('claude'), 'tracked'))],
       ownedMcpFields: [],
       ownedMcpConfigPaths: [path.resolve(fixture.configPath)],
       approvedDestinationRoots: [getSkillsDir(), getHarnessSkillsPath('claude')].map((value) => path.resolve(value)),

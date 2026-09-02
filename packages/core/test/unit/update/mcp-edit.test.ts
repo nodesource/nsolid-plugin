@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { editMcpJsonBytes, McpEditError, readMcpNodeValue } from '../../../src/update/mcp-edit.js'
+import { detectJsonMcpKey, editMcpJsonBytes, McpEditError, readMcpNodeValue } from '../../../src/update/mcp-edit.js'
 import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerRecord, valueDigest } from '../../../src/update/mcp-lookup.js'
 import { parseJsonc } from '../../../src/utils/config.js'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -71,20 +71,17 @@ describe('MCP byte-preserving AST edits', () => {
     assert.equal(parsed.mcpServers['nsolid-console'].url, 'https://x')
   })
 
-  it('replaces a scalar, null, or array MCP container on install and migrates legacy keys', () => {
+  it('fails closed instead of replacing scalar, null, or array MCP containers', () => {
     for (const scalar of ['null', '[]', '"applied"', '3']) {
       const raw = `{\n  "keep": true,\n  "mcp": ${scalar}\n}\n`
-      const next = editMcpJsonBytes(raw, { upsertServers: { fresh: { url: 'https://fresh' } } }, { mcpKey: 'mcp' })
-      const parsed = parseJsonc(next) as { keep: boolean; mcp: Record<string, { url: string }> }
-      assert.equal(parsed.keep, true)
-      assert.equal(parsed.mcp.fresh.url, 'https://fresh', `scalar ${scalar} must be replaced by the server object`)
+      assert.throws(
+        () => editMcpJsonBytes(raw, { upsertServers: { fresh: { url: 'https://fresh' } } }, { mcpKey: detectJsonMcpKey(raw, 'mcp') }),
+        (error: unknown) => error instanceof McpEditError && error.code === 'MCP_BLOCK_INVALID'
+      )
     }
-    // A legacy mcpServers container is still migrated away on install.
+    // A scalar preferred key is never overwritten even when a legacy object exists.
     const withLegacy = '{\n  "mcpServers": {"old": {"url": "https://old"}},\n  "mcp": "text"\n}\n'
-    const migrated = editMcpJsonBytes(withLegacy, { upsertServers: { fresh: { url: 'https://fresh' } }, removeKeys: ['mcpServers'] }, { mcpKey: 'mcp' })
-    const migratedParsed = parseJsonc(migrated) as { mcp: Record<string, { url: string }> }
-    assert.ok(!migrated.includes('mcpServers'))
-    assert.equal(migratedParsed.mcp.fresh.url, 'https://fresh')
+    assert.throws(() => detectJsonMcpKey(withLegacy, 'mcp'), (error: unknown) => error instanceof McpEditError && error.code === 'MCP_BLOCK_INVALID')
   })
 
   it('fails closed with MCP_BLOCK_INVALID for ownership edits over a scalar container', () => {

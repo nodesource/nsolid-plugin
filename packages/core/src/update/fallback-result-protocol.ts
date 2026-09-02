@@ -57,7 +57,7 @@ export function containmentDirectoryMatches (recorded: ContainmentDirectoryIdent
   }
   try {
     const stat = lstatSync(resolved)
-    return stat.dev === recorded.dev && stat.ino === recorded.ino
+    return stat.isDirectory() && !stat.isSymbolicLink() && stat.dev === recorded.dev && stat.ino === recorded.ino
   } catch {
     return false
   }
@@ -91,15 +91,18 @@ export interface FallbackChildResultEnvelope {
 /**
  * Parent-owned safe messages for the child codes the parent accepts. A known
  * code can therefore never leak child-controlled data: only these constant
- * templates are ever rendered. Codes outside this map keep the existing
- * generic fallback error.
+ * templates are ever rendered, parameterized solely by the validated plan
+ * target. Codes outside this map keep the existing generic fallback error.
  */
-const CHILD_RESULT_MESSAGES: Record<string, string> = {
-  MCP_RECONCILIATION_REQUIRED: 'The fallback update requires NodeSource MCP reconciliation but valid credentials are unavailable. Run "nsolid-plugin setup --harness opencode" to authenticate, then retry the update.',
-  FALLBACK_MCP_DRIFT: 'The harness MCP configuration did not match the state approved for this fallback update. The refresh was stopped before it could continue unsafely.',
-  FALLBACK_OWNERSHIP_DRIFT: 'The tracked fallback ownership no longer matches this installation. The refresh was stopped.',
-  UNTRACKED_INSTALLATION: 'No NodeSource tracking record covers this installation. Nothing was refreshed.',
+const CHILD_RESULT_MESSAGES: Record<string, (target: string) => string> = {
+  MCP_RECONCILIATION_REQUIRED: (target) => `The fallback update requires NodeSource MCP reconciliation but valid credentials are unavailable. Run "nsolid-plugin setup --harness ${target}" to authenticate, then retry the update.`,
+  FALLBACK_MCP_DRIFT: () => 'The harness MCP configuration did not match the state approved for this fallback update. The refresh was stopped before it could continue unsafely.',
+  FALLBACK_OWNERSHIP_DRIFT: () => 'The tracked fallback ownership no longer matches this installation. The refresh was stopped.',
+  UNTRACKED_INSTALLATION: () => 'No NodeSource tracking record covers this installation. Nothing was refreshed.',
 }
+
+/** The guidance target comes from the validated plan item, never from child data; shape-check it anyway before interpolation. */
+const VALID_GUIDANCE_TARGET = /^[a-z][a-z0-9-]{0,31}$/
 
 /** Explicit child args pointing at the parent-planned result path. Older children ignore it safely. */
 export function childResultArgs (resultPath: string): string[] {
@@ -120,9 +123,11 @@ export function isValidChildResultCode (code: unknown): code is string {
   return typeof code === 'string' && code.length > 0 && code.length <= 64 && /^[A-Z][A-Z0-9_]*$/.test(code)
 }
 
-/** Parent-owned safe message for an accepted child code, or undefined when the code is not accepted. */
-export function fallbackChildResultMessage (code: string): string | undefined {
-  return CHILD_RESULT_MESSAGES[code]
+/** Parent-owned safe message for an accepted child code and the validated plan target, or undefined when the code is not accepted. */
+export function fallbackChildResultMessage (code: string, target: string): string | undefined {
+  const template = CHILD_RESULT_MESSAGES[code]
+  if (!template) return undefined
+  return template(VALID_GUIDANCE_TARGET.test(target) ? target : 'harness')
 }
 
 /**
@@ -240,7 +245,7 @@ export async function readValidatedFallbackChildResult (
     // message template for may be accepted. An unknown code with a valid
     // shape must not surface an envelope (or its rollback claim) publicly.
     if (!isValidChildResultCode(parsed.code)) return undefined
-    if (fallbackChildResultMessage(parsed.code) === undefined) return undefined
+    if (CHILD_RESULT_MESSAGES[parsed.code] === undefined) return undefined
     if (parsed.rollback !== undefined) {
       const rollback = parsed.rollback as Partial<FallbackChildResultRollback> | null
       if (!rollback || typeof rollback !== 'object' || typeof rollback.attempted !== 'boolean') return undefined

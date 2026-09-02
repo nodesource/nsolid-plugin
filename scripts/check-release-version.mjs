@@ -34,6 +34,7 @@ for (const entry of versions.slice(1)) {
 
 checkCommand('packages/core/scripts/check-bundle-sync.mjs', '--check')
 checkCommand('scripts/materialize-github-marketplace.mjs', '--check')
+checkCommand('scripts/sync-plugin-assets.mjs', '--check')
 checkGeneratedVersions(canonical)
 
 if (releaseMode) checkPayloadVersion(canonical)

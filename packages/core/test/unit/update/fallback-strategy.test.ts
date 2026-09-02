@@ -1,14 +1,15 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fallbackStrategy } from '../../../src/update/strategies/fallback.js'
-import { applyFallbackEntry, fallbackJournalPath, pathDigest, registerFallbackStage, trackingDigest } from '../../../src/update/fallback-journal.js'
+import { applyFallbackEntry, fallbackJournalPath, pathDigest, pathKind, registerFallbackStage, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { valueDigest } from '../../../src/update/mcp-lookup.js'
 import { readTrackingFile, writeTrackingFile } from '../../../src/skills/skill-tracker.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
@@ -28,6 +29,12 @@ function item (): UpdatePlanItem {
     rollbackSteps: [],
     requiresConfirmation: true,
   }
+}
+
+async function pathEvidence (target: string) {
+  const kind = await pathKind(target)
+  const digest = kind === 'missing' ? undefined : await pathDigest(target)
+  return { path: path.resolve(target), kind, digest }
 }
 
 describe('fallback update strategy', () => {
@@ -177,8 +184,8 @@ describe('fallback strategy parent gate', () => {
       trackingPath,
       trackingDigest: trackingDigest(trackingPath)!,
       nonce: randomUUID(),
-      ownedSkillPaths: [skillPath],
-      ownedLinkPaths: [path.join(getHarnessSkillsPath('claude'), 'tracked')],
+      ownedSkills: [await pathEvidence(skillPath)],
+      ownedLinks: [await pathEvidence(path.join(getHarnessSkillsPath('claude'), 'tracked'))],
       ownedMcpFields: options.trackedMcp === true
         ? [
             { configPath, server: 'alpha-console', field: 'url', expectedDigest: valueDigest('https://old.example.com/mcp') },
@@ -353,8 +360,8 @@ describe('fallback strategy structured child result', () => {
       trackingPath,
       trackingDigest: trackingDigest(trackingPath)!,
       nonce: randomUUID(),
-      ownedSkillPaths: [skillPath],
-      ownedLinkPaths: [path.join(getHarnessSkillsPath('claude'), 'tracked')],
+      ownedSkills: [await pathEvidence(skillPath)],
+      ownedLinks: [await pathEvidence(path.join(getHarnessSkillsPath('claude'), 'tracked'))],
       ownedMcpFields: [],
       ownedMcpConfigPaths: [resolveHome('~/.claude.json')],
       approvedDestinationRoots: [getSkillsDir(), getHarnessSkillsPath('claude')].map((value) => path.resolve(value)),
@@ -433,7 +440,7 @@ describe('fallback strategy structured child result', () => {
 
     assert.equal(result.status, 'failed')
     assert.equal(result.error?.code, 'MCP_RECONCILIATION_REQUIRED')
-    assert.ok(result.error?.message.includes('nsolid-plugin setup --harness opencode'), 'the approved recovery guidance must be part of the public message')
+    assert.ok(result.error?.message.includes('nsolid-plugin setup --harness claude'), 'the approved recovery guidance must name the planned harness, not a hardcoded one')
     // The parent journal exists, so its verified recovery outcome — not the
     // child envelope claim — is the public rollback state.
     assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
@@ -458,7 +465,7 @@ describe('fallback strategy structured child result', () => {
     assert.equal(result.error?.code, 'MCP_RECONCILIATION_REQUIRED')
     assert.ok(!result.error?.message.includes('LEAKED'), 'arbitrary child text must never reach the public message')
     assert.ok(!result.error?.message.includes('SECRET'), 'arbitrary child text must never reach the public message')
-    assert.ok(result.error?.message.includes('nsolid-plugin setup --harness opencode'))
+    assert.ok(result.error?.message.includes('nsolid-plugin setup --harness claude'))
   })
 
   it('keeps raw child stdout/stderr out of the public error and trusts the envelope over output parsing', async () => {
@@ -746,7 +753,7 @@ describe('fallback strategy structured child result', () => {
     // The structured child code and the parent-owned safe message are public
     // state (rendered by --json, the human summary, and verbose diagnostics).
     assert.equal(parsed.error?.code, 'MCP_RECONCILIATION_REQUIRED')
-    assert.ok(parsed.error?.message.includes('nsolid-plugin setup --harness opencode'), 'the approved recovery guidance must be rendered')
+    assert.ok(parsed.error?.message.includes('nsolid-plugin setup --harness claude'), 'the approved recovery guidance must name the planned harness')
     // The child's own raw stderr text is child-controlled data and must not
     // appear anywhere in the public result or on the public stdout. (The
     // phrase 'valid credentials are unavailable' also appears in the approved
@@ -760,27 +767,49 @@ describe('fallback strategy structured child result', () => {
 })
 
 describe('fallback change summary', () => {
+  /** Minimal ustar builder so fixture creation never depends on a system tar. */
+  function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 'utf8')
+    const size = body ? body.length : 0
+    header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
+    header[156] = type.charCodeAt(0)
+    header.write('ustar', 257, 'ascii')
+    header.write('00', 263, 'ascii')
+    const blocks = Math.ceil(size / 512)
+    const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
+    return Buffer.concat([header, padded])
+  }
+
+  function sampleBundle (): object {
+    return {
+      name: 'nsolid-plugin',
+      version: '90.0.0',
+      skills: [
+        { name: 'kept', path: 'skills/kept', description: 'kept' },
+        { name: 'brand-new', path: 'skills/brand-new', description: 'brand-new' },
+      ],
+      mcpServers: [
+        { name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} },
+        { name: 'brand-new-mcp', url: 'https://example.com/mcp2', headers: {} },
+      ],
+    }
+  }
+
+  function writeTarball (directory: string, name: string, bytes: Buffer): string {
+    const tarball = path.join(directory, name)
+    writeFileSync(tarball, bytes)
+    return tarball
+  }
+
   it('summarizes skill and MCP diffs from the verified tarball bundle', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-changes-'))
     try {
-      const bundle = {
-        name: 'nsolid-plugin',
-        version: '90.0.0',
-        skills: [
-          { name: 'kept', path: 'skills/kept', description: 'kept' },
-          { name: 'brand-new', path: 'skills/brand-new', description: 'brand-new' },
-        ],
-        mcpServers: [
-          { name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} },
-          { name: 'brand-new-mcp', url: 'https://example.com/mcp2', headers: {} },
-        ],
-      }
-      const pkgDir = path.join(dir, 'package')
-      mkdirSync(pkgDir, { recursive: true })
-      writeFileSync(path.join(pkgDir, 'bundle.json'), JSON.stringify(bundle))
-      const tarball = path.join(dir, 'artifact.tgz')
-      const packed = spawnSync('tar', ['-czf', tarball, '-C', dir, 'package'], { encoding: 'utf8' })
-      assert.equal(packed.status, 0, `tar failed: ${packed.stderr}`)
+      const tarball = writeTarball(dir, 'artifact.tgz', gzipSync(Buffer.concat([
+        tarEntry('package/', undefined, '5'),
+        tarEntry('package/bundle.json', Buffer.from(JSON.stringify(sampleBundle())), '0'),
+        Buffer.alloc(1024),
+      ])))
 
       const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
       const summary = await summarizeFallbackChanges(
@@ -805,9 +834,80 @@ describe('fallback change summary', () => {
     }
   })
 
+  it('never executes a PATH-resolved tar: a hostile PATH cannot change the summary', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-changes-'))
+    const previousPath = process.env.PATH
+    try {
+      const hostileBin = path.join(dir, 'hostile-bin')
+      mkdirSync(hostileBin)
+      const fakeTar = path.join(hostileBin, 'tar')
+      writeFileSync(fakeTar, '#!/bin/sh\nprintf "TAMPERED"\n')
+      chmodSync(fakeTar, 0o755)
+      const tarball = writeTarball(dir, 'artifact.tgz', gzipSync(Buffer.concat([
+        tarEntry('package/bundle.json', Buffer.from(JSON.stringify(sampleBundle())), '0'),
+        Buffer.alloc(1024),
+      ])))
+      process.env.PATH = hostileBin
+      const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
+      const summary = await summarizeFallbackChanges(
+        { metadata: { trackedSkills: [], trackedMcpNames: [] } } as never,
+        tarball
+      )
+      assert.deepEqual(summary, {
+        skillsAdded: ['kept', 'brand-new'],
+        skillsRemoved: [],
+        skillsUpdated: 0,
+        mcpAdded: ['nsolid-console', 'brand-new-mcp'],
+        mcpRemoved: [],
+        mcpUpdated: 0,
+      }, 'the summary must come from the archive bytes, never from a PATH lookup')
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('summarizes without any tar on PATH', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-changes-'))
+    const previousPath = process.env.PATH
+    try {
+      const tarball = writeTarball(dir, 'artifact.tgz', gzipSync(Buffer.concat([
+        tarEntry('package/bundle.json', Buffer.from(JSON.stringify(sampleBundle())), '0'),
+        Buffer.alloc(1024),
+      ])))
+      process.env.PATH = ''
+      const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
+      const summary = await summarizeFallbackChanges({ metadata: { trackedSkills: [], trackedMcpNames: [] } } as never, tarball)
+      assert.deepEqual(summary, {
+        skillsAdded: ['kept', 'brand-new'],
+        skillsRemoved: [],
+        skillsUpdated: 0,
+        mcpAdded: ['nsolid-console', 'brand-new-mcp'],
+        mcpRemoved: [],
+        mcpUpdated: 0,
+      })
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('never blocks planning when the tarball cannot be read', async () => {
     const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
     const summary = await summarizeFallbackChanges({ metadata: { trackedSkills: [], trackedMcpNames: [] } } as never, '/nonexistent/artifact.tgz')
     assert.equal(summary, undefined)
+  })
+
+  it('never blocks planning when the tarball is not a tar archive', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-changes-'))
+    try {
+      const tarball = writeTarball(dir, 'garbage.tgz', Buffer.from('definitely not a tar archive'))
+      const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
+      assert.equal(await summarizeFallbackChanges({ metadata: { trackedSkills: [], trackedMcpNames: [] } } as never, tarball), undefined)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

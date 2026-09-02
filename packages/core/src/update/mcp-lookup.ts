@@ -23,6 +23,7 @@ export function selectMcpContainer (
   const isContainer = (value: unknown): value is Record<string, unknown> =>
     !!value && typeof value === 'object' && !Array.isArray(value)
   const preferred = parsed[preferredKey]
+  if (Object.hasOwn(parsed, preferredKey) && !isContainer(preferred)) return undefined
   if (isContainer(preferred)) return preferred
   const legacyKey: PreferredMcpKey = preferredKey === 'mcp' ? 'mcpServers' : 'mcp'
   const legacy = parsed[legacyKey]

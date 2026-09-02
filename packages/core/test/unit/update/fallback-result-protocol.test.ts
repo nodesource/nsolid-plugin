@@ -197,13 +197,30 @@ describe('fallback child result protocol', () => {
   })
 
   it('maps accepted child codes to parent-owned safe messages and rejects unknown codes', () => {
-    const reconciliation = fallbackChildResultMessage('MCP_RECONCILIATION_REQUIRED')
+    const reconciliation = fallbackChildResultMessage('MCP_RECONCILIATION_REQUIRED', 'opencode')
     assert.ok(reconciliation)
     assert.ok(reconciliation.includes('nsolid-plugin setup --harness opencode'))
-    assert.ok(fallbackChildResultMessage('FALLBACK_MCP_DRIFT'))
-    assert.ok(fallbackChildResultMessage('FALLBACK_OWNERSHIP_DRIFT'))
-    assert.ok(fallbackChildResultMessage('UNTRACKED_INSTALLATION'))
-    assert.equal(fallbackChildResultMessage('TOTALLY_UNKNOWN_CODE'), undefined)
-    assert.equal(fallbackChildResultMessage(''), undefined)
+    assert.ok(fallbackChildResultMessage('FALLBACK_MCP_DRIFT', 'opencode'))
+    assert.ok(fallbackChildResultMessage('FALLBACK_OWNERSHIP_DRIFT', 'opencode'))
+    assert.ok(fallbackChildResultMessage('UNTRACKED_INSTALLATION', 'opencode'))
+    assert.equal(fallbackChildResultMessage('TOTALLY_UNKNOWN_CODE', 'opencode'), undefined)
+    assert.equal(fallbackChildResultMessage('', 'opencode'), undefined)
+  })
+
+  it('names the planned harness in the reconciliation guidance for every supported target', () => {
+    for (const target of ['claude', 'codex', 'pi', 'antigravity', 'opencode'] as const) {
+      const message = fallbackChildResultMessage('MCP_RECONCILIATION_REQUIRED', target)
+      assert.ok(message, `a message is expected for ${target}`)
+      assert.ok(message.includes(`nsolid-plugin setup --harness ${target}`), `${message} must name ${target}`)
+      if (target !== 'opencode') assert.ok(!message.includes('opencode'), `${message} must not hardcode opencode for ${target}`)
+    }
+  })
+
+  it('never interpolates a target that fails the validated shape', () => {
+    const hostile = '../evil && rm -rf ~'
+    const message = fallbackChildResultMessage('MCP_RECONCILIATION_REQUIRED', hostile)
+    assert.ok(message)
+    assert.ok(!message.includes(hostile), 'an unvalidated target must never reach the message')
+    assert.ok(message.includes('setup --harness harness'), 'an invalid target falls back to the generic word')
   })
 })
