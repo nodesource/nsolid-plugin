@@ -246,6 +246,25 @@ describe('native payload identity', () => {
     }
   })
 
+  it('normalizes Windows symlink target separators without collapsing device-prefixed forms', { skip: process.platform !== 'win32' }, () => {
+    const digestWithTarget = (target: string): string | undefined => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-win-target-'))
+      try {
+        materializePayload(root, cleanPayloadFiles())
+        symlinkSync(target, path.join(root, 'skills', 'example', 'asset.bin'))
+        return nativePayloadTreeDigest(root)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+    // Forward- and backslash-separated forms resolve identically on Windows.
+    assert.equal(digestWithTarget('../shared/asset.bin'), digestWithTarget('..\\shared\\asset.bin'))
+    // Extended-length device-prefixed targets stay distinct from their plain
+    // forms: Win32 normalization is disabled inside `\\?\` paths, so they
+    // can resolve to different destinations.
+    assert.notEqual(digestWithTarget('\\\\?\\C:\\payload\\asset.bin'), digestWithTarget('C:\\payload\\asset.bin'))
+  })
+
   it('keeps reserved-name symlinks and directories significant on the installed side', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-f4-reserved-kind-'))
     try {

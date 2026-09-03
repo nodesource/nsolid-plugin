@@ -272,17 +272,17 @@ function captureArchivePayload (compressedArchive: Buffer, scope: ArchivePayload
 
 /**
  * Windows readlink returns the stored symlink target with native separators
- * (and, for absolute targets, an extended-length `\\?\` device prefix),
- * while tar linknames keep POSIX separators. Normalize on win32 only, for
- * both the installed-tree and archive sides, so equivalent payloads digest
- * identically without ever masking distinct targets on POSIX.
+ * while tar linknames keep POSIX separators. Only the separators are
+ * normalized, and only on win32: extended-length `\\?\` device-prefixed
+ * targets intentionally stay distinct from their plain forms, because Win32
+ * normalization is disabled inside `\\?\` paths (a literal trailing-dot
+ * name and its normalized twin resolve to different destinations but would
+ * otherwise hash identically). Keeping them distinct fails closed. Distinct
+ * targets can never collide on POSIX, where the target is digested verbatim.
  */
 function symlinkTargetForDigest (target: string): string {
   if (process.platform !== 'win32') return target
-  const normalized = target.replace(/\\/g, '/')
-  if (normalized.startsWith('//?/UNC/')) return '//' + normalized.slice('//?/UNC/'.length)
-  if (normalized.startsWith('//?/')) return normalized.slice('//?/'.length)
-  return normalized
+  return target.replace(/\\/g, '/')
 }
 
 function digestEntries (entries: Map<string, PayloadEntry>): string | undefined {
