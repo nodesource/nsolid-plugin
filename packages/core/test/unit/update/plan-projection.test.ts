@@ -66,13 +66,16 @@ describe('public plan step projection', () => {
     const projected = publicPlanSteps(steps)
     const command = projected[0]
     assert.ok(command?.kind === 'command')
+    // Redaction normalizes to forward slashes on every platform
+    // (plan-projection.ts), so the expectations use literals rather than
+    // path.join, which would emit native separators on Windows.
     assert.deepEqual(command.args, [
-      'exec', '--yes', `--package=${path.join('<temp>', 'nsolid-plugin-1.0.1.tgz')}`,
-      '--', 'nsolid-plugin-refresh-owned', '--transaction', path.join('<temp>', 'transaction.json'),
+      'exec', '--yes', '--package=<temp>/nsolid-plugin-1.0.1.tgz',
+      '--', 'nsolid-plugin-refresh-owned', '--transaction', '<temp>/transaction.json',
     ])
     const filesystem = projected[1]
     assert.ok(filesystem?.kind === 'filesystem')
-    assert.deepEqual(filesystem.paths, [path.join('<temp>', 'skill.md'), '/home/user/.config/opencode/skills/kept'])
+    assert.deepEqual(filesystem.paths, ['<temp>/skill.md', '/home/user/.config/opencode/skills/kept'])
   })
 
   it('projects validation steps verbatim', () => {
