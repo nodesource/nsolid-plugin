@@ -27,9 +27,11 @@ import {
   readTrackingFile,
   addTrackedSkills,
   removeTrackedSkills,
+  setTrackingBundleVersion,
 } from './skills/skill-tracker.js'
 import {
   writeMcpConfig,
+  renderedMcpFieldNames,
   removeMcpConfig,
   addTrackedMcps,
   removeTrackedMcps,
@@ -374,7 +376,8 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     }
 
     if (mcpConfigPath && result.mcpServersConfigured.length > 0) {
-      const mcpEntries = bundle.mcpServers.map((s) => ({ name: s.name, configPath: mcpConfigPath }))
+      const rendered = renderedMcpFieldNames(options.harness, bundle.mcpServers, variables)
+      const mcpEntries = bundle.mcpServers.map((s) => ({ name: s.name, configPath: mcpConfigPath, ownedFields: rendered[s.name] }))
       await addTrackedMcps(mcpEntries, options.harness, logger)
     }
   } catch (err) {
@@ -383,6 +386,17 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   }
 
   result.success = result.errors.length === 0
+  if (result.success) {
+    try {
+      // Version evidence is meaningful only after every owned install step has
+      // succeeded. A partial install must remain repairable on the next run.
+      await setTrackingBundleVersion(bundle.version, logger, options.harness)
+    } catch (err) {
+      const pluginErr = toPluginError(err, 'TRACKING_UPDATE_FAILED', { harness: options.harness })
+      result.errors.push(`Tracking version update failed: ${pluginErr.message}`)
+      result.success = false
+    }
+  }
   if (result.success) {
     if (options.packageOwnedSkills === true) {
       const mcpCount = result.mcpServersConfigured.length
@@ -826,3 +840,26 @@ export type { HarnessType, InstallOptions, InstallResult, SetupOptions, SetupRes
 export type { LinkResult, LinkStatus } from './skills/skill-linker.js'
 export type { SkillTrackingEntry, McpTrackingEntry, TrackingData } from './skills/skill-tracker.js'
 export type { BackupEntry } from './utils/backup.js'
+export { checkUpdates, executeUpdatePlan, planUpdates, update } from './update/coordinator.js'
+export { readRunningVersionInfo as getVersionInfo } from './update/version.js'
+export type {
+  CommandResult,
+  CommandRunner,
+  CommandSpec,
+  RunningVersionInfo,
+  UpdateConfirmation,
+  UpdateError,
+  UpdateInstallation,
+  UpdateOptions,
+  UpdatePlan,
+  UpdatePlanItem,
+  UpdateResult,
+  UpdateSource,
+  UpdateStatus,
+  UpdateSummary,
+  NpmArtifactIdentity,
+  GitArtifactIdentity,
+  LocalArtifactIdentity,
+  ResolvedArtifactIdentity,
+  FallbackTransactionIdentity,
+} from './update/types.js'

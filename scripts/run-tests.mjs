@@ -118,7 +118,27 @@ const args = [
   '--test-reporter', REPORTER,
   ...files,
 ]
-const result = spawnSync(process.execPath, args, { stdio: 'inherit', cwd: ROOT })
+// Several integration tests spawn packages/core/dist/src/cli.js. A stale or
+// missing dist fails them with an unrelated ERR_MODULE_NOT_FOUND instead of
+// "run pnpm build", which bit the husky pre-commit hook in practice. Build
+// first unless the caller proves it already did (CI sets the variable).
+let builtHere = false
+if (process.env.NSOLID_TEST_CORE_ALREADY_BUILT !== '1') {
+  const build = spawnSync('pnpm', ['-s', 'build'], { stdio: 'inherit', cwd: ROOT, shell: process.platform === 'win32' })
+  if (build.status !== 0) {
+    console.error('pnpm build failed; tests were not run')
+    process.exit(build.status ?? 1)
+  }
+  builtHere = true
+}
+// When this runner performed the build, tell the test child that dist is
+// fresh. Otherwise installer.test.ts rebuilds core concurrently with the
+// suites that spawn dist/src/cli.js, and the rm -rf dist window races them
+// into an intermittent MODULE_NOT_FOUND (confirmed QA flake). CI exports the
+// variable itself, so it never hits the race.
+const testEnv = { ...process.env }
+if (builtHere) testEnv.NSOLID_TEST_CORE_ALREADY_BUILT = '1'
+const result = spawnSync(process.execPath, args, { stdio: 'inherit', cwd: ROOT, env: testEnv })
 const status = result.status ?? 1
 
 // If Node fails before the reporter initializes (for example, bad reporter

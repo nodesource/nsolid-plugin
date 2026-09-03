@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..')
 const SYNC_SCRIPT = join(REPO_ROOT, 'scripts', 'sync-plugin-assets.mjs')
+const RELEASE_CHECK_SCRIPT = join(REPO_ROOT, 'scripts', 'check-release-version.mjs')
 
 function makeWorkspaceRoot (): string {
   return mkdtempSync(join(tmpdir(), 'plugin-assets-test-'))
@@ -75,6 +76,11 @@ describe('plugin source hygiene', () => {
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true })
+  })
+
+  it('makes release checks enforce the same materialized-skill hygiene gate', () => {
+    const source = readFileSync(RELEASE_CHECK_SCRIPT, 'utf8')
+    assert.match(source, /checkCommand\('scripts\/sync-plugin-assets\.mjs', '--check'\)/)
   })
 
   it('keeps Pi as the only source package that materializes skills for pack', () => {

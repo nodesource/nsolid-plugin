@@ -1,0 +1,449 @@
+import type { HarnessType } from '../types.js'
+import type { ContainmentDirectoryIdentity } from './fallback-result-protocol.js'
+import type { PayloadNormalizationProfile } from './native-payload.js'
+
+export type UpdateTarget = 'cli' | HarnessType
+
+export type UpdateOwnership =
+  | 'global-package'
+  | 'native-plugin'
+  | 'package-owned'
+  | 'fallback'
+  | 'none'
+
+export type VersionStatus =
+  | 'current'
+  | 'update-available'
+  | 'newer-than-registry'
+  | 'unknown'
+
+export type UpdateStatus =
+  | 'current'
+  | 'update-available'
+  | 'newer-than-registry'
+  | 'updated'
+  | 'skipped'
+  | 'not-installed'
+  | 'unsupported'
+  | 'unknown'
+  | 'failed'
+
+export interface VersionInfo {
+  current?: string
+  latest?: string
+  status: VersionStatus
+  /** All detected copies when one logical target spans multiple caches/scopes. */
+  currentVersions?: readonly (string | undefined)[]
+}
+
+export interface RunningVersionInfo {
+  cliVersion: string
+  bundleVersion: string
+}
+
+export type ClaudePluginScope = 'user' | 'project' | 'local' | 'managed'
+
+export type MarketplaceVersionSource =
+  | {
+    kind: 'git'
+    repository: string
+    revision?: string
+    commit?: string
+    contentDigest?: string
+    manifestPath: string
+  }
+  | {
+    kind: 'local-snapshot'
+    root: string
+    manifestPath: string
+    freshness: 'verified' | 'stale' | 'unknown'
+    contentDigest?: string
+  }
+  | {
+    kind: 'unknown'
+    reason: 'missing-metadata' | 'ambiguous' | 'unsupported'
+  }
+
+export type PiPackageLocation =
+  | { scopes: readonly ['user'] }
+  | { scopes: readonly ['project']; projectRoot: string }
+  | { scopes: readonly ['user', 'project']; projectRoot: string }
+
+export type FallbackPackageExecutor = 'npm-exec' | 'pnpm-dlx'
+
+export interface NpmArtifactIdentity {
+  kind: 'npm'
+  packageName: 'nsolid-plugin' | 'nsolid-pi-plugin'
+  version: string
+  registry: string
+  tarball: string
+  integrity: string
+  /** Planner-only local path; never render this in public output. */
+  tarballPath?: string
+  tempDirectory?: string
+  contentDigest?: string
+}
+
+export interface GitArtifactIdentity {
+  kind: 'git'
+  repository: string
+  commit: string
+  contentDigest: string
+  /** Repo-relative POSIX subdirectory holding the installable payload ('' = repository root). */
+  payloadPath?: string
+  /** Digest of the same planned payload bytes under comparisonProfile; installed-payload equivalence ONLY. */
+  comparisonDigest?: string
+  /** Named normalization profile shared by plan and installed comparison; execution fails closed when missing or mismatched. */
+  comparisonProfile?: PayloadNormalizationProfile
+}
+
+export interface LocalArtifactIdentity {
+  kind: 'local-snapshot'
+  root: string
+  contentDigest: string
+  /** Digest of the same planned payload bytes under comparisonProfile; installed-payload equivalence ONLY. */
+  comparisonDigest?: string
+  /** Named normalization profile shared by plan and installed comparison; execution fails closed when missing or mismatched. */
+  comparisonProfile?: PayloadNormalizationProfile
+}
+
+export type ResolvedArtifactIdentity = NpmArtifactIdentity | GitArtifactIdentity | LocalArtifactIdentity
+
+export interface FallbackPathEvidence {
+  path: string
+  kind: 'missing' | 'file' | 'directory' | 'symlink' | 'other'
+  digest?: string
+}
+
+export interface FallbackTransactionIdentity {
+  installationId: string
+  harness: HarnessType
+  trackingPath: string
+  trackingDigest: string
+  /** Shared secret authenticating the child transaction (never authorizing restores). */
+  nonce?: string
+  /** Planned kind/digest evidence for every tracked skill, captured before approval. */
+  ownedSkills: readonly FallbackPathEvidence[]
+  /** Planned kind/digest evidence for every harness link, captured before approval. */
+  ownedLinks: readonly FallbackPathEvidence[]
+  ownedMcpFields: readonly {
+    configPath: string
+    server: string
+    field: string
+    expectedDigest: string
+  }[]
+  /** Union of tracked MCP config paths and the adapter canonical path, fixed at planning. */
+  ownedMcpConfigPaths: readonly string[]
+  /** Canonical roots under which the new bundle's skills/links may be created; the child may only journal new destinations directly inside one of these roots. */
+  approvedDestinationRoots: readonly string[]
+}
+
+export type AntigravityLayout =
+  | {
+    kind: 'shared'
+    pluginRoot: '~/.gemini/config/plugins/nsolid-plugin'
+    manifestPath: '~/.gemini/config/import_manifest.json'
+  }
+  | {
+    kind: 'agy-cli'
+    pluginRoot: '~/.gemini/antigravity-cli/plugins/nsolid-plugin'
+    manifestPath: '~/.gemini/antigravity-cli/import_manifest.json'
+  }
+
+export type UpdateSource =
+  | { kind: 'none' }
+  | { kind: 'global-package'; packageManager: 'npm' | 'pnpm'; packageName: 'nsolid-plugin' }
+  | {
+    kind: 'claude-marketplace'
+    pluginId: string
+    marketplace: string
+    scope: ClaudePluginScope
+    versionSource: MarketplaceVersionSource
+  }
+  | {
+    kind: 'codex-marketplace'
+    pluginId: string
+    marketplace: string
+    versionSource: MarketplaceVersionSource
+  }
+  | ({ kind: 'pi-package'; spec: 'npm:nsolid-pi-plugin' } & PiPackageLocation)
+  | {
+    kind: 'unsupported'
+    source: string
+    reason: 'local' | 'git' | 'pinned' | 'ambiguous' | 'conflicting' | 'untracked' | 'unsupported-manager'
+  }
+  | {
+    kind: 'antigravity-git'
+    url: 'https://github.com/NodeSource/nsolid-plugin.git'
+    layout: AntigravityLayout
+  }
+  | { kind: 'fallback'; bundleVersion?: string; executor?: FallbackPackageExecutor }
+
+/** Exact byte evidence binding a native record to its planned content. */
+export interface NativeEvidence {
+  path: string
+  digest: string
+}
+
+/** Additional read-only evidence used by strategies. It never reaches CLI output verbatim. */
+export interface UpdateInstallationMetadata {
+  /** Exact native configuration path approved during planning. */
+  configPath?: string
+  packageRoot?: string
+  packagePath?: string
+  previousVersion?: string
+  rollbackCommand?: string
+  trackedSkills?: readonly { name: string; path: string }[]
+  trackedMcpConfigPath?: string
+  trackedMcpNames?: readonly string[]
+  trackedMcpFields?: readonly {
+    configPath: string
+    server: string
+    field: string
+    expectedDigest: string
+  }[]
+  trackedMcpOwnershipComplete?: boolean
+  projectRoot?: string
+  packageRoots?: readonly string[]
+  packageRootIdentities?: readonly string[]
+  pluginRoot?: string
+  manifestPath?: string
+  packageManagerExecutable?: ExecutableIdentity
+  projectRootIdentity?: string
+  settingsPaths?: readonly string[]
+  settingsDigests?: readonly string[]
+  sourceEntries?: readonly string[]
+  cacheDigests?: readonly string[]
+  packageEvidencePaths?: readonly string[]
+  packageEvidenceDigests?: readonly string[]
+  /** Native marketplace records whose exact bytes must still match at execution. */
+  nativeEvidence?: readonly NativeEvidence[]
+}
+
+export interface UpdateInstallation {
+  installationId: string
+  target: UpdateTarget
+  ownership: UpdateOwnership
+  installed: boolean
+  source: UpdateSource
+  version: VersionInfo
+  inventoryError?: UpdateError
+  metadata?: UpdateInstallationMetadata
+  artifact?: ResolvedArtifactIdentity
+  fallbackTransaction?: FallbackTransactionIdentity
+}
+
+export interface UpdateOptions {
+  harness?: HarnessType
+  all?: boolean
+  check?: boolean
+  yes?: boolean
+  json?: boolean
+  verbose?: boolean
+  noColor?: boolean
+  cwd?: string
+  packageRoot?: string
+  /**
+   * Launcher path used to prove CLI installation ownership. Package-private
+   * seam: production defaults to `process.argv[1]`; tests inject a fixture
+   * launcher instead of mutating global process state.
+   */
+  executablePath?: string
+  /** Explicit npm registry for the update lookup and execution plan. */
+  registry?: string
+  fetchImpl?: typeof fetch
+  commandRunner?: CommandRunner
+  confirm?: UpdateConfirmation
+}
+
+export interface CommandSpec {
+  executable: string
+  /** Frozen identity evidence revalidated immediately before spawn. */
+  executableIdentity?: ExecutableIdentity
+  args: readonly string[]
+  cwd?: string
+  env?: Readonly<Record<string, string>>
+  timeoutMs: number
+}
+
+/**
+ * How a command step is actually spawned on the host. `shell: true` and
+ * launching through `cmd.exe` are never used; on Windows a validated npm
+ * shim is derived to a JS entrypoint and run with `process.execPath`.
+ */
+export type ExecutableIdentity =
+  | { kind: 'native'; executable: string }
+  | {
+    kind: 'node'
+    executable: string
+    entrypoint: string
+  }
+  | {
+    kind: 'unsupported'
+    reason: 'not-found' | 'powershell-only' | 'unverifiable-shim'
+  }
+
+export interface CommandResult {
+  exitCode: number | null
+  signal?: NodeJS.Signals
+  /** OS error raised before the child process started, for example ENOENT. */
+  spawnErrorCode?: string
+  stdout: string
+  stderr: string
+  timedOut: boolean
+  /**
+   * When a timeout occurred, whether the whole descendant process tree was
+   * terminated before the caller proceeds to rollback. `true` for a clean
+   * non-timeout run. Callers must treat a timed-out run with
+   * `treeTerminated === false` as requiring deferral/recovery, never restoring
+   * concurrently with a possibly-live child.
+   */
+  treeTerminated?: boolean
+}
+
+export interface CommandRunner {
+  run(spec: CommandSpec): Promise<CommandResult>
+}
+
+export type { ExecutableIdentity as ResolvedExecutable }
+
+export type UpdatePlanStep =
+  | {
+    kind: 'command'
+    description: string
+    command: CommandSpec
+  }
+  | {
+    kind: 'filesystem'
+    description: string
+    operation: 'backup' | 'replace' | 'reconcile' | 'restore' | 'cleanup'
+    paths: readonly string[]
+  }
+  | {
+    kind: 'validation'
+    description: string
+    checks: readonly string[]
+  }
+
+export interface UpdateError {
+  code: string
+  message: string
+}
+
+/**
+ * Public projection of a plan step for structured output. It deliberately
+ * carries no command environment, working directory, spawn identity, or
+ * timeout: those are internal execution state, and every transient
+ * temporary path inside them is redacted by the projection in
+ * plan-projection.ts.
+ */
+export type PublicPlanStep =
+  | { kind: 'command'; description: string; executable: string; args: readonly string[] }
+  | { kind: 'filesystem'; description: string; operation: 'backup' | 'replace' | 'reconcile' | 'restore' | 'cleanup'; paths: readonly string[] }
+  | { kind: 'validation'; description: string; checks: readonly string[] }
+
+export interface UpdatePlanItem {
+  installationId: string
+  target: UpdateTarget
+  ownership: UpdateOwnership
+  installed: boolean
+  source: UpdateSource
+  version: VersionInfo
+  steps: readonly UpdatePlanStep[]
+  rollbackSteps: readonly UpdatePlanStep[]
+  planningError?: UpdateError
+  requiresConfirmation: boolean
+  restartHint?: string
+  manualCommands?: readonly string[]
+  metadata?: UpdateInstallationMetadata
+  artifact?: ResolvedArtifactIdentity
+  fallbackTransaction?: FallbackTransactionIdentity
+  /** Temporary directories this plan item's process created (for example a manifest staging dir); removal must only ever target these. */
+  temporaryDirectories?: readonly string[]
+  /**
+   * Human-oriented summary of what the update will change (added/removed/
+   * refreshed skills and MCP servers). The CLI renders this instead of the
+   * step-by-step technical plan; --verbose shows the full plan and the
+   * structured --json output keeps every step.
+   */
+  changes?: {
+    skillsAdded: readonly string[]
+    skillsRemoved: readonly string[]
+    skillsUpdated: number
+    mcpAdded: readonly string[]
+    mcpRemoved: readonly string[]
+    mcpUpdated: number
+  }
+  /**
+   * Identities of the directories holding the structured fallback child
+   * result, recorded at creation time so the parent can reject a directory
+   * that was replaced (for example by a symlink) before reading the result.
+   * Absent on items planned by older code or by non-fallback strategies.
+   */
+  resultContainment?: readonly ContainmentDirectoryIdentity[]
+}
+
+export interface UpdatePlan {
+  checkOnly: boolean
+  items: readonly UpdatePlanItem[]
+}
+
+export interface UpdateConfirmationContext {
+  items: readonly UpdatePlanItem[]
+}
+
+export type UpdateConfirmation = (
+  context: UpdateConfirmationContext
+) => boolean | Promise<boolean>
+
+export interface UpdateResult {
+  installationId: string
+  target: UpdateTarget
+  ownership: UpdateOwnership
+  status: UpdateStatus
+  currentVersion?: string
+  latestVersion?: string
+  resultingVersion?: string
+  changed: boolean
+  restartHint?: string
+  rollbackCommand?: string
+  manualCommands?: readonly string[]
+  /**
+   * Technical plan projection for the structured output (secrets and
+   * transient internal state redacted); steps as planned, not as executed.
+   */
+  steps?: readonly PublicPlanStep[]
+  /** Human-oriented change summary of the planned update, as planned. */
+  changes?: UpdatePlanItem['changes']
+  rollback?: {
+    attempted: boolean
+    succeeded?: boolean
+  }
+  error?: UpdateError
+}
+
+export interface UpdateSummary {
+  checkOnly: boolean
+  results: UpdateResult[]
+  counts: Record<UpdateStatus, number>
+  success: boolean
+  exitCode: 0 | 1 | 2
+}
+
+export interface UpdateContext {
+  options: Readonly<UpdateOptions>
+  commandRunner: CommandRunner
+}
+
+export interface UpdateStrategy {
+  readonly target: UpdateTarget
+  readonly ownership: UpdateOwnership
+  plan(installation: UpdateInstallation, context: UpdateContext): Promise<UpdatePlanItem>
+  execute(item: UpdatePlanItem, context: UpdateContext): Promise<UpdateResult>
+}
+
+export interface VersionLookupResult {
+  version?: string
+  error?: UpdateError
+  artifact?: ResolvedArtifactIdentity
+}

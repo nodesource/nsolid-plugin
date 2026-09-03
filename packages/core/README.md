@@ -136,6 +136,17 @@ nsolid-plugin restore --harness claude --list
 nsolid-plugin restore --harness claude --backup ~/.agents/.config-backup/claude/1234567890.json
 ```
 
+Update and version commands are additive to the installer API:
+
+```bash
+nsolid-plugin version
+nsolid-plugin update --check
+nsolid-plugin update --harness opencode --yes
+nsolid-plugin update --all --check --json
+```
+
+`getVersionInfo()` is synchronous and read-only. `checkUpdates()` performs discovery only; `update()` plans first, asks for confirmation unless `yes: true`, and executes each owned target sequentially. Native harnesses keep their own ownership and source identity. Direct fallback updates use the package-internal refresh binary and path-level tracking; the public `install()` function keeps its existing idempotent behavior.
+
 Use `--verbose` (or `NSOLID_PLUGIN_VERBOSE=1`) for detailed, timestamped logs written to stderr. Verbose mode redacts tokens and auth headers. For Claude Code, Codex, and Antigravity, prefer native GitHub plugin install from the repository root; `install --harness` is a fallback direct installer only. For Pi, install `nsolid-pi-plugin` for package-owned skills; CLI install/setup only writes MCP config. OpenCode is CLI-only and uses `setup --harness opencode` for auth + bridge + skills + MCP config in one step; `install --harness opencode` is the fallback asset path.
 
 Credentials are a single shared file (`~/.agents/.nodesource-auth.json`), not per-harness, so a member of more than one NodeSource org can only be authenticated against one org at a time. `switch-org` forces a fresh OAuth round-trip — even if current credentials are still valid — so NodeSource's sign-in flow can show its org picker again; the new org then applies to every installed harness, not just the one named. Native-plugin-installed harnesses (claude/codex/antigravity) pick it up on their next MCP reconnect; fallback-installed harnesses and CLI-direct harnesses (opencode/pi) need `install --harness <harness>` re-run afterward (see `switch-org`'s own output for harness-specific guidance).

@@ -1,6 +1,6 @@
 export { mergeMcpConfig, removeMcpServers, expandVariables } from './mcp-config-merger.js'
 export type { McpServerConfig, NormalizedMcpConfig } from './mcp-config-merger.js'
-export { writeMcpConfig, removeMcpConfig } from './mcp-config-writer.js'
+export { writeMcpConfig, removeMcpConfig, renderedMcpFieldNames } from './mcp-config-writer.js'
 export { addTrackedMcps, removeTrackedMcps, listTrackedMcps } from './mcp-tracker.js'
 export type { McpTrackingEntry } from './mcp-tracker.js'
 export { MCP_REMOTE_VERSION, getMcpRemoteRuntimeRoot, inspectMcpRemoteRuntime, ensureMcpRemoteRuntime, resolveNpmCommand } from './mcp-remote-runtime.js'

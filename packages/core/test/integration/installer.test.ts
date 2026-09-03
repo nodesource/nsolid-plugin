@@ -685,6 +685,109 @@ describe('install()', () => {
     assert.strictEqual(servers['nsolid-console'].url, 'https://custom-mcp.example.com/entry')
   })
 
+  it('re-running install does not swallow user-added MCP fields into ownership', async () => {
+    const { install } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({
+      consoleUrl: 'https://test-org.saas.nodesource.io',
+      mcpUrl: 'https://custom-mcp.example.com/entry',
+    })
+
+    const first = await install({ harness: 'claude', bundlePath, skillsSource })
+    assert.strictEqual(first.success, true)
+
+    // The user adds a field to OUR server record between installs.
+    const claudeConfigPath = join(tmpDir, '.claude.json')
+    const claudeConfig = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
+    claudeConfig.mcpServers['nsolid-console'].user_token = 'user-secret'
+    // A user-authored `name` inside the entry is harness metadata, not a field
+    // the install writer renders; it must never become ownership evidence.
+    claudeConfig.mcpServers['nsolid-console'].name = 'my-friendly-name'
+    writeFileSync(claudeConfigPath, JSON.stringify(claudeConfig, null, 2))
+
+    const second = await install({ harness: 'claude', bundlePath, skillsSource })
+    assert.strictEqual(second.success, true)
+
+    // The user field AND the user-authored name survive the reinstall merge...
+    const afterSecond = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
+    assert.strictEqual(afterSecond.mcpServers['nsolid-console'].user_token, 'user-secret')
+    assert.strictEqual(afterSecond.mcpServers['nsolid-console'].name, 'my-friendly-name')
+    assert.strictEqual(afterSecond.mcpServers['nsolid-console'].url, 'https://custom-mcp.example.com/entry')
+
+    // ...and tracking records only the rendered owned fields, so a later
+    // refresh can never treat user_token as owned and delete it.
+    const tracking = readJsonFile<{ mcpServers: Array<{ name: string; fields?: Record<string, string> }> }>(
+      join(tmpDir, '.agents', '.nodesource-installed.json')
+    )!
+    const tracked = tracking.mcpServers.find((entry) => entry.name === 'nsolid-console')
+    assert.ok(tracked, 'server tracked')
+    assert.ok(!Object.hasOwn(tracked.fields ?? {}, 'user_token'), 'user_token must not be tracked as owned')
+    assert.ok(!Object.hasOwn(tracked.fields ?? {}, 'name'), 'a user-authored name must not be tracked as owned')
+    assert.ok(Object.hasOwn(tracked.fields ?? {}, 'url'), 'the rendered owned fields stay tracked')
+
+    // A subsequent refresh of the same bundle preserves the user-authored
+    // name and leaves the entry bytes unchanged.
+    const bytesBeforeRefresh = readFileSync(claudeConfigPath, 'utf8')
+    const { refreshOwnedInstallation } = await import('../../src/update/fallback-transaction.js')
+    const refreshed = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource })
+    assert.strictEqual(refreshed.success, true, JSON.stringify(refreshed))
+    assert.strictEqual(readFileSync(claudeConfigPath, 'utf8'), bytesBeforeRefresh)
+    const afterRefresh = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
+    assert.strictEqual(afterRefresh.mcpServers['nsolid-console'].name, 'my-friendly-name')
+    assert.strictEqual(afterRefresh.mcpServers['nsolid-console'].user_token, 'user-secret')
+  })
+
+  it('keeps install-created MCP entries free of a name field across a refresh', async () => {
+    const { install } = await import('../../src/index.js')
+    const { readJsonFile } = await import('../../src/utils/config.js')
+    const bundle = createBundle({
+      mcpServers: [
+        { name: 'nsolid-console', url: '$' + '{MCP_URL}', headers: { 'X-Nsolid-Service-Token': '$' + '{AUTH_TOKEN}' } },
+      ],
+      auth: {
+        type: 'oauth',
+        provider: 'nodesource',
+        accountsUrl: 'https://accounts.nodesource.com',
+      },
+    })
+    const bundlePath = writeBundle(bundle)
+    const skillsSource = createSkillSource('ns-test-skill')
+    seedCredentials({
+      consoleUrl: 'https://test-org.saas.nodesource.io',
+      mcpUrl: 'https://custom-mcp.example.com/entry',
+    })
+
+    const first = await install({ harness: 'claude', bundlePath, skillsSource })
+    assert.strictEqual(first.success, true)
+
+    const claudeConfigPath = join(tmpDir, '.claude.json')
+    const installed = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
+    assert.strictEqual(Object.hasOwn(installed.mcpServers['nsolid-console'], 'name'), false, 'the install writer never renders a name field inside the entry')
+
+    const { refreshOwnedInstallation } = await import('../../src/update/fallback-transaction.js')
+    const bytesBeforeRefresh = readFileSync(claudeConfigPath, 'utf8')
+    const refreshed = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource })
+    assert.strictEqual(refreshed.success, true, JSON.stringify(refreshed))
+
+    // The refresh reconciliation values must not carry the server's own name
+    // into the entry: an install-created entry stays without that key.
+    const afterRefresh = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
+    assert.strictEqual(Object.hasOwn(afterRefresh.mcpServers['nsolid-console'], 'name'), false, 'the refresh must not add a name field to install-created entries')
+    assert.strictEqual(readFileSync(claudeConfigPath, 'utf8'), bytesBeforeRefresh)
+  })
+
   it('derives console MCP URL without appending /mcp when no explicit MCP URL is stored', async () => {
     const { install } = await import('../../src/index.js')
     const { readJsonFile } = await import('../../src/utils/config.js')

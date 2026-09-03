@@ -4,6 +4,7 @@ import type { HarnessType, Logger } from '../types.js'
 import type { McpTrackingEntry, TrackingData } from '../skills/skill-tracker.js'
 import { readTrackingFile, writeTrackingFile } from '../skills/skill-tracker.js'
 import { getTrackingFilePath, resolveHome } from '../utils/path.js'
+import { harnessMcpKey, readMcpFieldDigests } from '../update/mcp-lookup.js'
 
 export type { McpTrackingEntry } from '../skills/skill-tracker.js'
 
@@ -18,7 +19,7 @@ function createEmptyTracking (harness: HarnessType): TrackingData {
 }
 
 export async function addTrackedMcps (
-  entries: { name: string; configPath: string }[],
+  entries: { name: string; configPath: string; ownedFields?: readonly string[] }[],
   harness: HarnessType,
   logger?: Logger
 ): Promise<void> {
@@ -30,15 +31,27 @@ export async function addTrackedMcps (
       (m) => m.name === entry.name && m.harness === harness
     )
 
+    const configPath = path.resolve(resolveHome(entry.configPath))
+    // Tracking evidence describes the same container the transaction reads and
+    // writes for this harness: the field-digests module is the single source
+    // of truth for both the container selection and the digest computation.
+    // Ownership evidence must never describe fields the user added: tracked
+    // fields absent from the desired render get removed on the next refresh.
+    const digests = readMcpFieldDigests(configPath, entry.name, { preferredKey: harnessMcpKey(harness) })
+    const fields = entry.ownedFields === undefined || digests === undefined
+      ? digests
+      : Object.fromEntries(Object.entries(digests).filter(([name]) => entry.ownedFields!.includes(name)))
     if (existing) {
-      existing.configPath = path.resolve(resolveHome(entry.configPath))
+      existing.configPath = configPath
       existing.configuredAt = now
+      existing.fields = fields
     } else {
       tracking.mcpServers.push({
         name: entry.name,
-        configPath: path.resolve(resolveHome(entry.configPath)),
+        configPath,
         harness,
         configuredAt: now,
+        fields,
       })
     }
   }
