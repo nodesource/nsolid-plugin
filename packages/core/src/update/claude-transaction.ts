@@ -413,26 +413,36 @@ export function installedClaudePayloadRoot (
   }
 }
 
-function foreignRegistrationDigest (bytes: Buffer | undefined, pluginId: string, targetPath: string): string {
+/** @internal Exported for unit tests only. */
+export function foreignRegistrationDigest (bytes: Buffer | undefined, pluginId: string, targetPath: string): string {
   const ownedIds = new Set([pluginId])
   if (/marketplace/i.test(path.basename(targetPath))) ownedIds.add(pluginId.split('@').at(-1) ?? '')
-  const leaves: Array<[string, unknown]> = []
+  const leaves: Array<[string, unknown] | [string, string, number]> = []
   let parsed: unknown
   try { parsed = bytes ? JSON.parse(bytes.toString('utf8')) : {} } catch { return sha256(bytes ?? Buffer.alloc(0)) }
   const visit = (value: unknown, segments: string[]): void => {
+    const location = segments.join('\0')
     if (Array.isArray(value)) {
-      for (const entry of value) {
-        if (!isOwnedClaudeRecord(entry, ownedIds)) visit(entry, segments)
-      }
+      // Containers are part of the canonical form: an empty array, or a
+      // container whose shape changes without changing any primitive leaf,
+      // must still alter the digest. Owned records are excluded before the
+      // container size is recorded, mirroring the object branch: a legacy
+      // array-shaped registration that only adds or updates the owned plugin
+      // record must not change the foreign digest.
+      const entries = value.filter((entry) => !isOwnedClaudeRecord(entry, ownedIds))
+      leaves.push([location, '\0array', entries.length])
+      for (const entry of entries) visit(entry, segments)
       return
     }
     if (value && typeof value === 'object') {
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))) {
-        if (!ownedIds.has(key)) visit(entry, [...segments, key])
-      }
+      const entries = Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => !ownedIds.has(key))
+        .sort(([left], [right]) => left.localeCompare(right))
+      leaves.push([location, '\0object', entries.length])
+      for (const [key, entry] of entries) visit(entry, [...segments, key])
       return
     }
-    leaves.push([segments.join('\0'), value])
+    leaves.push([location, value])
   }
   visit(parsed, [])
   return sha256(Buffer.from(JSON.stringify(leaves)))

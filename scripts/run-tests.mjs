@@ -118,6 +118,17 @@ const args = [
   '--test-reporter', REPORTER,
   ...files,
 ]
+// Several integration tests spawn packages/core/dist/src/cli.js. A stale or
+// missing dist fails them with an unrelated ERR_MODULE_NOT_FOUND instead of
+// "run pnpm build", which bit the husky pre-commit hook in practice. Build
+// first unless the caller proves it already did (CI sets the variable).
+if (process.env.NSOLID_TEST_CORE_ALREADY_BUILT !== '1') {
+  const build = spawnSync('pnpm', ['-s', 'build'], { stdio: 'inherit', cwd: ROOT, shell: process.platform === 'win32' })
+  if (build.status !== 0) {
+    console.error('pnpm build failed; tests were not run')
+    process.exit(build.status ?? 1)
+  }
+}
 const result = spawnSync(process.execPath, args, { stdio: 'inherit', cwd: ROOT })
 const status = result.status ?? 1
 

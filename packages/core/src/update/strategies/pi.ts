@@ -36,7 +36,11 @@ export const piStrategy: UpdateStrategy = {
         manualCommands: [`pi update npm:nsolid-pi-plugin ${approve ? '--approve' : '--no-approve'}`],
       }
     }
-    const spawn = managerArgsForIdentity(identity, ['update', installation.artifact.tarballPath, approve ? '--approve' : '--no-approve'])
+    // Pi identifies the package and its user/project caches by the installed
+    // source spec. The verified tarball captured during planning is not passed
+    // to Pi: it remains on the plan item as the expected identity that
+    // validatePiEvidence compares against after Pi's native update completes.
+    const spawn = managerArgsForIdentity(identity, ['update', source.spec, approve ? '--approve' : '--no-approve'])
     const registry = installation.artifact?.kind === 'npm' ? installation.artifact.registry : undefined
     return planItem(
       installation,

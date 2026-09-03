@@ -75,6 +75,34 @@ describe('in-process tar entry reader', () => {
     assert.equal(await readTarEntryText(path.join(directory, 'absent.tgz'), 'package/bundle.json'), undefined)
   })
 
+  it('returns undefined for a gzip that expands beyond the archive bound', async () => {
+    // 65 MiB of zeros gzips to well under 100 KiB but must never be
+    // materialized: the decompressed size is capped, not only the file size.
+    const oversized = gzipSync(Buffer.alloc(65 * 1024 * 1024))
+    assert.ok(oversized.length < 1024 * 1024, 'fixture must be small on disk')
+    const tarball = path.join(directory, 'bomb.tgz')
+    writeFileSync(tarball, oversized)
+    assert.equal(await readTarEntryText(tarball, 'package/bundle.json'), undefined)
+  })
+
+  it('rejects a decompression bomb even when a matching entry would be readable', async () => {
+    // Distinguishes the bounded reader from the former unbounded one: the
+    // archive decompresses past MAX_TARBALL_BYTES, but the entry itself is
+    // small, so the old reader (no maxOutputLength) successfully returned
+    // its content while the bounded reader throws during gunzipSync and
+    // yields the best-effort undefined. Verified against the pre-fix code
+    // (git 09972c4): old result was '{}', new result is undefined.
+    const tar = Buffer.concat([
+      tarEntry('package/bundle.json', Buffer.from('{}'), '0'),
+      Buffer.alloc(70 * 1024 * 1024),
+    ])
+    const gzipped = gzipSync(tar)
+    assert.ok(gzipped.length < 1024 * 1024, 'fixture must be small on disk')
+    const tarball = path.join(directory, 'readable-bomb.tgz')
+    writeFileSync(tarball, gzipped)
+    assert.equal(await readTarEntryText(tarball, 'package/bundle.json'), undefined)
+  })
+
   it('refuses an entry beyond the size bound instead of buffering it', async () => {
     const oversized = Buffer.alloc(2 << 20, 0x61)
     const tar = Buffer.concat([tarEntry('package/bundle.json', oversized, '0'), Buffer.alloc(1024)])

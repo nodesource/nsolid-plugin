@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import os from 'node:os'
 import path from 'node:path'
 import type { CommandResult, CommandRunner, CommandSpec, ResolvedArtifactIdentity } from '../../../src/update/types.js'
-import { executeClaudeTransaction, installedClaudePayloadRoot, restoreClaudeNativeState } from '../../../src/update/claude-transaction.js'
+import { executeClaudeTransaction, foreignRegistrationDigest, installedClaudePayloadRoot, restoreClaudeNativeState } from '../../../src/update/claude-transaction.js'
 import type { OwnedPathKind } from '../../../src/update/fs-transaction.js'
 import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 
@@ -696,5 +696,44 @@ describe('Claude native replacement transaction', () => {
     } finally {
       rmSync(fixture.home, { recursive: true, force: true })
     }
+  })
+})
+
+describe('foreignRegistrationDigest', () => {
+  const pluginId = 'nsolid-plugin@nodesource'
+  const target = '/tmp/installed_plugins.json'
+  const digest = (value: unknown): string => foreignRegistrationDigest(Buffer.from(JSON.stringify(value)), pluginId, target)
+
+  it('changes when an unrelated empty object is removed', () => {
+    assert.notEqual(digest({ other: {} }), digest({}))
+  })
+
+  it('changes when an unrelated empty array is removed', () => {
+    assert.notEqual(digest({ other: [] }), digest({}))
+  })
+
+  it('distinguishes an empty object from an empty array at the same path', () => {
+    assert.notEqual(digest({ other: {} }), digest({ other: [] }))
+  })
+
+  it('distinguishes an object container from an array container holding the same leaf', () => {
+    assert.notEqual(digest({ other: { 0: 1 } }), digest({ other: [1] }))
+  })
+
+  it('is stable across key order', () => {
+    assert.equal(digest({ a: 1, b: { c: 2 } }), digest({ b: { c: 2 }, a: 1 }))
+  })
+
+  it('still ignores the owned plugin record', () => {
+    assert.equal(digest({ plugins: { [pluginId]: { version: '1' }, other: {} } }), digest({ plugins: { [pluginId]: { version: '2' }, other: {} } }))
+  })
+
+  it('still ignores owned records inside arrays', () => {
+    assert.equal(digest({ plugins: [{ id: pluginId }] }), digest({ plugins: [] }))
+    assert.equal(digest({ plugins: [{ id: pluginId }, { id: 'other' }] }), digest({ plugins: [{ id: 'other' }] }))
+  })
+
+  it('still counts unrelated array elements', () => {
+    assert.notEqual(digest({ other: [1] }), digest({ other: [1, 2] }))
   })
 })

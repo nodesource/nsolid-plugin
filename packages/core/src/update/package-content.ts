@@ -2,6 +2,9 @@ import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 
+/** Caps both the compressed tarball and its decompressed output; copied from tarball.ts. */
+const MAX_TARBALL_BYTES = 64 * 1024 * 1024
+
 type TarEntry =
   | { kind: 'file'; content: Buffer }
   | { kind: 'symlink'; target: string }
@@ -26,7 +29,9 @@ export function installedPackageMatchesTarball (packageRoot: string, tarballPath
 }
 
 function readNpmTarball (tarballPath: string): Map<string, TarEntry> {
-  const archive = gunzipSync(readFileSync(tarballPath))
+  const compressed = readFileSync(tarballPath)
+  if (compressed.length > MAX_TARBALL_BYTES) throw new Error('tarball exceeds size bound')
+  const archive = gunzipSync(compressed, { maxOutputLength: MAX_TARBALL_BYTES })
   const entries = new Map<string, TarEntry>()
   let offset = 0
   let longPath: string | undefined

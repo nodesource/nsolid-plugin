@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { gunzipSync } from 'node:zlib'
 
-/** npm registry tarballs stay far below this bound; anything larger is refused before buffering. */
+/** npm registry tarballs stay far below this bound; it caps both the compressed file and its decompressed output. */
 const MAX_TARBALL_BYTES = 64 * 1024 * 1024
 /** bundle.json is a small descriptor; a larger entry is treated as malformed input. */
 const MAX_ENTRY_BYTES = 1 << 20
@@ -36,7 +36,11 @@ export async function readTarEntryText (tarballPath: string, entryName: string):
   try {
     const raw = await readFile(tarballPath)
     if (raw.length === 0 || raw.length > MAX_TARBALL_BYTES) return undefined
-    const bytes = isGzip(raw) ? gunzipSync(raw) : raw
+    // Bound the decompressed output too: the file-size check above only
+    // limits the compressed bytes, and a hostile artifact can expand far
+    // beyond it. zlib throws RangeError past the limit; the outer catch
+    // turns that into the documented best-effort undefined.
+    const bytes = isGzip(raw) ? gunzipSync(raw, { maxOutputLength: MAX_TARBALL_BYTES }) : raw
     let offset = 0
     while (offset + HEADER_SIZE <= bytes.length) {
       const header = bytes.subarray(offset, offset + HEADER_SIZE)

@@ -518,8 +518,29 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
       if (!step || step.kind !== 'command') return
       assertSameExecutable(step.command.executable, exe)
       assertNativeIdentity(step.command.executableIdentity, exe)
-      assert.deepEqual(step.command.args, ['update', path.join(root, 'nsolid-pi-plugin-1.0.1.tgz'), '--approve'])
+      assert.deepEqual(step.command.args, ['update', 'npm:nsolid-pi-plugin', '--approve'])
       assert.equal(step.command.cwd, '/tmp/project')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('pi: user-only scope invokes the installed source with --no-approve', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-pi-'))
+    const exe = writeVerifiedLauncher(root, 'pi')
+    process.env.PATH = root
+    try {
+      const source: UpdateSource = { kind: 'pi-package', spec: 'npm:nsolid-pi-plugin', scopes: ['user'] }
+      const item = await piStrategy.plan(piInstallation(root, source), context())
+      assert.equal(item.planningError, undefined)
+      const step = item.steps.find((entry) => entry.kind === 'command')
+      assert.equal(step?.kind, 'command')
+      if (!step || step.kind !== 'command') return
+      assertSameExecutable(step.command.executable, exe)
+      assert.deepEqual(step.command.args, ['update', 'npm:nsolid-pi-plugin', '--no-approve'])
+      assert.equal(step.command.cwd, undefined)
+      // The verified tarball stays on the plan as post-update evidence only.
+      assert.equal(item.artifact?.kind, 'npm')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
