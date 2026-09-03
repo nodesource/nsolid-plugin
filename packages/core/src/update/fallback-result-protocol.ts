@@ -3,15 +3,20 @@ import { chmod, lstat, open, rename, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
-/** O_NOFOLLOW is unavailable on some platforms (Windows); fall back to a plain open there. */
+/**
+ * O_NOFOLLOW is unavailable on Windows (the flag degrades to a plain open
+ * there), so readValidatedFallbackChildResult pairs the flag with an lstat
+ * symlink rejection plus an fd-vs-path identity comparison that work on
+ * every platform.
+ */
 const NO_FOLLOW_FLAG = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0
 
 /**
  * Identity of a parent-owned containment directory, recorded at creation time
  * (before any other process can observe or replace the path). POSIX carries
- * device+inode; Windows filesystems expose neither, so the recorded identity
- * is empty there and containment relies on the inherited ACLs of the private
- * temporary workspace plus the other trust boundaries.
+ * device+inode; on Windows Node's fs exposes the volume serial number as
+ * `dev` and the NTFS file index as `ino`, so the identity is recorded on
+ * every platform and a swapped directory is detectable everywhere.
  */
 export interface ContainmentDirectoryIdentity {
   /** Directory path recorded by the parent (absolute). */
@@ -30,9 +35,6 @@ export interface ContainmentDirectoryIdentity {
  */
 export async function recordContainmentDirectoryIdentity (directory: string): Promise<ContainmentDirectoryIdentity> {
   const resolved = path.resolve(directory)
-  if (process.platform === 'win32') {
-    return { directory: resolved }
-  }
   try {
     const stat = await lstat(resolved)
     return { directory: resolved, dev: stat.dev, ino: stat.ino }
@@ -51,9 +53,10 @@ export function containmentDirectoryMatches (recorded: ContainmentDirectoryIdent
   const resolved = path.resolve(currentDirectory)
   if (path.resolve(recorded.directory) !== resolved) return false
   if (recorded.dev === undefined || recorded.ino === undefined) {
-    // Windows (or an unmeasurable POSIX identity): containment is enforced
-    // lexically only, as before.
-    return true
+    // An unmeasurable identity (lstat failed at recording time, or a legacy
+    // persisted identity) can never be re-verified, so containment fails
+    // closed instead of degrading to a lexical-only check.
+    return false
   }
   try {
     const stat = lstatSync(resolved)
@@ -204,14 +207,16 @@ export async function readValidatedFallbackChildResult (
     // result path still lexically matches, closing the ancestor-swap escape.
     const recorded = directories.find((identity) => path.resolve(identity.directory) === path.resolve(lexicalParent))
     if (!recorded || !containmentDirectoryMatches(recorded, lexicalParent)) return undefined
-    // Open the expected path exactly once with no-follow semantics: on POSIX
-    // O_NOFOLLOW makes a symlink planted at the path fail instead of being
-    // followed. Every further check (file kind, ownership, mode, size, bytes)
-    // inspects only this already-open descriptor, so swapping the path after
-    // validation cannot change what this call reads. Windows has no
-    // O_NOFOLLOW equivalent and does not expose POSIX ownership/mode bits
-    // here; isolation rests on inherited temporary-directory ACLs plus the
+    // Windows has no O_NOFOLLOW, so a symlink planted at the result path is
+    // rejected before the open, and the opened descriptor is then verified to
+    // still describe the same file the pre-open lstat saw (fd-vs-path
+    // identity), which also closes the swap-between-lstat-and-open window on
+    // every platform. On POSIX O_NOFOLLOW additionally makes the open itself
+    // fail on a symlink. The ownership/mode checks below are POSIX-only;
+    // Windows isolation rests on inherited temporary-directory ACLs plus the
     // containment and nonce validation.
+    const preOpen = lstatSync(resultPath)
+    if (preOpen.isSymbolicLink()) return undefined
     const handle = await open(resultPath, constants.O_RDONLY | NO_FOLLOW_FLAG)
     let text: string
     try {
@@ -222,6 +227,7 @@ export async function readValidatedFallbackChildResult (
       if (!containmentDirectoryMatches(recorded, lexicalParent)) return undefined
       const stat = await handle.stat()
       if (!stat.isFile()) return undefined
+      if (stat.ino !== preOpen.ino || stat.dev !== preOpen.dev) return undefined
       // Ownership assumption: the envelope must have been written by this user.
       if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return undefined
       // The result is private state: reject anything group- or world-readable

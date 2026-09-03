@@ -38,7 +38,6 @@ describe('fallback child result protocol', () => {
 
   /** Identity of the beforeEach-created directory, mirroring production recording. */
   function containment (): ContainmentDirectoryIdentity {
-    if (process.platform === 'win32') return { directory: path.resolve(directory) }
     const stat = lstatSync(path.resolve(directory))
     return { directory: path.resolve(directory), dev: stat.dev, ino: stat.ino }
   }
