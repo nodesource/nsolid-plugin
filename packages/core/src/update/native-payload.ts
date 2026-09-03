@@ -270,13 +270,40 @@ function captureArchivePayload (compressedArchive: Buffer, scope: ArchivePayload
   }
 }
 
+/**
+ * Windows readlink returns the stored symlink target with native separators
+ * while tar linknames keep POSIX separators. Separators are normalized only
+ * for ordinary Win32 paths, where `\` and `/` are interchangeable.
+ * Device-namespace targets (`\\?\`, `\\.\`, `\??\`, including
+ * slash-spelled variants) are digested verbatim: extended paths disable
+ * Win32 normalization, so forward slashes inside them are not equivalent
+ * separators and must not be rewritten. Distinct targets can never collide
+ * on POSIX, where the target is digested verbatim.
+ */
+function symlinkTargetForDigest (target: string): string {
+  if (process.platform !== 'win32') return target
+  if (isWindowsDeviceNamespaceTarget(target)) return target
+  return target.replace(/\\/g, '/')
+}
+
+/**
+ * True for Win32 device-namespace paths (`\\?\`, `\\.\`, `\??\`) in
+ * either separator spelling. Forward slashes inside these paths are not
+ * equivalent separators, so such targets must never be normalized.
+ * Exported for unit testing the classification; the digest is the only caller.
+ */
+export function isWindowsDeviceNamespaceTarget (target: string): boolean {
+  const normalized = target.replace(/\//g, '\\')
+  return normalized.startsWith('\\\\?\\') || normalized.startsWith('\\\\.\\') || normalized.startsWith('\\??\\')
+}
+
 function digestEntries (entries: Map<string, PayloadEntry>): string | undefined {
   if (entries.size === 0) return undefined
   const hash = createHash('sha256')
   for (const [relative, entry] of [...entries].sort(([left], [right]) => left.localeCompare(right))) {
     hash.update(entry.kind).update('\0').update(relative).update('\0')
     if (entry.kind === 'file') hash.update(String(entry.content.length)).update('\0').update(entry.content)
-    else if (entry.kind === 'symlink') hash.update(entry.target)
+    else if (entry.kind === 'symlink') hash.update(symlinkTargetForDigest(entry.target))
     hash.update('\0')
   }
   return hash.digest('hex')

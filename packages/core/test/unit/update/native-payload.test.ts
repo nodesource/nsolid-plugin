@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import os from 'node:os'
 import path from 'node:path'
 import { gzipSync } from 'node:zlib'
-import { gitArchivePayloadDigest, nativePayloadTreeDigest, plannedPayloadIdentityFromArchive, plannedPayloadIdentityFromTree } from '../../../src/update/native-payload.js'
+import { gitArchivePayloadDigest, isWindowsDeviceNamespaceTarget, nativePayloadTreeDigest, plannedPayloadIdentityFromArchive, plannedPayloadIdentityFromTree } from '../../../src/update/native-payload.js'
 
 const CODEX_PROFILE = 'codex-installed-v1' as const
 
@@ -243,6 +243,42 @@ describe('native payload identity', () => {
       assert.equal(gitArchivePayloadDigest(archive, {}, { profile: CODEX_PROFILE }), withSymlink)
     } finally {
       rmSync(clean, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes Windows symlink target separators without collapsing device-prefixed forms', { skip: process.platform !== 'win32' }, () => {
+    const digestWithTarget = (target: string): string | undefined => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-win-target-'))
+      try {
+        materializePayload(root, cleanPayloadFiles())
+        // Explicit 'file' type: an omitted type makes symlinkSync stat the
+        // target to guess file-vs-dir, and a UNC target stat surfaces as
+        // UNKNOWN instead of the tolerated ENOENT on Windows.
+        symlinkSync(target, path.join(root, 'skills', 'example', 'asset.bin'), 'file')
+        return nativePayloadTreeDigest(root)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+    // Forward- and backslash-separated forms resolve identically on Windows.
+    assert.equal(digestWithTarget('../shared/asset.bin'), digestWithTarget('..\\shared\\asset.bin'))
+    // Same for absolute UNC paths outside the device namespace.
+    assert.equal(digestWithTarget('\\\\server\\share\\asset.bin'), digestWithTarget('//server/share/asset.bin'))
+    // Genuinely different destinations stay distinct. (Absolute device-namespace
+    // spellings are intentionally not compared here: Windows readlink
+    // canonicalizes absolute targets to NT form on read, so distinct spellings
+    // of the same destination digest identically — which is correct. The
+    // device-namespace classification itself is pinned by the cross-platform
+    // unit test below.)
+    assert.notEqual(digestWithTarget('C:\\payload\\asset.bin'), digestWithTarget('C:\\payload\\other.bin'))
+  })
+
+  it('classifies Windows device-namespace symlink targets for verbatim digesting (cross-platform)', () => {
+    for (const device of ['\\\\?\\C:\\x', '//?/C:/x', '\\\\.\\COM1', '\\??\\C:\\x', '\\\\?\\UNC\\s\\s']) {
+      assert.equal(isWindowsDeviceNamespaceTarget(device), true, device)
+    }
+    for (const ordinary of ['..\\a\\b', '../a/b', 'C:\\a\\b', '\\\\server\\share\\x', 'asset.bin']) {
+      assert.equal(isWindowsDeviceNamespaceTarget(ordinary), false, ordinary)
     }
   })
 
