@@ -272,17 +272,28 @@ function captureArchivePayload (compressedArchive: Buffer, scope: ArchivePayload
 
 /**
  * Windows readlink returns the stored symlink target with native separators
- * while tar linknames keep POSIX separators. Only the separators are
- * normalized, and only on win32: extended-length `\\?\` device-prefixed
- * targets intentionally stay distinct from their plain forms, because Win32
- * normalization is disabled inside `\\?\` paths (a literal trailing-dot
- * name and its normalized twin resolve to different destinations but would
- * otherwise hash identically). Keeping them distinct fails closed. Distinct
- * targets can never collide on POSIX, where the target is digested verbatim.
+ * while tar linknames keep POSIX separators. Separators are normalized only
+ * for ordinary Win32 paths, where `\` and `/` are interchangeable.
+ * Device-namespace targets (`\\?\`, `\\.\`, `\??\`, including
+ * slash-spelled variants) are digested verbatim: extended paths disable
+ * Win32 normalization, so forward slashes inside them are not equivalent
+ * separators and must not be rewritten. Distinct targets can never collide
+ * on POSIX, where the target is digested verbatim.
  */
 function symlinkTargetForDigest (target: string): string {
   if (process.platform !== 'win32') return target
+  if (isWindowsDeviceNamespaceTarget(target)) return target
   return target.replace(/\\/g, '/')
+}
+
+/**
+ * True for Win32 device-namespace paths (`\\?\`, `\\.\`, `\??\`) in
+ * either separator spelling. Forward slashes inside these paths are not
+ * equivalent separators, so such targets must never be normalized.
+ */
+function isWindowsDeviceNamespaceTarget (target: string): boolean {
+  const normalized = target.replace(/\//g, '\\')
+  return normalized.startsWith('\\\\?\\') || normalized.startsWith('\\\\.\\') || normalized.startsWith('\\??\\')
 }
 
 function digestEntries (entries: Map<string, PayloadEntry>): string | undefined {

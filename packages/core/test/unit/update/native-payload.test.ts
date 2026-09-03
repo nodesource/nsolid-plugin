@@ -263,6 +263,9 @@ describe('native payload identity', () => {
     // forms: Win32 normalization is disabled inside `\\?\` paths, so they
     // can resolve to different destinations.
     assert.notEqual(digestWithTarget('\\\\?\\C:\\payload\\asset.bin'), digestWithTarget('C:\\payload\\asset.bin'))
+    // Inside the device namespace forward slashes are not equivalent
+    // separators, so slash-spelled variants stay distinct as well.
+    assert.notEqual(digestWithTarget('\\\\?\\C:\\payload\\asset.bin'), digestWithTarget('//?/C:/payload/asset.bin'))
   })
 
   it('keeps reserved-name symlinks and directories significant on the installed side', () => {
