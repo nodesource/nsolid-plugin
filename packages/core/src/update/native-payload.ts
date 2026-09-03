@@ -290,8 +290,9 @@ function symlinkTargetForDigest (target: string): string {
  * True for Win32 device-namespace paths (`\\?\`, `\\.\`, `\??\`) in
  * either separator spelling. Forward slashes inside these paths are not
  * equivalent separators, so such targets must never be normalized.
+ * Exported for unit testing the classification; the digest is the only caller.
  */
-function isWindowsDeviceNamespaceTarget (target: string): boolean {
+export function isWindowsDeviceNamespaceTarget (target: string): boolean {
   const normalized = target.replace(/\//g, '\\')
   return normalized.startsWith('\\\\?\\') || normalized.startsWith('\\\\.\\') || normalized.startsWith('\\??\\')
 }
