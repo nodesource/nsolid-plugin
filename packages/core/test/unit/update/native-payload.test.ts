@@ -251,7 +251,10 @@ describe('native payload identity', () => {
       const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-win-target-'))
       try {
         materializePayload(root, cleanPayloadFiles())
-        symlinkSync(target, path.join(root, 'skills', 'example', 'asset.bin'))
+        // Explicit 'file' type: an omitted type makes symlinkSync stat the
+        // target to guess file-vs-dir, and a UNC target stat surfaces as
+        // UNKNOWN instead of the tolerated ENOENT on Windows.
+        symlinkSync(target, path.join(root, 'skills', 'example', 'asset.bin'), 'file')
         return nativePayloadTreeDigest(root)
       } finally {
         rmSync(root, { recursive: true, force: true })
