@@ -270,13 +270,28 @@ function captureArchivePayload (compressedArchive: Buffer, scope: ArchivePayload
   }
 }
 
+/**
+ * Windows readlink returns the stored symlink target with native separators
+ * (and, for absolute targets, an extended-length `\\?\` device prefix),
+ * while tar linknames keep POSIX separators. Normalize on win32 only, for
+ * both the installed-tree and archive sides, so equivalent payloads digest
+ * identically without ever masking distinct targets on POSIX.
+ */
+function symlinkTargetForDigest (target: string): string {
+  if (process.platform !== 'win32') return target
+  const normalized = target.replace(/\\/g, '/')
+  if (normalized.startsWith('//?/UNC/')) return '//' + normalized.slice('//?/UNC/'.length)
+  if (normalized.startsWith('//?/')) return normalized.slice('//?/'.length)
+  return normalized
+}
+
 function digestEntries (entries: Map<string, PayloadEntry>): string | undefined {
   if (entries.size === 0) return undefined
   const hash = createHash('sha256')
   for (const [relative, entry] of [...entries].sort(([left], [right]) => left.localeCompare(right))) {
     hash.update(entry.kind).update('\0').update(relative).update('\0')
     if (entry.kind === 'file') hash.update(String(entry.content.length)).update('\0').update(entry.content)
-    else if (entry.kind === 'symlink') hash.update(entry.target)
+    else if (entry.kind === 'symlink') hash.update(symlinkTargetForDigest(entry.target))
     hash.update('\0')
   }
   return hash.digest('hex')
