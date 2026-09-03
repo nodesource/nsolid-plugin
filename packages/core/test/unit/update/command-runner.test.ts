@@ -204,6 +204,65 @@ describe('update command runner', () => {
     }
   })
 
+  it('derives the entrypoint of a node_modules/.bin cmd shim (npm dependency layout, cross-platform)', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-shim-bin-'))
+    const entrypoint = path.join(root, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
+    const shim = path.join(root, 'node_modules', '.bin', 'pnpm.cmd')
+    mkdirSync(path.dirname(entrypoint), { recursive: true })
+    mkdirSync(path.dirname(shim), { recursive: true })
+    writeFileSync(entrypoint, '#!/usr/bin/env node\n')
+    writeFileSync(path.join(root, 'node_modules', 'pnpm', 'package.json'), JSON.stringify({ name: 'pnpm', bin: { pnpm: 'bin/pnpm.cjs' } }))
+    // npm's cmd-shim writes the target relative to the shim directory, which
+    // for a node_modules/.bin shim is one `..` level up (this is the layout
+    // pnpm/action-setup produces on Windows runners, where only pnpm.cmd —
+    // no pnpm.exe — exists on PATH).
+    writeFileSync(shim, [
+      '@ECHO off',
+      'GOTO start',
+      ':find_dp0',
+      'SET dp0=%~dp0',
+      'EXIT /b',
+      ':start',
+      'SETLOCAL',
+      'CALL :find_dp0',
+      '',
+      'IF EXIST "%dp0%\\node.exe" (',
+      '  SET "_prog=%dp0%\\node.exe"',
+      ') ELSE (',
+      '  SET "_prog=node"',
+      '  SET PATHEXT=%PATHEXT:;.JS;=;%',
+      ')',
+      '',
+      'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & set PATHEXT=%PATHEXT:;.JS;=;% & "%_prog%"  "%dp0%\\..\\pnpm\\bin\\pnpm.cjs" %*',
+      '',
+    ].join('\r\n'))
+    try {
+      assert.equal(deriveShimEntrypoint(shim, 'win32'), entrypoint)
+      assert.deepEqual(resolveExecutableIdentity('pnpm', { Path: path.join(root, 'node_modules', '.bin'), PATHEXT: '.cmd' }, 'win32'), {
+        kind: 'node',
+        executable: process.execPath,
+        entrypoint,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a .bin cmd shim whose target escapes the node_modules root', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-shim-bin-'))
+    const evil = path.join(root, 'evil', 'dummy.js')
+    const shim = path.join(root, 'node_modules', '.bin', 'pnpm.cmd')
+    mkdirSync(path.dirname(evil), { recursive: true })
+    mkdirSync(path.dirname(shim), { recursive: true })
+    writeFileSync(evil, '#!/usr/bin/env node\n')
+    writeFileSync(shim, 'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\..\\evil\\dummy.js" %*\r\n')
+    try {
+      assert.equal(deriveShimEntrypoint(shim, 'win32'), undefined)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('derives a scoped package shim (bin object) declared by the owning package (cross-platform)', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-shim-'))
     const entrypoint = path.join(root, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js')

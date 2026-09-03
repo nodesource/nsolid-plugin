@@ -261,7 +261,16 @@ export function findExecutable (
 }
 
 const SHIM_INVOCATION_RE = /(?:^|[&;])\s*@?(?:"(?:%_prog%|%dp0%\\node\.exe|node(?:\.exe)?)"|node(?:\.exe)?)\s+/i
-const SHIM_ENTRYPOINT_RE = /node_modules[\\/]([^"\r\n']+?\.(?:js|cjs))/i
+/**
+ * Capture the quoted `%dp0%`-relative entrypoint target of an invocation line.
+ * npm's cmd-shim writes the target relative to the shim directory in two
+ * layouts: `%dp0%\node_modules\<pkg>\...` for a shim that sits next to
+ * `node_modules` (the bundled `npm.cmd`/`npx.cmd`), and `%dp0%\..<pkg>\...`
+ * for a shim inside `node_modules\.bin` (every dependency bin, and pnpm when
+ * it was installed through npm). Legacy shims use `%~dp0\` instead of
+ * `%dp0%\`.
+ */
+const SHIM_TARGET_RE = /%(?:dp0%|~dp0)\\([^"\r\n]+?\.(?:js|cjs))(?=")/i
 
 /**
  * Parse an npm-generated Windows `.cmd`/`.bat` shim and return the absolute
@@ -298,24 +307,23 @@ export function deriveShimEntrypoint (shimPath: string, platform: NodeJS.Platfor
     return undefined
   }
   const isWindows = platform === 'win32'
+  const shimDir = path.win32.dirname(shimPath)
   const shimName = path.win32.basename(shimPath, path.win32.extname(shimPath))
   const namesEqual = (left: string, right: string): boolean =>
     isWindows ? left.toLowerCase() === right.toLowerCase() : left === right
   const invocationLines = content.split(/\r?\n/).filter((line) => SHIM_INVOCATION_RE.test(line) && /%\*/.test(line))
   for (const invocation of invocationLines) {
-    if (!/node_modules[\\/]/.test(invocation) || !/\.(?:js|cjs)["\s]/i.test(invocation)) continue
-    // Match a `node_modules\<...>...\*.js|cjs` target (npm's cmd-shim emits the
-    // entrypoint relative to the shim directory via %dp0%). Since every
-    // character inside the entrypoint path is constrained to a Windows path we
-    // strip quotes and whitespace around it.
-    const match = SHIM_ENTRYPOINT_RE.exec(invocation)
+    // Extract the quoted %dp0%-relative `.js|cjs` target npm's cmd-shim emits
+    // on the invocation line, then anchor it under the node_modules root the
+    // shim's layout implies.
+    const match = SHIM_TARGET_RE.exec(invocation)
     if (!match) continue
-    const relative = match[1]
-    if (relative.length === 0 || /\.\./.test(relative)) continue
-    const packageEntry = verifyPackageBinOwnership(shimPath, shimName, relative, namesEqual, isWindows)
+    const resolved = resolveShimTargetRoot(shimDir, match[1])
+    if (!resolved) continue
+    const packageEntry = verifyPackageBinOwnership(resolved.modulesRoot, resolved.inModules, shimName, namesEqual)
     if (!packageEntry) continue
     const entrypoint = path.win32
-      .resolve(path.win32.dirname(shimPath), 'node_modules', relative)
+      .resolve(resolved.modulesRoot, ...resolved.inModules)
       .split('\\')
       .join(path.sep)
     if (!existsSync(entrypoint)) continue
@@ -325,28 +333,54 @@ export function deriveShimEntrypoint (shimPath: string, platform: NodeJS.Platfor
 }
 
 /**
- * Prove that the package containing `relative` (a path under
- * `node_modules\...` captured from a shim invocation line) declares a `bin`
+ * Anchor a shim's captured `%dp0%`-relative target under the node_modules root
+ * its layout implies: a shim next to `node_modules` references
+ * `node_modules\<pkg>\...`, while a shim inside `node_modules\.bin`
+ * references `..\<pkg>\...` one level up. Any traversal beyond that root (or
+ * any other shape) is rejected, so the derived entrypoint always stays inside
+ * the shim's own node_modules tree.
+ */
+function resolveShimTargetRoot (
+  shimDir: string,
+  relative: string
+): { modulesRoot: string; inModules: string[] } | undefined {
+  const segments = relative.replace(/\//g, '\\').split('\\')
+  const isSafe = (rest: string[]): boolean =>
+    rest.length > 0 && rest.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+  if (segments[0]?.toLowerCase() === 'node_modules') {
+    const inModules = segments.slice(1)
+    if (!isSafe(inModules)) return undefined
+    return { modulesRoot: path.win32.resolve(shimDir, 'node_modules'), inModules }
+  }
+  if (segments[0] === '..' && path.win32.basename(shimDir).toLowerCase() === '.bin') {
+    const inModules = segments.slice(1)
+    if (!isSafe(inModules)) return undefined
+    return { modulesRoot: path.win32.dirname(shimDir), inModules }
+  }
+  return undefined
+}
+
+/**
+ * Prove that the package at `inModules` (segments under the shim's
+ * node_modules root, captured from a shim invocation line) declares a `bin`
  * named after the shim and pointing at that exact entrypoint. Returns the bin
  * entry name on success, undefined on any failure (fail-closed).
  */
 function verifyPackageBinOwnership (
-  shimPath: string,
+  modulesRoot: string,
+  inModules: readonly string[],
   shimName: string,
-  relative: string,
-  namesEqual: (left: string, right: string) => boolean,
-  isWindows: boolean
+  namesEqual: (left: string, right: string) => boolean
 ): string | undefined {
-  const segments = relative.split(/[\\/]+/)
-  if (segments.length === 0 || segments[0].length === 0) return undefined
+  if (inModules.length === 0 || inModules[0].length === 0) return undefined
   // The package directory is one segment, or two for a scoped package.
-  const packageSegments = segments[0].startsWith('@') ? 2 : 1
-  if (segments.length <= packageSegments) return undefined
-  const packageDir = segments.slice(0, packageSegments).join('\\')
-  const inPackageRelative = segments.slice(packageSegments).join('\\')
+  const packageSegments = inModules[0].startsWith('@') ? 2 : 1
+  if (inModules.length <= packageSegments) return undefined
+  const packageDir = inModules.slice(0, packageSegments).join('\\')
+  const inPackageRelative = inModules.slice(packageSegments).join('\\')
 
   const manifestPath = path.win32
-    .resolve(path.win32.dirname(shimPath), 'node_modules', packageDir, 'package.json')
+    .resolve(modulesRoot, packageDir, 'package.json')
     .split('\\')
     .join(path.sep)
   let manifest: unknown
