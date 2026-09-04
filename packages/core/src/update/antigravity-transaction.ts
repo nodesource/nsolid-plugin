@@ -5,8 +5,8 @@ import { findNodeAtLocation, getNodeValue, parseTree, type Node } from 'jsonc-pa
 import { resolveHome } from '../utils/path.js'
 import type { CommandRunner, UpdateError, UpdatePlanItem } from './types.js'
 import { isStableVersion } from './version.js'
-import { copyOwnedPath, createSiblingBackupPath, ownedPathKind, removeOwnedPath } from './fs-transaction.js'
-import type { SiblingBackupPath } from './fs-transaction.js'
+import { copyOwnedPath, createSiblingBackupPath, ownedPathKind, ownedTreeDigest, removeOwnedPath } from './owned-fs.js'
+import type { SiblingBackupPath } from './owned-fs.js'
 import { runTransactionCommands } from './transaction-commands.js'
 import { nativePayloadTreeDigest, sha256Hex } from './native-payload.js'
 
@@ -110,7 +110,7 @@ export async function executeAntigravityTransaction (
         // oversized, or otherwise undigestible tree has no provable backup:
         // fail here, before mutation, instead of entering a transaction whose
         // rollback can never be authenticated.
-        originalRootDigest = treeDigest(rootBackup)
+        originalRootDigest = await treeDigest(rootBackup)
         if (originalRootDigest === undefined) throw new Error('backup tree could not be digested')
         rootBackupComplete = true
       }
@@ -134,7 +134,7 @@ export async function executeAntigravityTransaction (
     const commandResult = await runTransactionCommands(item.steps, commandRunner)
     // Capture the exact post-mutation state this transaction is authorized to
     // replace during rollback, whether the commands succeeded or not.
-    authorizedRootDigest = existsSync(pluginRoot) ? treeDigest(pluginRoot) : null
+    authorizedRootDigest = existsSync(pluginRoot) ? await treeDigest(pluginRoot) : null
     authorizedManifestDigest = existsSync(manifestPath) ? sha256Hex(readFileSync(manifestPath)) : null
     if (!commandResult.success) {
       const { result } = commandResult
@@ -302,8 +302,12 @@ function isPluginImport (entry: unknown): boolean {
   return value.name === 'nsolid-plugin' || value.plugin === 'nsolid-plugin'
 }
 
-function treeDigest (target: string): string | undefined {
-  return nativePayloadTreeDigest(target)
+async function treeDigest (target: string): Promise<string | undefined> {
+  // Run the lstat-first guard before the legacy digestibility check so a
+  // symlink at the tree root is rejected without traversing its referent.
+  const digest = await ownedTreeDigest(target)
+  if (digest === null || nativePayloadTreeDigest(target) === undefined) return undefined
+  return digest
 }
 
 async function restore (
@@ -317,7 +321,7 @@ async function restore (
     // matching itself.
     if (snapshot.root.existed) {
       if (snapshot.root.originalDigest === undefined || !existsSync(snapshot.root.backup)) return false
-      if (treeDigest(snapshot.root.backup) !== snapshot.root.originalDigest) return false
+      if (await treeDigest(snapshot.root.backup) !== snapshot.root.originalDigest) return false
     }
     if (snapshot.manifest.existed) {
       if (snapshot.manifest.originalDigest === undefined || !existsSync(snapshot.manifest.backup)) return false
@@ -328,7 +332,7 @@ async function restore (
     // Only restore while the live bytes are still exactly the state this
     // transaction produced (or its original state). Concurrent drift is never
     // overwritten.
-    const currentRootDigest = existsSync(snapshot.root.target) ? treeDigest(snapshot.root.target) : null
+    const currentRootDigest = existsSync(snapshot.root.target) ? await treeDigest(snapshot.root.target) : null
     const expectedRoot = authorized.rootDigest !== undefined ? authorized.rootDigest : rootOriginalDigest
     if (currentRootDigest !== expectedRoot) return false
     const currentManifestDigest = existsSync(snapshot.manifest.target) ? sha256Hex(readFileSync(snapshot.manifest.target)) : null
@@ -345,7 +349,7 @@ async function restore (
     const rootRestored = snapshot.root.existed ? existsSync(snapshot.root.target) : !existsSync(snapshot.root.target)
     const manifestRestored = snapshot.manifest.existed ? existsSync(snapshot.manifest.target) : !existsSync(snapshot.manifest.target)
     if (!rootRestored || !manifestRestored) return false
-    if (snapshot.root.existed && treeDigest(snapshot.root.target) !== rootOriginalDigest) return false
+    if (snapshot.root.existed && await treeDigest(snapshot.root.target) !== rootOriginalDigest) return false
     if (snapshot.manifest.existed && sha256Hex(readFileSync(snapshot.manifest.target)) !== manifestOriginalDigest) return false
     return snapshot.root.existed && snapshot.manifest.existed ? validateStagedPlugin(snapshot.root.target, snapshot.manifest.target) : true
   } catch {

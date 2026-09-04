@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { CommandResult, CommandRunner, CommandSpec, ResolvedArtifactIdentity } from '../../../src/update/types.js'
 import { executeClaudeTransaction, foreignRegistrationDigest, installedClaudePayloadRoot, restoreClaudeNativeState } from '../../../src/update/claude-transaction.js'
-import type { OwnedPathKind } from '../../../src/update/fs-transaction.js'
+import type { OwnedPathKind } from '../../../src/update/owned-fs.js'
 import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 
 // Windows chmod only toggles the read-only bit: a writable file reports mode
@@ -72,6 +72,40 @@ function makeArtifact (fixture: Fixture): ResolvedArtifactIdentity {
 }
 
 describe('Claude native replacement transaction', () => {
+  it('fails before mutation when the installed payload contains a nested symlink', async (t) => {
+    const fixture = setupInstallation()
+    try {
+      const external = path.join(fixture.home, 'external.txt')
+      writeFileSync(external, 'outside')
+      try {
+        symlinkSync(external, path.join(fixture.payloadRoot, 'skills', 'example', 'redirect.txt'))
+      } catch (error) {
+        if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') {
+          t.skip('file symlink creation requires Windows developer mode or elevation')
+          return
+        }
+        throw error
+      }
+      const runnerStub = runner(() => okResult)
+
+      const result = await executeClaudeTransaction({
+        commands: [{ executable: 'claude', args: ['plugin', 'update'], timeoutMs: 1_000 }],
+        registrationPaths: [fixture.registryPath, fixture.marketplacesPath],
+        configPath: fixture.registryPath,
+        pluginId: 'nsolid-plugin@nodesource',
+        scope: 'user',
+      }, runnerStub)
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(result.error?.code, 'CLAUDE_BACKUP_FAILED')
+      assert.deepEqual(runnerStub.commands, [], 'no mutation may run for a redirected payload tree')
+      assert.equal(readFileSync(external, 'utf8'), 'outside')
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
   it('restores registration records and payload bytes when a command fails', async () => {
     const fixture = setupInstallation()
     try {

@@ -7,7 +7,7 @@ import type { CommandRunner, CommandSpec, ResolvedArtifactIdentity, UpdateError 
 import { isCommandSuccessful } from './command-runner.js'
 import { readClaudePluginScope } from './claude-record.js'
 import { nativePayloadDigest } from './native-evidence.js'
-import { copyOwnedPath, createSiblingBackupPath, ownedPathKind, removeOwnedPath, type OwnedPathKind, type SiblingBackupPath } from './fs-transaction.js'
+import { copyOwnedPath, createSiblingBackupPath, ownedFileDigest, ownedPathKind, ownedTreeDigest, removeOwnedPath, type OwnedPathKind, type SiblingBackupPath } from './owned-fs.js'
 
 export interface ClaudeTransactionSpec {
   commands: readonly CommandSpec[]
@@ -130,12 +130,12 @@ export async function executeClaudeTransaction (
       payload.kind = await ownedPathKind(previousRoot)
       if (payload.kind !== 'missing') {
         payload.backupStorage = await createSiblingBackupPath(previousRoot, 'payload-backup')
-        payload.originalDigest = stateDigest(previousRoot)
+        payload.originalDigest = await stateDigest(previousRoot)
         await copyOwned(previousRoot, payload.backupStorage.path)
         // Completeness evidence: only a backup with the same path kind and an
         // identical digest may ever be restored.
         const backupKind = await ownedPathKind(payload.backupStorage.path)
-        const backupDigest = stateDigest(payload.backupStorage.path)
+        const backupDigest = await stateDigest(payload.backupStorage.path)
         if (backupKind !== payload.kind || !backupDigest || backupDigest !== payload.originalDigest) {
           throw new Error('backup completeness verification failed')
         }
@@ -206,8 +206,8 @@ export async function executeClaudeTransaction (
     }
 
     payload.postRoot = installedClaudePayloadRoot(spec.configPath, spec.pluginId, spec.scope, spec.expectedVersion)
-    payload.postDigest = payload.postRoot ? stateDigest(payload.postRoot) : null
-    for (const entry of registration) entry.postDigest = existsSync(entry.path) ? stateDigest(entry.path) : null
+    payload.postDigest = payload.postRoot ? await stateDigest(payload.postRoot) : null
+    for (const entry of registration) entry.postDigest = existsSync(entry.path) ? await stateDigest(entry.path) : null
 
     for (const entry of registration) {
       const current = existsSync(entry.path) ? readFileSync(entry.path) : undefined
@@ -220,7 +220,7 @@ export async function executeClaudeTransaction (
     }
 
     if (spec.artifact && (spec.artifact.kind === 'git' || spec.artifact.kind === 'local-snapshot')) {
-      if (!payload.postRoot || !payload.postDigest || payload.postDigest !== spec.artifact.contentDigest) {
+      if (!payload.postRoot || !payload.postDigest || nativePayloadDigest(payload.postRoot) !== spec.artifact.contentDigest) {
         return await fail(spec, payload, registration, recoveryRoot, { success: false, rollbackAttempted: true }, {
           code: 'CLAUDE_CONTENT_MISMATCH',
           message: 'Claude installed payload did not match the planned source identity',
@@ -254,9 +254,9 @@ async function fail (
   // Anchor the authorized post-mutation state to whatever this transaction
   // actually left behind when capture did not run (command failures).
   if (payload.postRoot === undefined) payload.postRoot = installedClaudePayloadRoot(transactionSpec.configPath, transactionSpec.pluginId, transactionSpec.scope)
-  if (payload.postDigest === undefined && payload.postRoot) payload.postDigest = stateDigest(payload.postRoot) ?? null
+  if (payload.postDigest === undefined && payload.postRoot) payload.postDigest = await stateDigest(payload.postRoot) ?? null
   for (const entry of registration) {
-    if (entry.postDigest === undefined) entry.postDigest = existsSync(entry.path) ? stateDigest(entry.path) : null
+    if (entry.postDigest === undefined) entry.postDigest = existsSync(entry.path) ? await stateDigest(entry.path) : null
   }
   const rollback = dependencies.restoreState
     ? await dependencies.restoreState(payload, registration)
@@ -307,7 +307,7 @@ async function restore (payload: PayloadSnapshot, registration: readonly Registr
     let payloadOriginalDigest: string | null = null
     if (payload.kind && payload.kind !== 'missing' && payload.backupStorage) {
       const backupKind = await ownedPathKind(payload.backupStorage.path)
-      const backupDigest = stateDigest(payload.backupStorage.path) ?? null
+      const backupDigest = await stateDigest(payload.backupStorage.path) ?? null
       payloadOriginalDigest = payload.originalDigest ?? backupDigest
       if (backupKind !== payload.kind || backupDigest !== payloadOriginalDigest) return false
     }
@@ -316,18 +316,18 @@ async function restore (payload: PayloadSnapshot, registration: readonly Registr
     // must never be overwritten.
     for (const entry of registration) {
       if (entry.postDigest === undefined) return false
-      const current = existsSync(entry.path) ? stateDigest(entry.path) : null
+      const current = existsSync(entry.path) ? await stateDigest(entry.path) : null
       if (current !== entry.postDigest) return false
     }
     if (payload.postRoot !== undefined) {
-      const current = existsSync(payload.postRoot) ? stateDigest(payload.postRoot) : null
+      const current = existsSync(payload.postRoot) ? await stateDigest(payload.postRoot) : null
       if (current !== payload.postDigest) return false
     } else if (payload.root) {
       // The failed update removed the plugin registration, so no post-update
       // root remains resolvable. The only authorized states for the original
       // payload location are the original bytes or their absence.
       const original = payloadOriginalDigest
-      const current = existsSync(payload.root) ? stateDigest(payload.root) : null
+      const current = existsSync(payload.root) ? await stateDigest(payload.root) : null
       if (current !== original && current !== null) return false
     }
     // Restore the payload first so the restored registration never points at
@@ -370,11 +370,11 @@ async function restore (payload: PayloadSnapshot, registration: readonly Registr
       if (!privateModeOk) return false
     }
     for (const entry of registration) {
-      const restored = existsSync(entry.path) ? stateDigest(entry.path) : null
+      const restored = existsSync(entry.path) ? await stateDigest(entry.path) : null
       if (restored !== (entry.existed ? entry.digest ?? null : null)) return false
     }
     if (payload.root) {
-      const restored = existsSync(payload.root) ? stateDigest(payload.root) : null
+      const restored = existsSync(payload.root) ? await stateDigest(payload.root) : null
       if (restored !== payloadOriginalDigest) return false
     }
     return true
@@ -455,13 +455,19 @@ function isOwnedClaudeRecord (value: unknown, ownedIds: ReadonlySet<string>): bo
   return ['id', 'name', 'plugin', 'pluginId', 'marketplace'].some((key) => typeof record[key] === 'string' && ownedIds.has(record[key] as string))
 }
 
-/** Canonical digest of a registration file or payload directory tree. */
-function stateDigest (target: string): string | undefined {
+/** Canonical lstat-first digest of a registration file or payload directory tree. */
+async function stateDigest (target: string): Promise<string | undefined> {
   try {
-    if (statSync(target).isFile()) {
-      return createHash('sha256').update(readFileSync(target)).digest('hex')
+    const kind = await ownedPathKind(target)
+    if (kind === 'file') return await ownedFileDigest(target) ?? undefined
+    if (kind === 'directory') {
+      // Preserve the existing undefined convention for empty/undigestible
+      // payloads while using the shared lstat-first digest for transaction
+      // state identity.
+      if (nativePayloadDigest(target) === undefined) return undefined
+      return await ownedTreeDigest(target) ?? undefined
     }
-    return nativePayloadDigest(target)
+    return undefined
   } catch {
     return undefined
   }

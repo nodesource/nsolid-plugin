@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, readlinkSync, readdirSync } from 'node:fs'
+import { lstatSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 
@@ -88,6 +88,7 @@ export function sha256Hex (value: Buffer): string {
 function captureTreePayload (root: string): Map<string, PayloadEntry> | undefined {
   try {
     const resolvedRoot = path.resolve(root)
+    if (lstatSync(resolvedRoot).isSymbolicLink()) throw new Error('symlink at payload root')
     const entries = new Map<string, PayloadEntry>()
     let totalBytes = 0
     const walk = (directory: string, relativeRoot: string): void => {
@@ -110,7 +111,7 @@ function captureTreePayload (root: string): Map<string, PayloadEntry> | undefine
           totalBytes += content.length
           entries.set(relative, { kind: 'file', content })
         } else if (stat.isSymbolicLink()) {
-          entries.set(relative, { kind: 'symlink', target: readlinkSync(absolute) })
+          throw new Error('symlink in payload tree')
         } else {
           throw new Error('unsupported payload entry')
         }
@@ -126,8 +127,8 @@ function captureTreePayload (root: string): Map<string, PayloadEntry> | undefine
 
 /**
  * Digest an installed payload tree. Strict by default; under a profile only
- * proven harness-written root regular files are normalized, so symlinks,
- * directories, and nested paths at reserved names stay significant.
+ * proven harness-written root regular files are normalized. Any symlink in
+ * the installed tree fails closed instead of contributing redirected bytes.
  */
 export function nativePayloadTreeDigest (root: string, options: PayloadDigestOptions = {}): string | undefined {
   const entries = captureTreePayload(root)

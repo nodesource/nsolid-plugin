@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { executeAntigravityTransaction, preservesUnrelatedManifestBytes, validateStagedPlugin } from '../../../src/update/antigravity-transaction.js'
@@ -200,6 +200,43 @@ describe('Antigravity staged plugin validation', () => {
       const manifest = readdirSync(configDir).filter((name) => name.includes('.nsolid-manifest-backup-'))
       return { root, manifest }
     }
+
+    it('fails before mutation when the installed plugin contains a nested symlink', async (t) => {
+      const fixture = setupInstalledFixture()
+      try {
+        const external = path.join(fixture.home, 'external.txt')
+        writeFileSync(external, 'outside')
+        try {
+          symlinkSync(external, path.join(fixture.pluginRoot, 'skills', 'example', 'redirect.txt'))
+        } catch (error) {
+          if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') {
+            t.skip('file symlink creation requires Windows developer mode or elevation')
+            return
+          }
+          throw error
+        }
+        let commands = 0
+        const item = {
+          ...agyItem(),
+          steps: [{ kind: 'command' as const, description: 'agy sync', command: { executable: 'agy', args: ['sync'], timeoutMs: 1_000 } }],
+        }
+
+        const result = await executeAntigravityTransaction(item, {
+          run: async () => {
+            commands++
+            return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          },
+        })
+
+        assert.equal(result.success, false)
+        assert.equal(result.rollbackAttempted, false)
+        assert.equal(result.error?.code, 'ANTIGRAVITY_BACKUP_FAILED')
+        assert.equal(commands, 0, 'no mutation may run for a redirected plugin tree')
+        assert.equal(readFileSync(external, 'utf8'), 'outside')
+      } finally {
+        restoreHome(fixture)
+      }
+    })
 
     it('preserves both sibling backups when the guarded restore fails', async () => {
       const fixture = setupInstalledFixture()

@@ -4,10 +4,10 @@ import path from 'node:path'
 import type { CommandRunner, UpdateError, UpdatePlanItem } from './types.js'
 import { resolveHome } from '../utils/path.js'
 import { compareVersions, isStableVersion } from './version.js'
-import { copyOwnedPath, createSiblingBackupPath, ownedPathKind, removeOwnedPath } from './fs-transaction.js'
-import type { SiblingBackupPath } from './fs-transaction.js'
+import { assertNoSymlinksInTree, copyOwnedPath, createSiblingBackupPath, ownedFileDigest, ownedPathKind, ownedTreeDigest, removeOwnedPath, writeOwnedFile } from './owned-fs.js'
+import type { SiblingBackupPath } from './owned-fs.js'
 import { nativePayloadDigest } from './native-evidence.js'
-import { isPayloadNormalizationProfile, nativePayloadTreeDigest, sha256Hex } from './native-payload.js'
+import { isPayloadNormalizationProfile, sha256Hex } from './native-payload.js'
 import { runTransactionCommands } from './transaction-commands.js'
 import { codexUserOwnedFieldsMatch, readCodexPlugin, restoreCodexUserOwnedFields } from './codex-config.js'
 
@@ -16,6 +16,11 @@ export interface CodexTransactionResult {
   rollbackAttempted: boolean
   rollbackSucceeded?: boolean
   error?: UpdateError
+}
+
+export interface CodexTransactionDependencies {
+  /** Synchronize immediately after rollback's authorized live state is captured. */
+  afterAuthorizedStateCaptured?: () => void | Promise<void>
 }
 
 interface CodexBackupSnapshot {
@@ -27,7 +32,8 @@ interface CodexBackupSnapshot {
 
 export async function executeCodexTransaction (
   item: UpdatePlanItem,
-  commandRunner: CommandRunner
+  commandRunner: CommandRunner,
+  dependencies: CodexTransactionDependencies = {}
 ): Promise<CodexTransactionResult> {
   const configPath = path.resolve(item.metadata?.configPath ?? item.metadata?.trackedMcpConfigPath ?? resolveHome('~/.codex/config.toml'))
   const pluginId = item.source.kind === 'codex-marketplace' ? item.source.pluginId : undefined
@@ -61,6 +67,17 @@ export async function executeCodexTransaction (
       success: false,
       rollbackAttempted: false,
       error: { code: 'CODEX_CACHE_KIND_UNSUPPORTED', message: 'Codex cache root must be a real directory, not a link or reparse point' },
+    }
+  }
+  if (cacheKind === 'directory') {
+    try {
+      await assertNoSymlinksInTree(cachePath)
+    } catch {
+      return {
+        success: false,
+        rollbackAttempted: false,
+        error: { code: 'CODEX_CACHE_KIND_UNSUPPORTED', message: 'Codex cache tree must not contain symbolic links or junctions' },
+      }
     }
   }
 
@@ -105,10 +122,13 @@ export async function executeCodexTransaction (
   // backupSnapshot falls back to a fresh live read.
   let authorizedConfigDigest: string | null | undefined
   let authorizedCacheDigest: string | null | undefined
-  const backupSnapshot = (): CodexBackupSnapshot => ({
+  const backupSnapshot = async (): Promise<CodexBackupSnapshot> => ({
     config: { target: configPath, backup: backupPath, existed: configExisted, complete: configBackupComplete, originalDigest: configOriginalDigest },
     cache: { target: cachePath, backup: cacheBackup, existed: cacheExisted, complete: cacheBackupComplete, originalDigest: cacheOriginalDigest },
-    authorized: { config: authorizedConfigDigest ?? liveConfigDigestAt(configPath), cache: authorizedCacheDigest ?? ownedTreeDigest(cachePath) },
+    authorized: {
+      config: authorizedConfigDigest !== undefined ? authorizedConfigDigest : await ownedFileDigest(configPath),
+      cache: authorizedCacheDigest !== undefined ? authorizedCacheDigest : await liveCacheDigestAt(cachePath),
+    },
   })
 
   try {
@@ -128,7 +148,7 @@ export async function executeCodexTransaction (
         // An empty, oversized, or otherwise undigestible tree has no provable
         // backup digest: fail here, before mutation, instead of entering a
         // transaction whose rollback can never be authenticated.
-        const digest = ownedTreeDigest(cacheBackup)
+        const digest = await ownedTreeDigest(cacheBackup)
         if (digest === null) throw new Error('cache backup tree could not be digested')
         cacheOriginalDigest = digest
         cacheBackupComplete = true
@@ -144,10 +164,44 @@ export async function executeCodexTransaction (
 
     mutationStarted = true
     const commandResult = await runTransactionCommands(item.steps, commandRunner)
+    // Revalidate path kinds before reading or replacing any post-command
+    // state. A command that swaps either owned root or inserts a nested cache
+    // symlink creates drift: never follow it, never remove it, and preserve
+    // both authenticated backups for manual recovery.
+    const postConfigKind = await ownedPathKind(configPath)
+    const postConfigDigest = postConfigKind === 'missing' || postConfigKind === 'file'
+      ? await ownedFileDigest(configPath)
+      : undefined
+    const postCacheKind = await ownedPathKind(cachePath)
+    let postCacheTreeSafe = postCacheKind === 'missing'
+    if (postCacheKind === 'directory') {
+      try {
+        await assertNoSymlinksInTree(cachePath)
+        postCacheTreeSafe = true
+      } catch {
+        postCacheTreeSafe = false
+      }
+    }
+    if (
+      (postConfigKind !== 'missing' && postConfigKind !== 'file') ||
+      (postCacheKind !== 'missing' && postCacheKind !== 'directory') ||
+      !postCacheTreeSafe
+    ) {
+      rollbackAttempted = mutationStarted && backupsComplete
+      rollbackSucceeded = false
+      preserveBackup = true
+      return {
+        success: false,
+        rollbackAttempted,
+        rollbackSucceeded,
+        error: { code: 'CODEX_TRANSACTION_FAILED', message: 'Codex owned paths changed kind or introduced a symbolic link during the update' },
+      }
+    }
     // Capture the exact post-command state once, before any validation or
     // rollback logic runs; only this state may be replaced during rollback.
-    authorizedConfigDigest = liveConfigDigestAt(configPath)
-    authorizedCacheDigest = ownedTreeDigest(cachePath)
+    authorizedConfigDigest = postConfigDigest!
+    authorizedCacheDigest = await ownedTreeDigest(cachePath)
+    await dependencies.afterAuthorizedStateCaptured?.()
     if (!commandResult.success) {
       const { command, result } = commandResult
       if (result.timedOut && result.treeTerminated !== true) {
@@ -166,7 +220,7 @@ export async function executeCodexTransaction (
       // never on the failed command's arguments.
       rollbackAttempted = mutationStarted && backupsComplete
       rollbackSucceeded = rollbackAttempted
-        ? await restoreFiles(backupSnapshot())
+        ? await restoreFiles(await backupSnapshot())
         : undefined
       return {
         success: false,
@@ -182,7 +236,7 @@ export async function executeCodexTransaction (
     const refreshedPlugin = pluginId ? readCodexPlugin(configPath, pluginId) : undefined
     if (pluginId && !refreshedPlugin) {
       rollbackAttempted = true
-      rollbackSucceeded = await restoreFiles(backupSnapshot())
+      rollbackSucceeded = await restoreFiles(await backupSnapshot())
       return {
         success: false,
         rollbackAttempted,
@@ -206,7 +260,7 @@ export async function executeCodexTransaction (
         : readCodexPayloadVersion(cachePath, pluginId)
       if (cachedVersion !== item.version.latest) {
         rollbackAttempted = true
-        rollbackSucceeded = await restoreFiles(backupSnapshot())
+        rollbackSucceeded = await restoreFiles(await backupSnapshot())
         return {
           success: false,
           rollbackAttempted,
@@ -228,7 +282,7 @@ export async function executeCodexTransaction (
           : undefined
         if (!selectedPayload || !expectedProfile || !expectedDigest || !digest || digest !== expectedDigest) {
           rollbackAttempted = true
-          rollbackSucceeded = await restoreFiles(backupSnapshot())
+          rollbackSucceeded = await restoreFiles(await backupSnapshot())
           return {
             success: false,
             rollbackAttempted,
@@ -246,7 +300,7 @@ export async function executeCodexTransaction (
       const restoredPlugin = readCodexPlugin(configPath, pluginId)
       if (!restoredPlugin || (originalPlugin !== undefined && !codexUserOwnedFieldsMatch(restoredPlugin, originalPlugin))) {
         rollbackAttempted = true
-        rollbackSucceeded = await restoreFiles(backupSnapshot())
+        rollbackSucceeded = await restoreFiles(await backupSnapshot())
         return {
           success: false,
           rollbackAttempted,
@@ -256,7 +310,7 @@ export async function executeCodexTransaction (
       }
       if (!restoredUserFields) {
         rollbackAttempted = true
-        rollbackSucceeded = await restoreFiles(backupSnapshot())
+        rollbackSucceeded = await restoreFiles(await backupSnapshot())
         return {
           success: false,
           rollbackAttempted,
@@ -269,7 +323,7 @@ export async function executeCodexTransaction (
     const validation = item.steps.find((step) => step.kind === 'validation')
     if (validation && (!existsSync(configPath) || (pluginId !== undefined && !readCodexPlugin(configPath, pluginId)))) {
       rollbackAttempted = true
-      rollbackSucceeded = await restoreFiles(backupSnapshot())
+      rollbackSucceeded = await restoreFiles(await backupSnapshot())
       return {
         success: false,
         rollbackAttempted,
@@ -281,7 +335,7 @@ export async function executeCodexTransaction (
   } catch {
     rollbackAttempted = mutationStarted && backupsComplete
     rollbackSucceeded = rollbackAttempted
-      ? await restoreFiles(backupSnapshot())
+      ? await restoreFiles(await backupSnapshot())
       : undefined
     return {
       success: false,
@@ -412,9 +466,12 @@ function isDirectory (filePath: string): boolean {
   try { return readdirSync(filePath).length >= 0 } catch { return false }
 }
 
-/** Digest-or-missing for either a payload tree or a plain file cache. */
-function ownedTreeDigest (target: string): string | null {
-  return nativePayloadTreeDigest(target) ?? (existsSync(target) && !isDirectory(target) ? sha256Hex(readFileSync(target)) : null)
+async function liveCacheDigestAt (target: string): Promise<string | null> {
+  try {
+    return await ownedTreeDigest(target)
+  } catch {
+    return null
+  }
 }
 
 async function restoreFiles (
@@ -427,34 +484,36 @@ async function restoreFiles (
     // mutation; a missing or tampered backup must never reach the live paths.
     const configBackupBytes = snapshot.config.existed ? await readFile(snapshot.config.backup) : undefined
     if (snapshot.config.existed && (configBackupBytes === undefined || sha256Hex(configBackupBytes) !== snapshot.config.originalDigest)) return false
-    if (snapshot.cache.existed && ownedTreeDigest(snapshot.cache.backup) !== snapshot.cache.originalDigest) return false
+    if (snapshot.cache.existed && await ownedTreeDigest(snapshot.cache.backup) !== snapshot.cache.originalDigest) return false
     // Drift gate: only replace live bytes that are exactly the post-command
-    // state this transaction produced. Concurrent edits are never overwritten.
-    if (liveConfigDigestAt(snapshot.config.target) !== snapshot.authorized.config) return false
-    if (ownedTreeDigest(snapshot.cache.target) !== snapshot.authorized.cache) return false
-    if (configBackupBytes !== undefined) await writeFile(snapshot.config.target, configBackupBytes, { mode: 0o600 })
-    else if (!snapshot.config.existed) await removeOwnedPath(snapshot.config.target)
+    // state this transaction produced. Concurrent edits and kind changes are
+    // never overwritten or removed.
+    if (await ownedFileDigest(snapshot.config.target) !== snapshot.authorized.config) return false
+    if (await ownedTreeDigest(snapshot.cache.target) !== snapshot.authorized.cache) return false
+    const authorizedConfigKind = snapshot.authorized.config === null ? 'missing' : 'file'
+    const authorizedCacheKind = snapshot.authorized.cache === null ? 'missing' : 'directory'
+    if (configBackupBytes !== undefined) {
+      await writeOwnedFile(snapshot.config.target, configBackupBytes, { mode: 0o600, expectedKind: authorizedConfigKind })
+    } else if (!snapshot.config.existed) {
+      await removeOwnedPath(snapshot.config.target, authorizedConfigKind)
+    }
     if (snapshot.cache.complete && snapshot.cache.existed) {
-      await removeOwnedPath(snapshot.cache.target)
+      await removeOwnedPath(snapshot.cache.target, authorizedCacheKind)
       await copyOwnedPath(snapshot.cache.backup, snapshot.cache.target)
     } else if (!snapshot.cache.existed) {
-      await removeOwnedPath(snapshot.cache.target)
+      await removeOwnedPath(snapshot.cache.target, authorizedCacheKind)
     }
     // Restored bytes must match the captured originals, not merely exist.
     const configRestored = snapshot.config.existed
-      ? snapshot.config.complete && existsSync(snapshot.config.backup) && existsSync(snapshot.config.target) && sha256Hex(readFileSync(snapshot.config.target)) === snapshot.config.originalDigest
-      : !existsSync(snapshot.config.target)
+      ? snapshot.config.complete && await ownedFileDigest(snapshot.config.target) === snapshot.config.originalDigest
+      : await ownedPathKind(snapshot.config.target) === 'missing'
     const cacheRestored = snapshot.cache.existed
-      ? snapshot.cache.complete && existsSync(snapshot.cache.backup) && existsSync(snapshot.cache.target) && ownedTreeDigest(snapshot.cache.target) === snapshot.cache.originalDigest
-      : !existsSync(snapshot.cache.target)
+      ? snapshot.cache.complete && await ownedTreeDigest(snapshot.cache.target) === snapshot.cache.originalDigest
+      : await ownedPathKind(snapshot.cache.target) === 'missing'
     return configRestored && cacheRestored
   } catch {
     return false
   }
-}
-
-function liveConfigDigestAt (target: string): string | null {
-  return existsSync(target) ? sha256Hex(readFileSync(target)) : null
 }
 
 export function resolveCodexPluginCachePath (

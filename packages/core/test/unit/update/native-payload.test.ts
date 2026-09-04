@@ -217,7 +217,7 @@ describe('native payload identity', () => {
     }
   })
 
-  it('keeps root .git excluded and retains symlink identity under the codex profile', () => {
+  it('keeps root .git excluded but rejects nested symlinks in an installed tree', (t) => {
     const clean = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-f4-symlink-'))
     try {
       materializePayload(clean, cleanPayloadFiles())
@@ -229,37 +229,45 @@ describe('native payload identity', () => {
       writeFileSync(path.join(clean, '.git', 'HEAD'), 'ref: refs/heads/main\n')
       assert.equal(nativePayloadTreeDigest(clean, { profile: CODEX_PROFILE }), baseline)
 
-      // Symlink identity is retained: a new symlink changes the digest, and the
-      // archive-side digest with the same symlink matches the installed side.
+      // A nested redirect makes the entire installed identity unprovable.
       rmSync(path.join(clean, '.git'), { recursive: true, force: true })
-      symlinkSync('../shared/asset.bin', path.join(clean, 'skills/example/asset.bin'))
-      const withSymlink = nativePayloadTreeDigest(clean, { profile: CODEX_PROFILE })
-      assert.ok(withSymlink)
-      assert.notEqual(withSymlink, baseline)
-
-      const files = cleanPayloadFiles()
-      files.set('skills/example/asset.bin', Buffer.from('../shared/asset.bin'))
-      const archive = gzipSync(makeTarWithSymlink(cleanPayloadFiles(), 'skills/example/asset.bin', '../shared/asset.bin'))
-      assert.equal(gitArchivePayloadDigest(archive, {}, { profile: CODEX_PROFILE }), withSymlink)
+      try {
+        symlinkSync('../shared/asset.bin', path.join(clean, 'skills/example/asset.bin'))
+      } catch (error) {
+        if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') {
+          t.skip('file symlink creation requires Windows developer mode or elevation')
+          return
+        }
+        throw error
+      }
+      assert.equal(nativePayloadTreeDigest(clean), undefined)
+      assert.equal(nativePayloadTreeDigest(clean, { profile: CODEX_PROFILE }), undefined)
+      assert.deepEqual(plannedPayloadIdentityFromTree(clean, CODEX_PROFILE), {})
     } finally {
       rmSync(clean, { recursive: true, force: true })
     }
   })
 
-  it('normalizes Windows symlink target separators without collapsing device-prefixed forms', { skip: process.platform !== 'win32' }, () => {
-    const digestWithTarget = (target: string): string | undefined => {
-      const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-win-target-'))
-      try {
-        materializePayload(root, cleanPayloadFiles())
-        // Explicit 'file' type: an omitted type makes symlinkSync stat the
-        // target to guess file-vs-dir, and a UNC target stat surfaces as
-        // UNKNOWN instead of the tolerated ENOENT on Windows.
-        symlinkSync(target, path.join(root, 'skills', 'example', 'asset.bin'), 'file')
-        return nativePayloadTreeDigest(root)
-      } finally {
-        rmSync(root, { recursive: true, force: true })
-      }
+  it('rejects a symlink used as the installed payload root without reading its referent', () => {
+    const fixture = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-root-symlink-'))
+    try {
+      const real = path.join(fixture, 'real')
+      mkdirSync(real)
+      materializePayload(real, cleanPayloadFiles())
+      const link = path.join(fixture, 'payload-link')
+      symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir')
+
+      assert.equal(nativePayloadTreeDigest(link), undefined)
+      assert.equal(nativePayloadTreeDigest(link, { profile: CODEX_PROFILE }), undefined)
+      assert.deepEqual(plannedPayloadIdentityFromTree(link, CODEX_PROFILE), {})
+    } finally {
+      rmSync(fixture, { recursive: true, force: true })
     }
+  })
+
+  it('normalizes Windows symlink target separators without collapsing device-prefixed forms', { skip: process.platform !== 'win32' }, () => {
+    const digestWithTarget = (target: string): string | undefined =>
+      gitArchivePayloadDigest(gzipSync(makeTarWithSymlink(cleanPayloadFiles(), 'skills/example/asset.bin', target)))
     // Forward- and backslash-separated forms resolve identically on Windows.
     assert.equal(digestWithTarget('../shared/asset.bin'), digestWithTarget('..\\shared\\asset.bin'))
     // Same for absolute UNC paths outside the device namespace.
@@ -282,28 +290,42 @@ describe('native payload identity', () => {
     }
   })
 
-  it('keeps reserved-name symlinks and directories significant on the installed side', () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-f4-reserved-kind-'))
+  it('rejects a reserved-name symlink on the installed side', (t) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-f4-reserved-link-'))
+    try {
+      materializePayload(root, cleanPayloadFiles())
+      const reserved = path.join(root, '.codex-marketplace-install.json')
+      try {
+        symlinkSync('../../shared/meta.json', reserved, 'file')
+      } catch (error) {
+        if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') {
+          t.skip('file symlink creation requires Windows developer mode or elevation')
+          return
+        }
+        throw error
+      }
+      assert.equal(nativePayloadTreeDigest(root, { profile: CODEX_PROFILE }), undefined)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps reserved-name directories significant on the installed side', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-native-f4-reserved-directory-'))
     try {
       materializePayload(root, cleanPayloadFiles())
       const baseline = nativePayloadTreeDigest(root, { profile: CODEX_PROFILE })
       assert.ok(baseline)
 
       // A root regular file at the reserved name is the only normalized entry.
-      writeFileSync(path.join(root, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
+      const reserved = path.join(root, '.codex-marketplace-install.json')
+      writeFileSync(reserved, '{"source":"marketplace"}\n')
       assert.equal(nativePayloadTreeDigest(root, { profile: CODEX_PROFILE }), baseline)
 
-      // A symlink at the reserved name stays significant.
-      rmSync(path.join(root, '.codex-marketplace-install.json'))
-      symlinkSync('../../shared/meta.json', path.join(root, '.codex-marketplace-install.json'))
-      const withSymlink = nativePayloadTreeDigest(root, { profile: CODEX_PROFILE })
-      assert.ok(withSymlink)
-      assert.notEqual(withSymlink, baseline)
-
       // A directory at the reserved name stays significant.
-      rmSync(path.join(root, '.codex-marketplace-install.json'))
-      mkdirSync(path.join(root, '.codex-marketplace-install.json'))
-      writeFileSync(path.join(root, '.codex-marketplace-install.json', 'nested.txt'), 'payload-ish\n')
+      rmSync(reserved)
+      mkdirSync(reserved)
+      writeFileSync(path.join(reserved, 'nested.txt'), 'payload-ish\n')
       const withDirectory = nativePayloadTreeDigest(root, { profile: CODEX_PROFILE })
       assert.ok(withDirectory)
       assert.notEqual(withDirectory, baseline)

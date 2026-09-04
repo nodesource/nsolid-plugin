@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, it } from 'node:test'
+import { afterEach, beforeEach, describe, it, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { writeTomlFileSync } from '../../../src/utils/config.js'
@@ -29,6 +29,19 @@ afterEach(() => {
   if (previousUserProfile === undefined) delete process.env.USERPROFILE
   else process.env.USERPROFILE = previousUserProfile
 })
+
+function makeFileLink (t: TestContext, target: string, link: string): boolean {
+  try {
+    symlinkSync(target, link, 'file')
+    return true
+  } catch (error) {
+    if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') {
+      t.skip('file symlink creation requires Windows developer mode or elevation')
+      return false
+    }
+    throw error
+  }
+}
 
 function item (cachePath?: string): UpdatePlanItem {
   return {
@@ -100,6 +113,76 @@ describe('Codex update transaction', () => {
       assert.equal(result.error?.code, 'CODEX_CACHE_KIND_UNSUPPORTED')
       assert.equal(result.rollbackAttempted, false)
       assert.match(readFileSync(path.join(external, 'bundle.json'), 'utf8'), /1\.0\.0/)
+    } finally {
+      rmSync(external, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves backups and refuses rollback when the config becomes a symlink', async (t) => {
+    const external = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-external-config-'))
+    const victim = path.join(external, 'victim.toml')
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    const configPath = path.join(home, '.codex', 'config.toml')
+    mkdirSync(cachePath, { recursive: true })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    writeTomlFileSync(configPath, { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    writeFileSync(victim, 'FOREIGN CONFIG\n')
+    try {
+      let linkCreated = true
+      const result = await executeCodexTransaction(item(cachePath), {
+        run: async () => {
+          rmSync(configPath, { force: true })
+          linkCreated = makeFileLink(t, victim, configPath)
+          return { exitCode: 1, stdout: '', stderr: 'failed', timedOut: false, treeTerminated: true }
+        },
+      })
+      if (!linkCreated) return
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_TRANSACTION_FAILED')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, false)
+      assert.equal(readFileSync(victim, 'utf8'), 'FOREIGN CONFIG\n')
+      assert.equal(lstatSync(configPath).isSymbolicLink(), true, 'the drifted path must not be removed')
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
+      assert.equal(readdirSync(path.dirname(configPath)).filter((name) => name.includes('.nsolid-config-backup-')).length, 1)
+      assert.equal(readdirSync(path.dirname(cachePath)).filter((name) => name.includes('.nsolid-cache-backup-')).length, 1)
+    } finally {
+      rmSync(external, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a nested cache symlink before backup or mutation', async () => {
+    const external = mkdtempSync(path.join(os.tmpdir(), 'nsolid-codex-external-payload-'))
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    const configPath = path.join(home, '.codex', 'config.toml')
+    const link = path.join(cachePath, 'registered')
+    mkdirSync(cachePath, { recursive: true })
+    writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+    writeFileSync(path.join(external, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+    symlinkSync(external, link, process.platform === 'win32' ? 'junction' : 'dir')
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    writeTomlFileSync(configPath, { plugins: { 'nsolid-plugin@nodesource': { enabled: true, installPath: 'nsolid-plugin/registered' } } })
+    let commands = 0
+    try {
+      const result = await executeCodexTransaction(item(cachePath), {
+        run: async () => {
+          commands++
+          writeFileSync(path.join(external, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '9.9.9', skills: [] }))
+          return { exitCode: 1, stdout: '', stderr: 'failed', timedOut: false, treeTerminated: true }
+        },
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CODEX_CACHE_KIND_UNSUPPORTED')
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(result.rollbackSucceeded, undefined)
+      assert.equal(commands, 0)
+      assert.match(readFileSync(path.join(external, 'bundle.json'), 'utf8'), /1\.0\.0/)
+      assert.equal(lstatSync(link).isSymbolicLink(), true)
+      assert.equal(readdirSync(path.dirname(configPath)).filter((name) => name.includes('.nsolid-config-backup-')).length, 0)
+      assert.equal(readdirSync(path.dirname(cachePath)).filter((name) => name.includes('.nsolid-cache-backup-')).length, 0)
     } finally {
       rmSync(external, { recursive: true, force: true })
     }
@@ -346,7 +429,7 @@ describe('Codex update transaction', () => {
     }
   })
 
-  it('rejects a symlink installed at the reserved harness metadata path and rolls back', async () => {
+  it('rejects a symlink installed at the reserved harness metadata path and rolls back', async (t) => {
     const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
     mkdirSync(cachePath, { recursive: true })
     mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
@@ -360,25 +443,29 @@ describe('Codex update transaction', () => {
       candidate.version = { ...candidate.version, latest: '1.0.2' }
       candidate.artifact = comparisonArtifact(plannedRoot)
 
+      let linkCreated = true
       const result = await executeCodexTransaction(candidate, {
         run: async (command) => {
           if (command.args.includes('add')) {
             writeInstalledPayload(cachePath)
             // A crafted symlink must not hide behind the normalization profile.
-            symlinkSync('../../shared/meta.json', path.join(cachePath, '.codex-marketplace-install.json'))
+            linkCreated = makeFileLink(t, '../../shared/meta.json', path.join(cachePath, '.codex-marketplace-install.json'))
           }
           return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
         },
       })
+      if (!linkCreated) return
 
       assert.equal(result.success, false)
-      assert.equal(result.error?.code, 'CODEX_CONTENT_MISMATCH')
+      assert.equal(result.error?.code, 'CODEX_TRANSACTION_FAILED')
       assert.equal(result.rollbackAttempted, true)
-      assert.equal(result.rollbackSucceeded, true)
-      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.0/)
-      // A dangling symlink would make existsSync report false even without
-      // rollback; verify the crafted entry is truly gone from the tree.
-      assert.equal(readdirSync(cachePath).includes('.codex-marketplace-install.json'), false)
+      assert.equal(result.rollbackSucceeded, false)
+      assert.match(readFileSync(path.join(cachePath, 'bundle.json'), 'utf8'), /1\.0\.2/)
+      // Post-command kind drift is never removed. The crafted symlink and both
+      // authenticated backups remain available for manual recovery.
+      assert.equal(lstatSync(path.join(cachePath, '.codex-marketplace-install.json')).isSymbolicLink(), true)
+      assert.equal(readdirSync(path.dirname(path.join(home, '.codex', 'config.toml'))).filter((name) => name.includes('.nsolid-config-backup-')).length, 1)
+      assert.equal(readdirSync(path.dirname(cachePath)).filter((name) => name.includes('.nsolid-cache-backup-')).length, 1)
     } finally {
       rmSync(plannedRoot, { recursive: true, force: true })
     }
@@ -732,31 +819,29 @@ describe('Codex update transaction', () => {
     assert.equal(existsSync(path.join(home, '.codex')), false)
   })
 
-  it('fails closed before mutation when the existing cache has no digestible tree', async () => {
-    // An empty existing cache directory cannot produce an authenticated
-    // backup digest, so rollback could never be proven: the transaction must
-    // abort in the backup phase, before any command runs.
+  it('authenticates and restores an originally empty cache', async () => {
     const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
     mkdirSync(cachePath, { recursive: true })
     const configPath = path.join(home, '.codex', 'config.toml')
     mkdirSync(path.dirname(configPath), { recursive: true })
     writeTomlFileSync(configPath, { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
-    const originalConfig = readFileSync(configPath, 'utf8')
+    const candidate = item(cachePath)
+    candidate.steps = [
+      { kind: 'command', description: 'upgrade', command: { executable: 'codex', args: ['plugin', 'update'], timeoutMs: 1000 } },
+    ]
 
-    let commands = 0
-    const result = await executeCodexTransaction(item(cachePath), {
+    const result = await executeCodexTransaction(candidate, {
       run: async () => {
-        commands++
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        writeFileSync(path.join(cachePath, 'partial.txt'), 'partial')
+        return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
       },
     })
 
     assert.equal(result.success, false)
-    assert.equal(result.error?.code, 'CODEX_BACKUP_FAILED')
-    assert.equal(result.rollbackAttempted, false)
-    assert.equal(commands, 0, 'no mutation may run without a provable backup digest')
-    assert.equal(readFileSync(configPath, 'utf8'), originalConfig)
-    // The incomplete backup containers were cleaned up.
+    assert.equal(result.error?.code, 'CODEX_COMMAND_FAILED')
+    assert.equal(result.rollbackAttempted, true)
+    assert.equal(result.rollbackSucceeded, true)
+    assert.deepEqual(readdirSync(cachePath), [])
     assert.equal(readdirSync(path.dirname(configPath)).filter((name) => name.includes('.nsolid-config-backup-')).length, 0)
     assert.equal(readdirSync(path.dirname(cachePath)).filter((name) => name.includes('.nsolid-cache-backup-')).length, 0)
   })
@@ -860,21 +945,26 @@ describe('Codex update transaction', () => {
       assert.equal(backupContainers(path.dirname(fixture.configPath), fixture.configMarker).length, 1)
     })
 
-    it('refuses to overwrite a concurrently edited live config after command failure', async () => {
+    it('refuses to overwrite a concurrently recreated config after the command removed it', async () => {
       const fixture = setupFixture()
       const drifted = `${fixture.originalConfig}# concurrent user edit\n`
+      let stateCaptureHooks = 0
       const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
-        // The concurrent edit must land after the transaction captures the
-        // post-command state but before the restore reads the live bytes, so
-        // it is queued two microtask ticks behind the failure resolution.
-        run: () => new Promise((resolve) => {
-          queueMicrotask(() => {
-            resolve({ exitCode: 1, stdout: '', stderr: '', timedOut: false })
-            queueMicrotask(() => queueMicrotask(() => writeFileSync(fixture.configPath, drifted)))
-          })
-        }),
+        run: async () => {
+          rmSync(fixture.configPath)
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        },
+      }, {
+        // Recreate the file only after the transaction has authorized the
+        // missing state. The awaited seam makes this drift deterministic and
+        // proves explicit null never falls back to a fresh digest.
+        afterAuthorizedStateCaptured: async () => {
+          stateCaptureHooks++
+          writeFileSync(fixture.configPath, drifted)
+        },
       })
 
+      assert.equal(stateCaptureHooks, 1)
       assert.equal(result.success, false)
       assert.equal(result.rollbackAttempted, true)
       assert.equal(result.rollbackSucceeded, false)
