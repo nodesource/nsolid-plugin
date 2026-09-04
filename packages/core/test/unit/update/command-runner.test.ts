@@ -78,6 +78,43 @@ describe('update command runner', () => {
     }
   })
 
+  it('refuses to confirm termination when a token-stripped detached grandchild survives', { skip: process.platform === 'win32' }, async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-escaped-grandchild-'))
+    const pidFile = path.join(root, 'escaped.pid')
+    // The intermediate exits immediately after spawning, so by the time the
+    // command times out the grandchild has been reparented to the nearest
+    // ancestor subreaper: it is invisible to the process group, PPID ancestry,
+    // session, and token enumeration. Its environment is rebuilt without
+    // NSOLID_COMMAND_TREE_TOKEN, so nothing identifies it as part of the
+    // command tree, termination cannot be proven, and the runner must fail
+    // closed instead of claiming a terminated tree.
+    const grandchildCode = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},10000)`
+    const intermediateCode = `const {spawn}=require('node:child_process');const env={...process.env};delete env.NSOLID_COMMAND_TREE_TOKEN;spawn(process.execPath,['-e',${JSON.stringify(grandchildCode)}],{detached:true,stdio:'ignore',env}).unref()`
+    const parentCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(intermediateCode)}],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},10000)`
+    let escapedPid: number | undefined
+    try {
+      const result = await runCommand({ executable: process.execPath, args: ['-e', parentCode], timeoutMs: 300 })
+      // The grandchild is deliberately left alive. Read its pid (waiting out a
+      // slow boot so cleanup cannot leak it) and prove the escape happened.
+      const deadline = Date.now() + 1_500
+      while (escapedPid === undefined && Date.now() < deadline) {
+        escapedPid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : undefined
+        if (escapedPid === undefined) await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      assert.ok(escapedPid !== undefined, 'the escaped grandchild never announced its pid')
+      const survivedPid = escapedPid
+
+      assert.equal(result.timedOut, true)
+      assert.equal(result.treeTerminated, false)
+      assert.doesNotThrow(() => process.kill(survivedPid, 0))
+    } finally {
+      if (escapedPid !== undefined) {
+        try { process.kill(escapedPid, 'SIGKILL') } catch { /* already gone */ }
+      }
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('derives a verified npm Windows shim through mixed-case Path and PATHEXT', { skip: process.platform !== 'win32' }, () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-shim-'))
     const entrypoint = path.join(root, 'node_modules', 'npm', 'bin', 'npm-cli.js')

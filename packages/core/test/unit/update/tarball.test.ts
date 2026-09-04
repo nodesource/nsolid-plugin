@@ -4,7 +4,7 @@ import path from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readTarEntryText } from '../../../src/update/tarball.js'
+import { readTarEntryText, readTarEntryTextFromBytes } from '../../../src/update/tarball.js'
 
 /** Minimal ustar builder: one header (512 bytes) plus body padded to 512. */
 function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
@@ -141,5 +141,31 @@ describe('in-process tar entry reader', () => {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
     }
+  })
+
+  it('extracts entries from in-memory bytes for gzip and plain archives', () => {
+    const bundle = Buffer.from('{"bytes":true}')
+    const tar = Buffer.concat([tarEntry('package/bundle.json', bundle, '0'), Buffer.alloc(1024)])
+    assert.equal(readTarEntryTextFromBytes(gzipSync(tar), 'package/bundle.json'), bundle.toString('utf8'))
+    assert.equal(readTarEntryTextFromBytes(tar, 'package/bundle.json'), bundle.toString('utf8'))
+    // Same limits as the path-based reader: identical limits, no filesystem.
+    const missing = Buffer.concat([tarEntry('package/other.json', Buffer.from('{}'), '0'), Buffer.alloc(1024)])
+    assert.equal(readTarEntryTextFromBytes(gzipSync(missing), 'package/bundle.json'), undefined)
+    assert.equal(readTarEntryTextFromBytes(Buffer.alloc(0), 'package/bundle.json'), undefined)
+    assert.equal(readTarEntryTextFromBytes(Buffer.from('this is definitely not a tar archive, not even close'), 'package/bundle.json'), undefined)
+    const oversized = Buffer.alloc(2 << 20, 0x61)
+    assert.equal(
+      readTarEntryTextFromBytes(Buffer.concat([tarEntry('package/bundle.json', oversized, '0'), Buffer.alloc(1024)]), 'package/bundle.json'),
+      undefined
+    )
+  })
+
+  it('refuses a decompression bomb supplied as raw bytes', () => {
+    // The in-memory reader keeps the same decompression bound: a hostile
+    // artifact must not expand past MAX_TARBALL_BYTES even when the caller
+    // already holds the compressed bytes in memory.
+    const bomb = gzipSync(Buffer.concat([tarEntry('package/bundle.json', Buffer.from('{}'), '0'), Buffer.alloc(70 * 1024 * 1024)]))
+    assert.ok(bomb.length < 1024 * 1024, 'fixture must stay small')
+    assert.equal(readTarEntryTextFromBytes(bomb, 'package/bundle.json'), undefined)
   })
 })

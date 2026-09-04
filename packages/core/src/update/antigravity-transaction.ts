@@ -214,8 +214,10 @@ export function validateStagedPlugin (pluginRoot: string, manifestPath: string, 
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { imports?: unknown }
     if (Array.isArray(manifest.imports)) return manifest.imports.some((entry) => isPluginImport(entry))
     if (manifest.imports && typeof manifest.imports === 'object') {
-      return Object.entries(manifest.imports as Record<string, unknown>).some(([key, value]) =>
-        key === 'nsolid-plugin' || isPluginImport(value))
+      // The key alone never proves ownership: `{ 'nsolid-plugin': true }` is
+      // rejected even under the canonical key. The value itself must declare
+      // the plugin identity, exactly like the array form.
+      return Object.entries(manifest.imports as Record<string, unknown>).some(([, value]) => isPluginImport(value))
     }
     return false
   } catch {
@@ -283,6 +285,9 @@ function locateOwnImportRanges (text: string): ByteRange[] {
       const valueNode: Node | undefined = property.children?.[1]
       if (!keyNode || !valueNode) continue
       const key = getNodeValue(keyNode)
+      // Unlike validateStagedPlugin, edit ownership deliberately matches the
+      // canonical key alone: a malformed entry must stay removable during
+      // rollback even when its value proves no identity.
       if (key === 'nsolid-plugin' || isPluginImport(getNodeValue(valueNode))) {
         ranges.push({ start: property.offset, end: property.offset + property.length })
       }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
@@ -551,5 +551,111 @@ describe('unsupported CLI provenance', () => {
     assert.equal(summary.exitCode, 2)
     assert.equal(summary.success, false)
     assert.deepEqual(commands, [], 'an unsupported launcher must not invoke any package manager')
+  })
+})
+
+describe('read-only check stays off the filesystem', () => {
+  function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 'utf8')
+    const size = body ? body.length : 0
+    header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
+    header[156] = type.charCodeAt(0)
+    header.write('ustar', 257, 'ascii')
+    header.write('00', 263, 'ascii')
+    const blocks = Math.ceil(size / 512)
+    const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
+    return Buffer.concat([header, padded])
+  }
+
+  it('summarizes fallback changes in memory without requiring a writable temporary directory', { skip: process.platform === 'win32' }, async () => {
+    // A tracked opencode fallback installation with one tracked skill.
+    const destination = path.join(home, '.config', 'opencode', 'skills')
+    mkdirSync(path.join(destination, 'tracked'), { recursive: true })
+    writeFileSync(path.join(destination, 'tracked', 'SKILL.md'), 'old')
+    const trackingPath = getTrackingFilePath()
+    mkdirSync(path.dirname(trackingPath), { recursive: true })
+    writeFileSync(trackingPath, JSON.stringify({
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: 'opencode',
+      bundleVersions: { opencode: '1.0.0' },
+      skills: [{
+        name: 'tracked',
+        path: path.join(destination, 'tracked'),
+        paths: { opencode: path.join(destination, 'tracked') },
+        installedAt: new Date().toISOString(),
+        harnesses: ['opencode'],
+      }],
+      mcpServers: [],
+    }))
+
+    // A verified registry artifact whose bundle adds one skill and one MCP
+    // server; it is served over the fetch seam and never written to disk.
+    const bundle = {
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'added', path: 'skills/added', description: 'added' }],
+      mcpServers: [{ name: 'brand-new-mcp', url: 'https://example.com/mcp', headers: {} }],
+    }
+    const bundleJson = Buffer.from(JSON.stringify(bundle))
+    const tar = Buffer.concat([
+      tarEntry('package/', undefined, '5'),
+      tarEntry('package/bundle.json', bundleJson, '0'),
+      Buffer.alloc(1024),
+    ])
+    const tarballBytes = gzipSync(tar)
+    const integrity = `sha512-${createHash('sha512').update(tarballBytes).digest('base64')}`
+
+    // Route os.tmpdir() into a watched scratch directory for the duration of
+    // the check: the former implementation mkdtemp'd
+    // `nsolid-plugin-artifact-*` here on every fallback check.
+    const scratch = mkdtempSync(path.join(home, 'check-tmp-'))
+    const previousTmpdir = process.env.TMPDIR
+    const previousTemp = process.env.TEMP
+    const previousTmp = process.env.TMP
+    process.env.TMPDIR = scratch
+    process.env.TEMP = scratch
+    process.env.TMP = scratch
+    chmodSync(scratch, 0o500)
+    try {
+      const summary = await checkUpdates({
+        harness: 'opencode',
+        fetchImpl: async (url: RequestInfo | URL) => {
+          const text = String(url)
+          if (text.endsWith('/nsolid-plugin')) {
+            return new Response(JSON.stringify({
+              'dist-tags': { latest: '1.0.1' },
+              versions: {
+                '1.0.1': { version: '1.0.1', dist: { tarball: 'https://registry.example/a.tgz', integrity } },
+              },
+            }), { status: 200 })
+          }
+          if (text.endsWith('.tgz')) return new Response(new Uint8Array(tarballBytes), { status: 200 })
+          throw new Error(`unexpected fetch ${text}`)
+        },
+      })
+
+      const fallback = summary.results.find((result) => result.installationId === 'opencode:fallback')
+      assert.ok(fallback, JSON.stringify(summary.results))
+      assert.equal(fallback.status, 'update-available')
+      assert.deepEqual(fallback.changes, {
+        skillsAdded: ['added'],
+        skillsRemoved: ['tracked'],
+        skillsUpdated: 0,
+        mcpAdded: ['brand-new-mcp'],
+        mcpRemoved: [],
+        mcpUpdated: 0,
+      })
+      assert.deepEqual(readdirSync(scratch), [], 'the check path must not create any temporary artifact directory')
+    } finally {
+      chmodSync(scratch, 0o700)
+      if (previousTmpdir === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = previousTmpdir
+      if (previousTemp === undefined) delete process.env.TEMP
+      else process.env.TEMP = previousTemp
+      if (previousTmp === undefined) delete process.env.TMP
+      else process.env.TMP = previousTmp
+    }
   })
 })

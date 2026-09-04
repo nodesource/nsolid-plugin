@@ -24,17 +24,28 @@ function entrySize (header: Buffer): number {
 }
 
 /**
- * Extract one file entry from a POSIX tar archive (gzip-compressed or plain),
+ * Extract one file entry from a tarball on disk (gzip-compressed or plain),
  * entirely in-process. Reading a planned tarball must never depend on a
- * PATH-resolved binary: this replaces the former `execFile('tar', ...)`
- * summary path, which executed whatever `tar` the environment offered, with
- * no timeout and no executable identity. Any unreadable, malformed,
- * truncated, or oversized input yields undefined — callers treat the
- * extraction as best-effort.
+ * PATH-resolved binary. Any unreadable, malformed, truncated, or oversized
+ * input yields undefined — callers treat the extraction as best-effort.
  */
 export async function readTarEntryText (tarballPath: string, entryName: string): Promise<string | undefined> {
   try {
-    const raw = await readFile(tarballPath)
+    return readTarEntryTextFromBytes(await readFile(tarballPath), entryName)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Extract one file entry from in-memory tar bytes (gzip-compressed or plain).
+ * The read-only `--check` path uses this to summarize a verified artifact
+ * without ever materializing it on disk. Limits are identical to the
+ * path-based reader: any unreadable, malformed, truncated, or oversized
+ * input yields undefined — callers treat the extraction as best-effort.
+ */
+export function readTarEntryTextFromBytes (raw: Buffer, entryName: string): string | undefined {
+  try {
     if (raw.length === 0 || raw.length > MAX_TARBALL_BYTES) return undefined
     // Bound the decompressed output too: the file-size check above only
     // limits the compressed bytes, and a hostile artifact can expand far

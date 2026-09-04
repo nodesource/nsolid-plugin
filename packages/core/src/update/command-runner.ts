@@ -86,6 +86,14 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
   // can still enumerate descendants after reparenting.
   const treeToken = process.platform === 'win32' ? undefined : randomUUID()
   const spawnEnv = treeToken ? { ...env, [COMMAND_TREE_TOKEN_ENV]: treeToken } : env
+  // Pre-spawn /proc evidence for termination provability (Linux): a tokenless
+  // detached grandchild whose intermediate exits reparents to the nearest
+  // ancestor subreaper and becomes invisible to group, PPID, session, and
+  // token enumeration at termination time. Recording which process identities
+  // predate the spawn lets the termination verdict classify every post-spawn
+  // survivor against the child's ancestry instead of trusting whatever
+  // enumeration is still available at kill time.
+  const startSnapshot = process.platform === 'linux' && treeToken !== undefined ? procStartSnapshot() : undefined
 
   return await new Promise((resolve) => {
     let stdout = ''
@@ -102,6 +110,13 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    const lineage = child.pid !== undefined && startSnapshot !== undefined && treeToken !== undefined
+      ? createPosixLineage(child.pid, treeToken, startSnapshot)
+      : undefined
+    const lineageTimer = lineage !== undefined
+      ? setInterval(() => samplePosixLineage(lineage), 50)
+      : undefined
+    lineageTimer?.unref()
 
     const append = (target: 'stdout' | 'stderr', chunk: Buffer | string) => {
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
@@ -120,8 +135,10 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
       // Terminate the whole descendant tree, then confirm termination before
       // any caller proceeds to rollback.
       const pid = child.pid
+      if (lineageTimer !== undefined) clearInterval(lineageTimer)
+      if (lineage !== undefined) samplePosixLineage(lineage)
       if (pid !== undefined) {
-        timeoutTermination = terminateTree(pid, treeToken)
+        timeoutTermination = terminateTree(pid, treeToken, startSnapshot, lineage)
         timeoutTermination.then((terminated) => {
           treeTerminated = terminated
           finish(null, undefined, terminated ? undefined : 'TREE_TERMINATION_UNCONFIRMED')
@@ -136,6 +153,7 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (lineageTimer !== undefined) clearInterval(lineageTimer)
       if (spawnErrorCode === 'ENOENT') stderr += 'executable not found'
       if (errorText) stderr += errorText
       resolve({
@@ -424,8 +442,22 @@ function binValueMatches (binValue: string, inPackageRelative: string, namesEqua
  * single-process kill. On Windows uses `taskkill`'s `/T` to include children;
  * on POSIX signals the process group. Callers must only proceed to rollback
  * after this reports the tree was terminated.
+ *
+ * treeTerminated is only true when every process created after our child
+ * spawned is either proven exited or proven unrelated to the child by ancestry
+ * and start time. A surviving post-spawn process whose changed session or
+ * process group reaches one of our own ancestors (the reparenting target of an
+ * escaped grandchild) cannot be proven unrelated, so the verdict fails closed.
+ * On Linux the caller supplies the pre-spawn `/proc` identity snapshot that
+ * makes that classification possible; without it the historical enumeration
+ * semantics apply.
  */
-async function terminateTree (pid: number, treeToken?: string): Promise<boolean> {
+async function terminateTree (
+  pid: number,
+  treeToken?: string,
+  startSnapshot?: ReadonlyMap<number, number>,
+  lineage?: PosixLineage
+): Promise<boolean> {
   if (process.platform === 'win32') {
     // `taskkill /T` includes descendants. Do not report success until taskkill
     // itself exits successfully and the original pid is no longer observable.
@@ -451,17 +483,39 @@ async function terminateTree (pid: number, treeToken?: string): Promise<boolean>
     })
     return exitCode === 0 && await waitForProcessExit(pid)
   }
+  // A pre-spawn snapshot enables provable termination on Linux: every process
+  // created after the child spawned must be proven gone or proven unrelated.
+  const linuxSnapshot = process.platform === 'linux' ? startSnapshot : undefined
+  const childStarttime = linuxSnapshot !== undefined ? readProcStatFields(pid)?.starttime : undefined
+  const preSignal = linuxSnapshot !== undefined ? enumerateProcStatTable() : undefined
   // Capture the ancestry before signaling: a descendant may have called
   // setsid() and escaped the original process group while retaining its PPID.
   const tracked = await collectPosixProcessTree(pid)
   const marked = treeToken ? await processesWithTreeToken(treeToken) : undefined
   const enumerationAvailable = tracked !== undefined && marked !== undefined
   const observed = new Set([pid, ...(tracked ?? []), ...(marked ?? [])])
+  // Post-spawn candidates observed at kill time: a process that appeared after
+  // the child spawned and is still attributable to it (session, process group,
+  // tree token, or PPID ancestry) joins the observed set so it is signaled
+  // with the rest of the tree. Unattributable post-spawn processes are never
+  // signaled: killing them could hit unrelated user processes.
+  if (linuxSnapshot !== undefined && preSignal !== undefined) {
+    for (const [candidatePid, fields] of preSignal.table) {
+      if (candidatePid === pid) continue
+      if (predatesSpawn(linuxSnapshot, childStarttime, candidatePid, fields)) continue
+      const attributable = fields.session === pid || fields.pgrp === pid ||
+        (marked?.has(candidatePid) ?? false) ||
+        ppidChainWithinTableReaches(candidatePid, pid, preSignal.table)
+      if (attributable) observed.add(candidatePid)
+    }
+  }
   try {
     process.kill(-pid, 'SIGTERM')
   } catch { /* group may not exist */ }
   signalProcesses(observed, 'SIGTERM')
-  if (enumerationAvailable && treeToken && await waitForPosixTreeExit(pid, observed, treeToken, 'SIGTERM', 500)) return true
+  if (enumerationAvailable && treeToken && await waitForPosixTreeExit(pid, observed, treeToken, 'SIGTERM', 500)) {
+    return terminationVerdict(linuxSnapshot, preSignal, pid, childStarttime, lineage)
+  }
   // Refresh while parents are still observable so children created during
   // timeout handling are included before the final, non-catchable signal.
   const refreshed = await collectPosixProcessTree(pid, observed)
@@ -470,8 +524,275 @@ async function terminateTree (pid: number, treeToken?: string): Promise<boolean>
   if (refreshedMarked) for (const descendant of refreshedMarked) observed.add(descendant)
   try { process.kill(-pid, 'SIGKILL') } catch { /* group may already be gone */ }
   signalProcesses(observed, 'SIGKILL')
-  return enumerationAvailable && refreshed !== undefined && refreshedMarked !== undefined && treeToken !== undefined &&
+  const confirmed = enumerationAvailable && refreshed !== undefined && refreshedMarked !== undefined && treeToken !== undefined &&
     await waitForPosixTreeExit(pid, observed, treeToken, 'SIGKILL', 1_000)
+  if (!confirmed) return false
+  return terminationVerdict(linuxSnapshot, preSignal, pid, childStarttime, lineage)
+}
+
+/** A process predates the child when its pid+starttime existed pre-spawn or it started before the child did. */
+function predatesSpawn (startSnapshot: ReadonlyMap<number, number>, childStarttime: number | undefined, pid: number, fields: ProcStatFields): boolean {
+  if (startSnapshot.get(pid) === fields.starttime) return true
+  return childStarttime !== undefined && fields.starttime < childStarttime
+}
+
+/**
+ * Final termination verdict. Without a pre-spawn snapshot (non-Linux, or
+ * /proc unreadable at spawn time) the historical enumeration semantics apply
+ * and the observed-tree check above is the whole verdict. With one, an empty
+ * observed set is necessary but not sufficient: the verdict additionally
+ * requires that no post-spawn process survives whose relation to the child
+ * cannot be ruled out (see postSpawnSurvivorsUnrelated), and that /proc stayed
+ * reliable from before the spawn through the verdict (fail closed otherwise).
+ */
+function terminationVerdict (
+  linuxSnapshot: ReadonlyMap<number, number> | undefined,
+  preSignal: ProcStatTable | undefined,
+  childPid: number,
+  childStarttime: number | undefined,
+  lineage: PosixLineage | undefined
+): boolean {
+  if (linuxSnapshot === undefined || preSignal === undefined) return true
+  if (!preSignal.complete || lineage?.complete === false) return false
+  if (lineage !== undefined && [...lineage.escaped.values()].some(({ pid, starttime }) => {
+    const fields = preSignal.table.get(pid)
+    return fields === undefined || fields.starttime !== starttime || fields.state === 'Z' || fields.state === 'X'
+  })) return false
+  return postSpawnSurvivorsUnrelated(childPid, childStarttime, linuxSnapshot)
+}
+
+interface PosixLineage {
+  childPid: number
+  childStarttime: number | undefined
+  treeToken: string
+  startSnapshot: ReadonlyMap<number, number>
+  escaped: Map<string, { pid: number, starttime: number }>
+  complete: boolean
+}
+
+interface ProcStatFields {
+  state: string
+  ppid: number
+  pgrp: number
+  session: number
+  starttime: number
+}
+
+interface ProcStatTable {
+  table: Map<number, ProcStatFields>
+  /** False when /proc could not be read reliably; verdicts fail closed. */
+  complete: boolean
+}
+
+function createPosixLineage (childPid: number, treeToken: string, startSnapshot: ReadonlyMap<number, number>): PosixLineage {
+  return {
+    childPid,
+    childStarttime: readProcStatFields(childPid)?.starttime,
+    treeToken,
+    startSnapshot,
+    escaped: new Map(),
+    complete: true,
+  }
+}
+
+/**
+ * Observe descendants while their PPID chain is intact. A descendant that
+ * leaves the child's session and process group can disappear before timeout;
+ * once that happens, later scans cannot prove it created no further escaped
+ * descendants. Record its pid+starttime identity so termination fails closed
+ * if that identity is already gone when signaling begins.
+ */
+function samplePosixLineage (lineage: PosixLineage): void {
+  const snapshot = enumerateProcStatTable()
+  if (!snapshot.complete) lineage.complete = false
+  for (const [candidatePid, fields] of snapshot.table) {
+    if (candidatePid === lineage.childPid) continue
+    if (fields.state === 'Z' || fields.state === 'X') continue
+    if (predatesSpawn(lineage.startSnapshot, lineage.childStarttime, candidatePid, fields)) continue
+    if (fields.session === lineage.childPid || fields.pgrp === lineage.childPid) continue
+    if (!ppidChainWithinTableReaches(candidatePid, lineage.childPid, snapshot.table)) continue
+    const hasToken = processHasTreeToken(candidatePid, lineage.treeToken)
+    if (hasToken === undefined) {
+      lineage.complete = false
+      continue
+    }
+    if (!hasToken) lineage.escaped.set(`${candidatePid}:${fields.starttime}`, { pid: candidatePid, starttime: fields.starttime })
+  }
+}
+
+function processHasTreeToken (pid: number, treeToken: string): boolean | undefined {
+  try {
+    const marker = `${COMMAND_TREE_TOKEN_ENV}=${treeToken}`
+    return readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(marker)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Parse the fixed fields of a /proc/<pid>/stat record. `comm` may contain
+ * spaces and parentheses, so parsing starts after the LAST ')'; the remaining
+ * whitespace-separated fields then start at field 3 (state), making field N
+ * index N-3: state(3), ppid(4), pgrp(5), session(6), starttime(22).
+ */
+function parseProcStat (stat: string): ProcStatFields | undefined {
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)
+  const record = {
+    state: fields[0],
+    ppid: Number(fields[1]),
+    pgrp: Number(fields[2]),
+    session: Number(fields[3]),
+    starttime: Number(fields[19]),
+  }
+  if (!record.state || ![record.ppid, record.pgrp, record.session, record.starttime].every(Number.isSafeInteger)) return undefined
+  return record
+}
+
+function readProcStatFields (pid: number): ProcStatFields | undefined {
+  try {
+    return parseProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/** Snapshot pid → starttime for every process alive right now (Linux). Individual unreadable entries are skipped; only a failed /proc listing yields undefined. */
+function procStartSnapshot (): Map<number, number> | undefined {
+  let entries: string[]
+  try {
+    entries = readdirSync('/proc')
+  } catch {
+    return undefined
+  }
+  const snapshot = new Map<number, number>()
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    const fields = readProcStatFields(Number(entry))
+    if (fields !== undefined) snapshot.set(Number(entry), fields.starttime)
+  }
+  return snapshot
+}
+
+/**
+ * Full /proc process table for termination verdicts. A process that exits
+ * between the listing and its read is simply gone (it cannot be a survivor);
+ * any other read failure or a malformed record marks the table incomplete so
+ * the verdict fails closed instead of trusting a degraded enumeration.
+ */
+function enumerateProcStatTable (): ProcStatTable {
+  const table = new Map<number, ProcStatFields>()
+  let entries: string[]
+  try {
+    entries = readdirSync('/proc')
+  } catch {
+    return { table, complete: false }
+  }
+  let complete = true
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    const candidatePid = Number(entry)
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${candidatePid}/stat`, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') complete = false
+      continue
+    }
+    const fields = parseProcStat(stat)
+    if (fields === undefined) {
+      complete = false
+      continue
+    }
+    table.set(candidatePid, fields)
+  }
+  return { table, complete }
+}
+
+/**
+ * Pids of every living ancestor of this process, up to and including pid 1
+ * (process.pid itself is excluded). A broken link just ends the walk; pid 1 is
+ * always present because it is the fallback reparenting target.
+ */
+function ancestorsOfSelf (): Set<number> {
+  const ancestors = new Set<number>([1])
+  let current = process.pid
+  const visited = new Set<number>([current])
+  while (current !== 1 && current !== 0) {
+    const fields = readProcStatFields(current)
+    if (fields === undefined) break
+    current = fields.ppid
+    if (visited.has(current)) break
+    visited.add(current)
+    if (current !== 0) ancestors.add(current)
+  }
+  return ancestors
+}
+
+/**
+ * Whether the ppid chain of `candidatePid` (within one /proc table snapshot)
+ * reaches `targetPid`, or any chain node whose session or process group equals
+ * `targetPid`. Bounded by a visited set against mid-walk reparenting cycles.
+ */
+function ppidChainWithinTableReaches (candidatePid: number, targetPid: number, table: ReadonlyMap<number, ProcStatFields>): boolean {
+  let nodePid = candidatePid
+  const visited = new Set<number>([candidatePid])
+  for (;;) {
+    const node = table.get(nodePid)
+    if (node === undefined) return false
+    if (node.ppid === targetPid || node.session === targetPid || node.pgrp === targetPid) return true
+    if (visited.has(node.ppid)) return false
+    visited.add(node.ppid)
+    nodePid = node.ppid
+  }
+}
+
+/**
+ * True when no post-spawn process survives whose relation to the child cannot
+ * be ruled out. Each survivor's ancestry is walked within one /proc snapshot:
+ * a birth link into a pre-spawn process proves the survivor descends from that
+ * older process and never from the child. A link into our own ancestry is the
+ * reparenting shape of an escaped orphan and fails closed unless the process
+ * still matches that ancestor's inherited session and process group, proving
+ * it is a concurrent sibling. Pure post-spawn chains rooted at init or a dead
+ * parent also remain unresolved and fail closed.
+ */
+function postSpawnSurvivorsUnrelated (
+  childPid: number,
+  childStarttime: number | undefined,
+  startSnapshot: ReadonlyMap<number, number>
+): boolean {
+  const { table, complete } = enumerateProcStatTable()
+  if (!complete) return false
+  const ancestors = ancestorsOfSelf()
+  for (const [survivorPid, fields] of table) {
+    if (fields.state === 'Z' || fields.state === 'X') continue
+    if (predatesSpawn(startSnapshot, childStarttime, survivorPid, fields)) continue
+    let nodePid = survivorPid
+    let node = fields
+    const visited = new Set<number>([survivorPid])
+    for (;;) {
+      if (nodePid === childPid || node.session === childPid || node.pgrp === childPid) return false
+      if (predatesSpawn(startSnapshot, childStarttime, nodePid, node)) break
+      const parentPid = node.ppid
+      if (parentPid === 0 || parentPid === 1) return false
+      if (visited.has(parentPid)) return false
+      const parent = table.get(parentPid)
+      if (parent === undefined) return false
+      if (ancestors.has(parentPid)) {
+        // A child normally inherits both session and process group from its
+        // parent. A post-spawn process that still matches its pre-existing
+        // ancestor on both is therefore a concurrent sibling, not part of our
+        // child tree. A mismatch proves setsid/setpgid intervened and leaves
+        // reparenting from our child possible, so the verdict fails closed.
+        if (node.session === parent.session && node.pgrp === parent.pgrp) break
+        return false
+      }
+      visited.add(parentPid)
+      nodePid = parentPid
+      node = parent
+    }
+  }
+  return true
 }
 
 export function windowsTaskkillPath (systemRoot = 'C:\\Windows'): string {

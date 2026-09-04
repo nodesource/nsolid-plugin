@@ -486,15 +486,28 @@ function sha256 (value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
+/**
+ * Fetch and integrity-verify the immutable npm artifact entirely in memory.
+ * The read-only `--check` path summarizes from these bytes so it never
+ * touches the filesystem; the mutating path materializes them afterwards.
+ */
+export async function fetchVerifiedNpmArtifactBytes (
+  artifact: Pick<NpmArtifactIdentity, 'tarball' | 'integrity'>,
+  options: VersionSourceOptions = {}
+): Promise<Buffer> {
+  const response = await fetchWithTimeout(artifact.tarball, options)
+  if (!response.ok) throw new Error(`registry tarball returned ${response.status}`)
+  const bytes = await readArchiveWithLimit(response)
+  if (!bytesMatchIntegrity(bytes, artifact.integrity)) throw new Error('registry tarball integrity mismatch')
+  return bytes
+}
+
 async function downloadAndVerifyTarball (
   url: string,
   integrity: string,
   options: VersionSourceOptions
 ): Promise<{ path: string; directory: string; contentDigest: string }> {
-  const response = await fetchWithTimeout(url, options)
-  if (!response.ok) throw new Error(`registry tarball returned ${response.status}`)
-  const bytes = await readArchiveWithLimit(response)
-  if (!bytesMatchIntegrity(bytes, integrity)) throw new Error('registry tarball integrity mismatch')
+  const bytes = await fetchVerifiedNpmArtifactBytes({ tarball: url, integrity }, options)
   const directory = await mkdtemp(path.join(os.tmpdir(), 'nsolid-plugin-artifact-'))
   const tarballPath = path.join(directory, 'package.tgz')
   await writeFile(tarballPath, bytes, { mode: 0o600 })

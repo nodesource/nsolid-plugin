@@ -80,6 +80,34 @@ describe('Antigravity staged plugin validation', () => {
     }
   })
 
+  it('rejects object imports whose value does not declare the plugin identity', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-agy-manifest-value-'))
+    try {
+      mkdirSync(path.join(root, 'skills', 'example'), { recursive: true })
+      writeFileSync(path.join(root, 'plugin.json'), JSON.stringify({ name: 'nsolid-plugin' }))
+      writeFileSync(path.join(root, 'bundle.json'), JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
+      writeFileSync(path.join(root, 'skills', 'example', 'SKILL.md'), '# example')
+      const manifest = path.join(root, 'import_manifest.json')
+
+      // The canonical key alone is never sufficient: a non-identifying value
+      // under `nsolid-plugin` must be rejected (previously accepted).
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': true } }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // An object value without identity fields proves nothing either.
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { path: '/plugin' } } }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // The value itself must declare the identity; array form unchanged.
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin' } } }))
+      assert.equal(validateStagedPlugin(root, manifest), true)
+      writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin' }] }))
+      assert.equal(validateStagedPlugin(root, manifest), true)
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { plugin: 'nsolid-plugin' } } }))
+      assert.equal(validateStagedPlugin(root, manifest), true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('requires unrelated manifest imports to survive plugin replacement byte-for-byte', () => {
     // Array form: an in-place splice of only the owned entry keeps every
     // outside byte; dropping the sibling import removes foreign bytes.

@@ -2,7 +2,7 @@ import type { HarnessType } from '../types.js'
 import { rm } from 'node:fs/promises'
 import { createCommandRunner } from './command-runner.js'
 import { detectCliInstallation, detectInstallations } from './inventory.js'
-import { cleanupNpmArtifact, downloadNpmArtifact, resolveFixedGitBundleVersion, resolveMarketplaceVersion, resolveRegistryVersion } from './version-source.js'
+import { cleanupNpmArtifact, downloadNpmArtifact, fetchVerifiedNpmArtifactBytes, resolveFixedGitBundleVersion, resolveMarketplaceVersion, resolveRegistryVersion } from './version-source.js'
 import { classifyVersionSet, classifyVersions } from './version.js'
 import type {
   ResolvedArtifactIdentity,
@@ -19,7 +19,7 @@ import type {
   VersionLookupResult,
 } from './types.js'
 import { planItem, resultFromPlan } from './strategies/common.js'
-import { summarizeFallbackChanges } from './strategies/fallback.js'
+import { summarizeFallbackChanges, summarizeFallbackChangesFromBytes } from './strategies/fallback.js'
 import { cliPackageStrategy } from './strategies/cli-package.js'
 import { claudeStrategy } from './strategies/claude.js'
 import { codexStrategy } from './strategies/codex.js'
@@ -148,23 +148,22 @@ export async function planUpdates (options: UpdateOptions = {}): Promise<UpdateP
     if (options.check === true) {
       let item = planItem(resolved)
       // A read-only check still answers "what will change": for fallback
-      // installations it downloads the verified artifact to a temporary
-      // location, summarizes the skill/MCP diff, and removes the artifact
-      // again. Best-effort — a failed summary never blocks the check.
+      // installations it fetches the verified artifact into memory and
+      // summarizes the skill/MCP diff. The check path never writes to disk.
+      // Best-effort — a failed summary never blocks the check.
       if (
         resolved.source.kind === 'fallback' &&
         (resolved.version.status === 'update-available' || resolved.version.status === 'unknown') &&
         resolved.artifact?.kind === 'npm'
       ) {
         try {
-          const artifact = resolved.artifact.tarballPath
-            ? resolved.artifact
-            : await downloadNpmArtifact(resolved.artifact, { fetchImpl: options.fetchImpl })
-          // downloadNpmArtifact materializes the tarball path; the already-
-          // downloaded branch carries it by construction.
-          const changes = await summarizeFallbackChanges(resolved, artifact.tarballPath!)
+          const changes = resolved.artifact.tarballPath
+            ? await summarizeFallbackChanges(resolved, resolved.artifact.tarballPath)
+            : await summarizeFallbackChangesFromBytes(
+              resolved,
+              await fetchVerifiedNpmArtifactBytes(resolved.artifact, { fetchImpl: options.fetchImpl })
+            )
           if (changes) item = { ...item, changes }
-          if (!resolved.artifact.tarballPath) await cleanupNpmArtifact(artifact)
         } catch { /* summary stays absent; the version report is unaffected */ }
       }
       // An unproven CLI launch still carries the exact-version recovery

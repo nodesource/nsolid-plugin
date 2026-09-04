@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -15,7 +15,7 @@ import { cleanupNpmArtifact } from '../version-source.js'
 import { managerArgsForIdentity, verifyLocalArtifact } from '../package-manager.js'
 import { readTrackingFile } from '../../skills/skill-tracker.js'
 import { harnessMcpKey, readMcpFieldDigests } from '../mcp-lookup.js'
-import { readTarEntryText } from '../tarball.js'
+import { readTarEntryTextFromBytes } from '../tarball.js'
 import { validateBundle } from '../../validate.js'
 import { childResultArgs, containmentDirectoryMatches, fallbackChildResultMessage, readValidatedFallbackChildResult, recordContainmentDirectoryIdentity, FALLBACK_CHILD_RESULT_FILENAME, type ContainmentDirectoryIdentity } from '../fallback-result-protocol.js'
 
@@ -275,7 +275,19 @@ export const fallbackStrategy: UpdateStrategy = {
  */
 export async function summarizeFallbackChanges (installation: UpdateInstallation, tarballPath: string): Promise<UpdatePlanItem['changes'] | undefined> {
   try {
-    const raw = await readTarEntryText(tarballPath, 'package/bundle.json')
+    return await summarizeFallbackChangesFromBytes(installation, await readFile(tarballPath))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Same summary from in-memory artifact bytes: the read-only `--check` path
+ * must never materialize the verified tarball on disk.
+ */
+export async function summarizeFallbackChangesFromBytes (installation: UpdateInstallation, bytes: Buffer): Promise<UpdatePlanItem['changes'] | undefined> {
+  try {
+    const raw = readTarEntryTextFromBytes(bytes, 'package/bundle.json')
     if (raw === undefined) return undefined
     const bundle = validateBundle(JSON.parse(raw))
     const trackedSkills = installation.metadata?.trackedSkills ?? []
