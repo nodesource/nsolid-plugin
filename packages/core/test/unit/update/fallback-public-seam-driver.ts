@@ -31,6 +31,7 @@ delete process.env.NSOLID_ACCOUNTS_URL
 const { fallbackStrategy } = await import('../../../src/update/strategies/fallback.js')
 const { createCommandRunner } = await import('../../../src/update/command-runner.js')
 const { recordContainmentDirectoryIdentity } = await import('../../../src/update/fallback-result-protocol.js')
+const { manifestDigestOf } = await import('../../../src/update/fallback-journal.js')
 
 const require = createRequire(import.meta.url)
 // Absolute loader URL so the child does not depend on its cwd to resolve tsx.
@@ -49,7 +50,7 @@ const item: UpdatePlanItem = {
     description: 'refresh',
     command: {
       executable: process.execPath,
-      args: ['--import', tsxLoader, childEntry, '--transaction', fixture.manifestPath, '--result', fixture.resultPath],
+      args: ['--import', tsxLoader, childEntry, '--transaction', fixture.manifestPath, '--manifest-digest', manifestDigestOf(fixture.identity), '--result', fixture.resultPath],
       timeoutMs: 60_000,
     },
   }],

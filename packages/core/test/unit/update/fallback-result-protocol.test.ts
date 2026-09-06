@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   FALLBACK_CHILD_RESULT_MAX_BYTES,
+  FALLBACK_CHILD_RESULT_MAX_PRESERVED,
   FALLBACK_CHILD_RESULT_SCHEMA,
   childResultArgs,
   fallbackChildResultMessage,
@@ -221,5 +222,165 @@ describe('fallback child result protocol', () => {
     assert.ok(message)
     assert.ok(!message.includes(hostile), 'an unvalidated target must never reach the message')
     assert.ok(message.includes('setup --harness harness'), 'an invalid target falls back to the generic word')
+  })
+
+  describe('schema-2 preservation reporting boundaries', () => {
+    // FALLBACK_STATE_UNPROVEN / FALLBACK_RECOVERY_PENDING are the allowlisted
+    // codes under which preservation reporting is produced; preservation data
+    // is child-supplied reporting output and must never widen acceptance or
+    // drive a mutation decision at this boundary.
+    const code = 'FALLBACK_STATE_UNPROVEN'
+    const rollback = { attempted: true, succeeded: false }
+
+    const preservedEntry = (name: string): string => path.join(directory, name)
+    const artifacts = (count: number): string[] =>
+      Array.from({ length: count }, (_, index) => preservedEntry(`preserved-artifact-${index}`))
+    const paths = (count: number): string[] =>
+      Array.from({ length: count }, (_, index) => preservedEntry(`preserved-path-${index}`))
+
+    function writeRawEnvelope (fields: Record<string, unknown>): void {
+      writeFileSync(
+        resultPath(),
+        JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: 'nonce-1', code, ...fields }),
+        { mode: 0o600 }
+      )
+    }
+
+    const readValidated = (): Promise<unknown> =>
+      readValidatedFallbackChildResult(resultPath(), 'nonce-1', { containmentDirectories: [containment()] })
+
+    it('round-trips valid preservation arrays verbatim and deterministically', async () => {
+      const target = resultPath()
+      const reportedArtifacts = artifacts(2)
+      const reportedPaths = paths(1)
+      await writeFallbackChildResult(target, 'nonce-1', code, rollback, {
+        preservedArtifacts: reportedArtifacts,
+        preservedPaths: reportedPaths,
+      })
+      const first = await readValidatedFallbackChildResult(target, 'nonce-1', { containmentDirectories: [containment()] })
+      assert.ok(first)
+      assert.equal(first.code, code)
+      assert.deepEqual(first.rollback, rollback)
+      assert.deepEqual(first.preservedArtifacts, reportedArtifacts, 'artifact reporting must survive the round trip unchanged')
+      assert.deepEqual(first.preservedPaths, reportedPaths, 'path reporting must survive the round trip unchanged')
+      const second = await readValidatedFallbackChildResult(target, 'nonce-1', { containmentDirectories: [containment()] })
+      assert.deepEqual(second, first, 'the same envelope must validate identically on every read')
+    })
+
+    it('accepts exactly the preservation count limit and rejects one entry more', async () => {
+      writeRawEnvelope({ rollback, preservedArtifacts: artifacts(FALLBACK_CHILD_RESULT_MAX_PRESERVED) })
+      const accepted = await readValidated()
+      assert.ok(accepted)
+      assert.equal((accepted as { preservedArtifacts?: string[] }).preservedArtifacts?.length, FALLBACK_CHILD_RESULT_MAX_PRESERVED)
+
+      writeRawEnvelope({ rollback, preservedArtifacts: artifacts(FALLBACK_CHILD_RESULT_MAX_PRESERVED + 1) })
+      assert.equal(await readValidated(), undefined, 'an over-count array must reject the whole envelope')
+
+      writeRawEnvelope({ rollback, preservedPaths: paths(FALLBACK_CHILD_RESULT_MAX_PRESERVED + 1) })
+      assert.equal(await readValidated(), undefined, 'the same count limit must bound preservedPaths')
+    })
+
+    it('never publishes an over-count array but keeps the rest of the envelope', async () => {
+      const target = resultPath()
+      await writeFallbackChildResult(target, 'nonce-1', code, rollback, {
+        preservedArtifacts: artifacts(FALLBACK_CHILD_RESULT_MAX_PRESERVED + 1),
+      })
+      assert.equal(existsSync(target), true, 'the envelope itself remains publishable reporting data')
+      const raw = JSON.parse(readFileSync(target, 'utf8')) as { preservedArtifacts?: string[] }
+      assert.equal(raw.preservedArtifacts, undefined, 'an invalid array must never be published')
+      const envelope = await readValidatedFallbackChildResult(target, 'nonce-1', { containmentDirectories: [containment()] })
+      assert.ok(envelope)
+      assert.equal(envelope.code, code)
+      assert.equal(envelope.preservedArtifacts, undefined)
+    })
+
+    it('requires absolute paths and rejects traversal spellings in preservation entries', async () => {
+      writeRawEnvelope({ rollback, preservedArtifacts: ['relative/preserved-skill'] })
+      assert.equal(await readValidated(), undefined, 'a relative path is not a reportable location')
+
+      writeRawEnvelope({ rollback, preservedArtifacts: [`${directory}/../escaped-preservative`] })
+      assert.equal(await readValidated(), undefined, 'a `..` spelling must be rejected even when absolute')
+
+      writeRawEnvelope({ rollback, preservedPaths: [preservedEntry('ok-path'), 'also/relative'] })
+      assert.equal(await readValidated(), undefined, 'one invalid entry rejects the whole preservedPaths array')
+    })
+
+    it('rejects non-array fields and non-string entries', async () => {
+      for (const field of ['preservedArtifacts', 'preservedPaths']) {
+        for (const value of ['just-a-string', 42, null, true, { 0: preservedEntry('object-key') }]) {
+          writeRawEnvelope({ rollback, [field]: value })
+          assert.equal(await readValidated(), undefined, `${field} must be an array`)
+        }
+      }
+      for (const entry of [42, null, {}, [], '']) {
+        writeRawEnvelope({ rollback, preservedArtifacts: [entry] })
+        assert.equal(await readValidated(), undefined, `a non-string or empty entry (${JSON.stringify(entry)}) must reject the envelope`)
+      }
+    })
+
+    it('bounds every entry length at exactly 512 characters', async () => {
+      const entry512 = `/${'a'.repeat(511)}`
+      const entry513 = `/${'a'.repeat(512)}`
+      assert.equal(Buffer.byteLength(entry512), 512)
+      assert.equal(Buffer.byteLength(entry513), 513)
+
+      writeRawEnvelope({ rollback, preservedArtifacts: [entry512] })
+      const accepted = await readValidated()
+      assert.ok(accepted)
+      assert.deepEqual((accepted as { preservedArtifacts?: string[] }).preservedArtifacts, [entry512])
+
+      writeRawEnvelope({ rollback, preservedArtifacts: [entry513] })
+      assert.equal(await readValidated(), undefined, 'an entry beyond the per-item limit must reject the envelope')
+    })
+
+    it('bounds the combined envelope at 4096 bytes, not each array alone', async () => {
+      const target = resultPath()
+      // Each array alone stays under the limit; the combination must not publish.
+      const longArtifacts = Array.from({ length: FALLBACK_CHILD_RESULT_MAX_PRESERVED }, (_, index) => `/${'a'.repeat(100)}-${index}`)
+      const manyPaths = paths(FALLBACK_CHILD_RESULT_MAX_PRESERVED)
+      const artifactsAlone = JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: 'nonce-1', code, rollback, preservedArtifacts: longArtifacts })
+      const combined = JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: 'nonce-1', code, rollback, preservedArtifacts: longArtifacts, preservedPaths: manyPaths })
+      assert.equal(Buffer.byteLength(artifactsAlone) <= FALLBACK_CHILD_RESULT_MAX_BYTES, true, 'test setup: one array alone must fit')
+      assert.equal(Buffer.byteLength(combined) > FALLBACK_CHILD_RESULT_MAX_BYTES, true, 'test setup: the combination must exceed the bound')
+
+      await writeFallbackChildResult(target, 'nonce-1', code, rollback, { preservedArtifacts: longArtifacts, preservedPaths: manyPaths })
+      assert.equal(existsSync(target), false, 'an over-limit combined envelope must never be published')
+      assert.equal(await readValidatedFallbackChildResult(target, 'nonce-1', { containmentDirectories: [containment()] }), undefined)
+
+      writeRawEnvelope({ rollback, preservedArtifacts: longArtifacts, preservedPaths: manyPaths })
+      assert.equal(statSync(resultPath()).size > FALLBACK_CHILD_RESULT_MAX_BYTES, true)
+      assert.equal(await readValidated(), undefined, 'the reader must refuse an oversized result before parsing')
+    })
+
+    it('reports duplicates verbatim: the protocol never dedups or reorders reporting data', async () => {
+      const target = resultPath()
+      const duplicated = [preservedEntry('same-artifact'), preservedEntry('same-artifact'), preservedEntry('other-artifact')]
+      await writeFallbackChildResult(target, 'nonce-1', code, rollback, { preservedArtifacts: duplicated })
+      const envelope = await readValidatedFallbackChildResult(target, 'nonce-1', { containmentDirectories: [containment()] })
+      assert.ok(envelope)
+      assert.deepEqual(envelope.preservedArtifacts, duplicated, 'reporting arrays round-trip verbatim; dedup is an upstream responsibility')
+    })
+
+    it('proves preservation is reporting-only: it never rescues an invalid envelope or reaches parent messages', async () => {
+      const reported = artifacts(2)
+      // Wrong nonce with perfectly valid preservation arrays: still rejected.
+      writeRawEnvelope({ nonce: 'forged-nonce', rollback, preservedArtifacts: reported })
+      assert.equal(
+        await readValidatedFallbackChildResult(resultPath(), 'nonce-1', { containmentDirectories: [containment()] }),
+        undefined,
+        'preservation data must not bypass nonce binding'
+      )
+      // A code outside the parent allowlist with valid preservation: still rejected.
+      writeFileSync(
+        resultPath(),
+        JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: 'nonce-1', code: 'UNKNOWN_SAFE_SHAPE', rollback, preservedArtifacts: reported }),
+        { mode: 0o600 }
+      )
+      assert.equal(await readValidated(), undefined, 'preservation data must not bypass the code allowlist')
+      // Parent-owned messages are constant: child-supplied paths never appear in them.
+      const message = fallbackChildResultMessage(code, 'opencode')
+      assert.ok(message)
+      for (const artifact of reported) assert.ok(!message.includes(artifact), 'no reported path may leak into the safe message')
+    })
   })
 })

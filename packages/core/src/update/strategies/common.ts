@@ -62,8 +62,8 @@ export function noMutationStatus (version: VersionInfo): UpdateStatus {
   }
 }
 
-export function failedResult (item: UpdatePlanItem, error: UpdateError, rollback?: UpdateResult['rollback']): UpdateResult {
-  return resultFromPlan(item, 'failed', { changed: false, error, rollback })
+export function failedResult (item: UpdatePlanItem, error: UpdateError, rollback?: UpdateResult['rollback'], extra: Partial<UpdateResult> = {}): UpdateResult {
+  return resultFromPlan(item, 'failed', { changed: false, error, rollback, ...extra })
 }
 
 export function commandFailure (executable: string, timedOut = false, spawnErrorCode?: string): UpdateError {

@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
 import { checkUpdates, executeUpdatePlan, planUpdates, update, withPinnedMarketplaceCommit } from '../../../src/update/coordinator.js'
-import { fallbackJournalPath } from '../../../src/update/fallback-journal.js'
+import { beginFallbackJournal, fallbackJournalPath, pathDigest, pathKind, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { cliPackageStrategy } from '../../../src/update/strategies/cli-package.js'
+import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getTrackingFilePath } from '../../../src/utils/path.js'
 import type { CommandSpec, ResolvedArtifactIdentity, UpdatePlanItem, UpdateSource } from '../../../src/update/types.js'
+import { FALLBACK_PROTOCOL_VERSION } from '../../../src/update/types.js'
 
 let home: string
 let previousHome: string | undefined
@@ -35,6 +37,73 @@ function writeInvalidJournal (): void {
   const trackingPath = getTrackingFilePath()
   mkdirSync(path.dirname(trackingPath), { recursive: true })
   writeFileSync(fallbackJournalPath(trackingPath), '{ invalid journal')
+}
+
+/**
+ * Build a genuine journal via beginFallbackJournal, then drift the live skill
+ * past its snapshotted state — the exact state in which next-run restore-only
+ * recovery succeeds (recovered: true) and mutates tracked paths.
+ */
+async function writeRestorableJournal (): Promise<{ skillPath: string; journalPath: string; snapshotDirectory: string }> {
+  const skillsDir = path.join(home, '.config', 'opencode', 'skills')
+  const skillPath = path.join(skillsDir, 'tracked')
+  mkdirSync(skillPath, { recursive: true })
+  writeFileSync(path.join(skillPath, 'SKILL.md'), 'old tracked')
+  const trackingPath = getTrackingFilePath()
+  mkdirSync(path.dirname(trackingPath), { recursive: true })
+  writeFileSync(trackingPath, `${JSON.stringify({
+    version: '1.0.0',
+    installedAt: new Date().toISOString(),
+    harness: 'opencode',
+    skills: [{ name: 'tracked', path: skillPath, paths: { opencode: skillPath }, installedAt: new Date().toISOString(), harnesses: ['opencode'] }],
+    mcpServers: [],
+  }, null, 2)}\n`)
+  const evidence = async (target: string) => {
+    const kind = await pathKind(target)
+    return { path: path.resolve(target), kind, digest: kind === 'missing' ? undefined : await pathDigest(target) }
+  }
+  const { journal } = await beginFallbackJournal({
+    installationId: 'opencode:fallback',
+    harness: 'opencode',
+    trackingPath,
+    trackingDigest: trackingDigest(trackingPath)!,
+    protocolVersion: FALLBACK_PROTOCOL_VERSION,
+    nonce: randomUUID(),
+    plannedMissingFrontiers: [],
+    ownedSkills: [await evidence(skillPath)],
+    ownedLinks: [],
+    ownedMcpFields: [],
+    ownedMcpConfigPaths: [await evidence(path.join(home, '.config', 'opencode', 'opencode.jsonc'))],
+    bundleDestinations: [await evidence(skillPath)],
+    approvedDestinationRoots: [skillsDir],
+  })
+  writeFileSync(path.join(skillPath, 'SKILL.md'), 'drifted')
+  writeFileSync(path.join(skillPath, 'stray.txt'), 'half-applied')
+  return { skillPath, journalPath: journal.journalPath, snapshotDirectory: journal.snapshotDirectory! }
+}
+
+/**
+ * Read-only recursive byte snapshot of a directory tree (relative path to
+ * utf8 contents). Directories are detected by a successful readdir; anything
+ * else is read as a file. Fixture trees contain only text bytes.
+ */
+function snapshotTree (root: string): Record<string, string> {
+  const files: Record<string, string> = {}
+  const walk = (directory: string): void => {
+    for (const name of readdirSync(directory)) {
+      const target = path.join(directory, name)
+      let children: string[] | undefined
+      try {
+        children = readdirSync(target)
+      } catch {
+        children = undefined
+      }
+      if (children === undefined) files[path.relative(root, target)] = readFileSync(target, 'utf8')
+      else walk(target)
+    }
+  }
+  walk(root)
+  return files
 }
 
 function mutableCliItem (): UpdatePlanItem {
@@ -101,9 +170,151 @@ describe('update coordinator recovery gate', () => {
     assert.equal(runnerCalls, 0)
   })
 
+  it('keeps a check-only plan byte-identical for a restorable pending journal', async () => {
+    const { skillPath, journalPath, snapshotDirectory } = await writeRestorableJournal()
+    const trackingPath = getTrackingFilePath()
+    let fetchCalls = 0
+    let runnerCalls = 0
+    const spies = () => ({
+      fetchImpl: async () => {
+        fetchCalls++
+        return new Response('{}', { status: 200 })
+      },
+      commandRunner: {
+        run: async () => {
+          runnerCalls++
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      },
+    })
+    // Every live byte a restore would touch, plus the journal, tracking, and
+    // snapshot backups: a check must leave all of them identical.
+    const skillFile = path.join(skillPath, 'SKILL.md')
+    const strayFile = path.join(skillPath, 'stray.txt')
+    const skillBefore = readFileSync(skillFile, 'utf8')
+    const strayBefore = readFileSync(strayFile, 'utf8')
+    const trackingBefore = readFileSync(trackingPath, 'utf8')
+    const journalBefore = readFileSync(journalPath, 'utf8')
+    const snapshotBefore = snapshotTree(snapshotDirectory)
+    const skillParentBefore = readdirSync(path.dirname(skillPath)).sort()
+    const trackingDirBefore = readdirSync(path.dirname(trackingPath)).sort()
+    assert.equal(skillBefore, 'drifted')
+
+    const plan = await planUpdates({ all: true, check: true, ...spies() })
+
+    assert.equal(plan.items.length, 1)
+    assert.equal(plan.items[0]?.installationId, 'fallback:recovery')
+    assert.equal(plan.items[0]?.planningError?.code, 'FALLBACK_RECOVERY_PENDING')
+    const message = plan.items[0]?.planningError?.message ?? ''
+    // A check never restores, so claiming the state was "restored to its
+    // tracked state" would be false; the guidance must say it was preserved
+    // untouched for manual resolution.
+    assert.match(message, /preserved untouched/)
+    assert.doesNotMatch(message, /restored to its tracked state/)
+    assert.equal(fetchCalls, 0)
+    assert.equal(runnerCalls, 0)
+    // The drifted skill, the stray file, the tracking file, the journal, and
+    // every snapshot backup are byte-identical...
+    assert.equal(readFileSync(skillFile, 'utf8'), skillBefore)
+    assert.equal(readFileSync(strayFile, 'utf8'), strayBefore)
+    assert.equal(readFileSync(trackingPath, 'utf8'), trackingBefore)
+    assert.equal(readFileSync(journalPath, 'utf8'), journalBefore)
+    assert.deepEqual(snapshotTree(snapshotDirectory), snapshotBefore)
+    // ...and no recovery storage was created beside any live target.
+    assert.deepEqual(readdirSync(path.dirname(skillPath)).sort(), skillParentBefore)
+    assert.deepEqual(readdirSync(path.dirname(trackingPath)).sort(), trackingDirBefore)
+    // The journal and snapshot survive for deliberate manual cleanup.
+    assert.equal(existsSync(journalPath), true)
+    assert.equal(existsSync(snapshotDirectory), true)
+
+    // A second read-only pass through the public summary reports the same
+    // pending state, still without running or writing anything.
+    const checkSummary = await checkUpdates({ all: true, ...spies() })
+    assert.equal(checkSummary.results.length, 1)
+    assert.equal(checkSummary.results[0]?.status, 'failed')
+    assert.equal(checkSummary.results[0]?.error?.code, 'FALLBACK_RECOVERY_PENDING')
+    assert.match(checkSummary.results[0]?.error?.message ?? '', /preserved untouched/)
+    assert.equal(fetchCalls, 0)
+    assert.equal(runnerCalls, 0)
+    assert.equal(readFileSync(skillFile, 'utf8'), skillBefore)
+    assert.equal(readFileSync(strayFile, 'utf8'), strayBefore)
+    assert.equal(readFileSync(trackingPath, 'utf8'), trackingBefore)
+    assert.equal(readFileSync(journalPath, 'utf8'), journalBefore)
+    assert.deepEqual(readdirSync(path.dirname(skillPath)).sort(), skillParentBefore)
+    assert.deepEqual(readdirSync(path.dirname(trackingPath)).sort(), trackingDirBefore)
+  })
+
+  it('restores a restorable pending journal on a non-check plan', async () => {
+    const { skillPath, journalPath, snapshotDirectory } = await writeRestorableJournal()
+    let fetchCalls = 0
+    let runnerCalls = 0
+
+    const plan = await planUpdates({
+      all: true,
+      fetchImpl: async () => {
+        fetchCalls++
+        return new Response('{}', { status: 200 })
+      },
+      commandRunner: {
+        run: async () => {
+          runnerCalls++
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      },
+    })
+
+    assert.equal(plan.items.length, 1)
+    assert.equal(plan.items[0]?.installationId, 'fallback:recovery')
+    assert.equal(plan.items[0]?.planningError?.code, 'FALLBACK_RECOVERY_PENDING')
+    const message = plan.items[0]?.planningError?.message ?? ''
+    // Restore-only recovery rewrote tracked paths, so claiming the state was
+    // "preserved untouched" would be false; the message must say it restored.
+    assert.doesNotMatch(message, /preserved untouched/)
+    assert.match(message, /restored to its tracked state/)
+    assert.ok(message.includes(path.resolve(skillPath)), 'the restored path is named in the guidance')
+    const expectedPreserved = [path.resolve(journalPath), path.resolve(snapshotDirectory)].sort()
+    assert.deepEqual(plan.items[0]?.preservedArtifacts, expectedPreserved)
+    assert.equal(plan.items[0]?.preservedPaths, undefined)
+    assert.equal(fetchCalls, 0)
+    assert.equal(runnerCalls, 0)
+    // The drifted skill was rewritten from the authenticated snapshot...
+    assert.equal(readFileSync(path.join(skillPath, 'SKILL.md'), 'utf8'), 'old tracked')
+    assert.equal(existsSync(path.join(skillPath, 'stray.txt')), false)
+    // ...while the journal and snapshot survive for deliberate manual cleanup.
+    assert.equal(existsSync(journalPath), true)
+    assert.equal(existsSync(snapshotDirectory), true)
+
+    // And the public mutation result, still without running any mutation.
+    const summary = await update({
+      all: true,
+      yes: true,
+      fetchImpl: async () => {
+        fetchCalls++
+        return new Response('{}', { status: 200 })
+      },
+      commandRunner: {
+        run: async () => {
+          runnerCalls++
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        },
+      },
+    })
+    assert.equal(summary.results.length, 1)
+    assert.equal(summary.results[0]?.status, 'failed')
+    assert.equal(summary.results[0]?.error?.code, 'FALLBACK_RECOVERY_PENDING')
+    assert.deepEqual(summary.results[0]?.preservedArtifacts, expectedPreserved)
+    assert.equal(summary.results[0]?.preservedPaths, undefined)
+    assert.equal(fetchCalls, 0)
+    assert.equal(runnerCalls, 0)
+    assert.equal(existsSync(journalPath), true)
+    assert.equal(existsSync(snapshotDirectory), true)
+  })
+
   it('does not execute mutable targets while recovery remains unresolved', async () => {
     writeInvalidJournal()
+    const journalPath = fallbackJournalPath(getTrackingFilePath())
     let runnerCalls = 0
+    let fetchCalls = 0
     const summary = await update({
       all: true,
       yes: true,
@@ -113,13 +324,28 @@ describe('update coordinator recovery gate', () => {
           return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
         },
       },
-      fetchImpl: async () => new Response('{}', { status: 200 }),
+      fetchImpl: async () => {
+        fetchCalls++
+        return new Response('{}', { status: 200 })
+      },
     })
 
+    // Pending recovery fails closed with the preserved-journal guidance, not
+    // the legacy FAILED mapping.
     assert.equal(summary.results.length, 1)
-    assert.equal(summary.results[0]?.error?.code, 'FALLBACK_RECOVERY_FAILED')
+    assert.equal(summary.results[0]?.error?.code, 'FALLBACK_RECOVERY_PENDING')
+    assert.match(summary.results[0]?.error?.message ?? '', /preserved untouched/)
     assert.equal(summary.results[0]?.status, 'failed')
+    // A malformed journal cannot be authenticated, so only the journal
+    // artifact is reported as preserved and no live path evidence exists.
+    assert.deepEqual(summary.results[0]?.preservedArtifacts, [journalPath])
+    assert.equal(summary.results[0]?.preservedPaths, undefined)
+    // No package-manager command and no inventory fetch may run while
+    // recovery is unresolved.
     assert.equal(runnerCalls, 0)
+    assert.equal(fetchCalls, 0)
+    // The pending journal must remain untouched on disk.
+    assert.equal(existsSync(journalPath), true)
   })
 
   it('defends the recovery gate for externally constructed plans', async () => {
@@ -150,6 +376,13 @@ describe('update coordinator recovery gate', () => {
     assert.equal(runnerCalls, 0)
     assert.equal(summary.results[1]?.status, 'failed')
     assert.equal(summary.results[1]?.error?.code, 'FALLBACK_RECOVERY_FAILED')
+    // Externally constructed items without preservation evidence keep the
+    // stable shape: the reporting fields stay absent instead of becoming
+    // empty arrays.
+    assert.equal(summary.results[0]?.preservedArtifacts, undefined)
+    assert.equal(summary.results[0]?.preservedPaths, undefined)
+    assert.equal(summary.results[1]?.preservedArtifacts, undefined)
+    assert.equal(summary.results[1]?.preservedPaths, undefined)
   })
 
   it('preserves fallback artifacts and transaction state when tree termination is unconfirmed', async () => {
@@ -657,5 +890,191 @@ describe('read-only check stays off the filesystem', () => {
       if (previousTmp === undefined) delete process.env.TMP
       else process.env.TMP = previousTmp
     }
+  })
+})
+
+describe('update coordinator recovery message branches', () => {
+  const planOptions = () => ({
+    all: true,
+    check: true,
+    fetchImpl: async () => new Response('{}', { status: 200 }),
+    commandRunner: {
+      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+    },
+  })
+
+  /** A two-skill pending journal whose snapshot backups can be selectively tampered with. */
+  async function writeTwoSkillJournal (): Promise<{ skillAPath: string; skillBPath: string; journalPath: string }> {
+    const skillsDir = path.join(home, '.config', 'opencode', 'skills')
+    const skillAPath = path.join(skillsDir, 'alpha')
+    const skillBPath = path.join(skillsDir, 'beta')
+    mkdirSync(skillAPath, { recursive: true })
+    writeFileSync(path.join(skillAPath, 'SKILL.md'), 'alpha tracked')
+    mkdirSync(skillBPath, { recursive: true })
+    writeFileSync(path.join(skillBPath, 'SKILL.md'), 'beta tracked')
+    const trackingPath = getTrackingFilePath()
+    mkdirSync(path.dirname(trackingPath), { recursive: true })
+    writeFileSync(trackingPath, `${JSON.stringify({
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: 'opencode',
+      skills: [
+        { name: 'alpha', path: skillAPath, paths: { opencode: skillAPath }, installedAt: new Date().toISOString(), harnesses: ['opencode'] },
+        { name: 'beta', path: skillBPath, paths: { opencode: skillBPath }, installedAt: new Date().toISOString(), harnesses: ['opencode'] },
+      ],
+      mcpServers: [],
+    }, null, 2)}\n`)
+    const evidence = async (target: string) => {
+      const kind = await pathKind(target)
+      return { path: path.resolve(target), kind, digest: kind === 'missing' ? undefined : await pathDigest(target) }
+    }
+    const { journal } = await beginFallbackJournal({
+      installationId: 'opencode:fallback',
+      harness: 'opencode',
+      trackingPath,
+      trackingDigest: trackingDigest(trackingPath)!,
+      protocolVersion: FALLBACK_PROTOCOL_VERSION,
+      nonce: randomUUID(),
+      plannedMissingFrontiers: [],
+      ownedSkills: [await evidence(skillAPath), await evidence(skillBPath)],
+      ownedLinks: [],
+      ownedMcpFields: [],
+      ownedMcpConfigPaths: [await evidence(path.join(home, '.config', 'opencode', 'opencode.jsonc'))],
+      bundleDestinations: [await evidence(skillAPath), await evidence(skillBPath)],
+      approvedDestinationRoots: [skillsDir],
+    })
+    return { skillAPath, skillBPath, journalPath: journal.journalPath }
+  }
+
+  /** Break one snapshot backup's authentication by smuggling a stray child into it. */
+  function tamperBackupOf (journalPath: string, entryPath: string): void {
+    const disk = JSON.parse(readFileSync(journalPath, 'utf8')) as { entries: Array<{ path: string, backup?: string }> }
+    const entry = disk.entries.find((candidate) => path.resolve(candidate.path) === path.resolve(entryPath))
+    if (entry?.backup === undefined) throw new Error(`no backup for ${entryPath}`)
+    writeFileSync(path.join(entry.backup, 'tampered.txt'), 'tampered backup bytes')
+  }
+
+  it('reports unrestorable and drifted paths as preserved untouched on a check plan', async () => {
+    const { skillAPath, skillBPath, journalPath } = await writeTwoSkillJournal()
+    writeFileSync(path.join(skillAPath, 'SKILL.md'), 'alpha drifted')
+    writeFileSync(path.join(skillBPath, 'SKILL.md'), 'beta drifted')
+    tamperBackupOf(journalPath, skillBPath)
+
+    const plan = await planUpdates(planOptions())
+    const message = plan.items[0]?.planningError?.message ?? ''
+    // A check never restores: even though skillA is restorable and skillB is
+    // not, the guidance must say the state was preserved untouched and name
+    // both paths for manual inspection.
+    assert.match(message, /preserved untouched/)
+    assert.doesNotMatch(message, /restored to its tracked state/)
+    assert.match(message, new RegExp(`Live paths left for manual inspection: ${skillAPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    assert.match(message, new RegExp(`${skillBPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    assert.deepEqual(plan.items[0]?.preservedPaths, [path.resolve(skillAPath), path.resolve(skillBPath)].sort())
+    // Both live trees are byte-identical: the drifted skill was not
+    // rewritten and the tampered backup was never installed.
+    assert.equal(readFileSync(path.join(skillAPath, 'SKILL.md'), 'utf8'), 'alpha drifted')
+    assert.equal(readFileSync(path.join(skillBPath, 'SKILL.md'), 'utf8'), 'beta drifted')
+  })
+
+  it('reports drifted paths as preserved untouched on a check plan without restoring', async () => {
+    const { skillAPath, skillBPath } = await writeTwoSkillJournal()
+    writeFileSync(path.join(skillAPath, 'SKILL.md'), 'alpha drifted')
+    writeFileSync(path.join(skillBPath, 'SKILL.md'), 'beta drifted')
+
+    const plan = await planUpdates(planOptions())
+    const message = plan.items[0]?.planningError?.message ?? ''
+    assert.match(message, /preserved untouched/)
+    assert.match(message, new RegExp(`Live paths left for manual inspection: ${skillAPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    assert.match(message, new RegExp(`${skillBPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    assert.doesNotMatch(message, /restored to its tracked state/)
+    assert.deepEqual(plan.items[0]?.preservedPaths, [path.resolve(skillAPath), path.resolve(skillBPath)].sort())
+    // The drifted skills were not rewritten from the snapshot.
+    assert.equal(readFileSync(path.join(skillAPath, 'SKILL.md'), 'utf8'), 'alpha drifted')
+    assert.equal(readFileSync(path.join(skillBPath, 'SKILL.md'), 'utf8'), 'beta drifted')
+  })
+
+  it('partially restores drifted skills on a non-check plan while preserving tampered backups', async () => {
+    const { skillAPath, skillBPath, journalPath } = await writeTwoSkillJournal()
+    writeFileSync(path.join(skillAPath, 'SKILL.md'), 'alpha drifted')
+    writeFileSync(path.join(skillBPath, 'SKILL.md'), 'beta drifted')
+    tamperBackupOf(journalPath, skillBPath)
+
+    const plan = await planUpdates({ ...planOptions(), check: false })
+    const message = plan.items[0]?.planningError?.message ?? ''
+    // Skill A was restorable and rewritten while skill B stayed preserved:
+    // the guidance must say PARTIALLY, name the restored path and the path
+    // left for manual inspection, and never claim preserved untouched after
+    // a restoration happened.
+    assert.match(message, /PARTIALLY restored/)
+    assert.match(message, /Restored to tracked state:/)
+    assert.ok(message.includes(path.resolve(skillAPath)), 'the restored path is named in the guidance')
+    assert.match(message, /Live paths left for manual inspection:/)
+    assert.ok(message.includes(path.resolve(skillBPath)), 'the preserved path is named in the guidance')
+    assert.doesNotMatch(message, /preserved untouched/)
+    assert.deepEqual(plan.items[0]?.preservedPaths, [path.resolve(skillBPath)])
+    // Skill A was rewritten from the authenticated snapshot while skill B
+    // keeps its drifted bytes: the tampered backup was never installed.
+    assert.equal(readFileSync(path.join(skillAPath, 'SKILL.md'), 'utf8'), 'alpha tracked')
+    assert.equal(readFileSync(path.join(skillBPath, 'SKILL.md'), 'utf8'), 'beta drifted')
+  })
+
+  it('announces that nothing needed restoration when every owned path is already tracked', async () => {
+    await writeTwoSkillJournal()
+
+    const plan = await planUpdates(planOptions())
+    const message = plan.items[0]?.planningError?.message ?? ''
+    assert.match(message, /needs no restoration: every owned path is already at its tracked state/)
+    assert.doesNotMatch(message, /Restored to tracked state:/)
+    assert.doesNotMatch(message, /preserved untouched\./)
+  })
+
+  it('names preserved harness links outside tracking ownership when nothing needed restoration', async () => {
+    // Journaled harness links are deliberately outside restore scope: the
+    // current tracking file never names the link path, so next-run recovery
+    // preserves it for inspection while every owned path already matches.
+    const skillsDir = path.join(home, '.agents', 'skills')
+    const skillPath = path.join(skillsDir, 'tracked')
+    const linkPath = path.join(getHarnessSkillsPath('claude'), 'tracked')
+    mkdirSync(skillPath, { recursive: true })
+    writeFileSync(path.join(skillPath, 'SKILL.md'), 'tracked')
+    mkdirSync(path.dirname(linkPath), { recursive: true })
+    writeFileSync(linkPath, 'link\n')
+    const trackingPath = getTrackingFilePath()
+    mkdirSync(path.dirname(trackingPath), { recursive: true })
+    writeFileSync(trackingPath, `${JSON.stringify({
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: 'claude',
+      skills: [
+        { name: 'tracked', path: skillPath, paths: { claude: skillPath }, installedAt: new Date().toISOString(), harnesses: ['claude'] },
+      ],
+      mcpServers: [],
+    }, null, 2)}\n`)
+    const evidence = async (target: string) => {
+      const kind = await pathKind(target)
+      return { path: path.resolve(target), kind, digest: kind === 'missing' ? undefined : await pathDigest(target) }
+    }
+    await beginFallbackJournal({
+      installationId: 'claude:fallback',
+      harness: 'claude',
+      trackingPath,
+      trackingDigest: trackingDigest(trackingPath)!,
+      protocolVersion: FALLBACK_PROTOCOL_VERSION,
+      nonce: randomUUID(),
+      plannedMissingFrontiers: [],
+      ownedSkills: [await evidence(skillPath)],
+      ownedLinks: [await evidence(linkPath)],
+      ownedMcpFields: [],
+      ownedMcpConfigPaths: [await evidence(path.join(home, '.claude.json'))],
+      bundleDestinations: [],
+      approvedDestinationRoots: [path.resolve(skillsDir), path.resolve(getHarnessSkillsPath('claude'))],
+    })
+
+    const plan = await planUpdates(planOptions())
+    const message = plan.items[0]?.planningError?.message ?? ''
+    assert.match(message, /needs no restoration: every owned path is already at its tracked state/)
+    assert.match(message, new RegExp(`Live paths left for manual inspection: ${linkPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    assert.doesNotMatch(message, /Restored to tracked state:/)
+    assert.doesNotMatch(message, /preserved untouched\./)
   })
 })

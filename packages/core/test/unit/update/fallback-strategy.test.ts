@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -9,13 +9,13 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fallbackStrategy } from '../../../src/update/strategies/fallback.js'
-import { applyFallbackEntry, fallbackJournalPath, pathDigest, pathKind, registerFallbackStage, trackingDigest } from '../../../src/update/fallback-journal.js'
+import { applyFallbackEntry, claimFallbackJournalMutation, fallbackJournalPath, manifestDigestOf, pathDigest, pathKind, registerFallbackStage, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { valueDigest } from '../../../src/update/mcp-lookup.js'
 import { readTrackingFile, writeTrackingFile } from '../../../src/skills/skill-tracker.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getSkillsDir, resolveHome } from '../../../src/utils/path.js'
-import { recordContainmentDirectoryIdentity } from '../../../src/update/fallback-result-protocol.js'
-import type { FallbackTransactionIdentity, UpdatePlanItem, UpdateResult } from '../../../src/update/types.js'
+import { FALLBACK_CHILD_RESULT_SCHEMA, recordContainmentDirectoryIdentity } from '../../../src/update/fallback-result-protocol.js'
+import { FALLBACK_PROTOCOL_VERSION, type FallbackTransactionIdentity, type UpdateInstallation, type UpdatePlanItem, type UpdateResult } from '../../../src/update/types.js'
 
 function item (): UpdatePlanItem {
   return {
@@ -183,7 +183,9 @@ describe('fallback strategy parent gate', () => {
       harness: 'claude',
       trackingPath,
       trackingDigest: trackingDigest(trackingPath)!,
+      protocolVersion: FALLBACK_PROTOCOL_VERSION,
       nonce: randomUUID(),
+      plannedMissingFrontiers: [],
       ownedSkills: [await pathEvidence(skillPath)],
       ownedLinks: [await pathEvidence(path.join(getHarnessSkillsPath('claude'), 'tracked'))],
       ownedMcpFields: options.trackedMcp === true
@@ -193,8 +195,12 @@ describe('fallback strategy parent gate', () => {
           ]
         : [],
       // The union of tracked MCP config paths and the adapter's canonical path,
-      // exactly as the ownership matcher recomputes it.
-      ownedMcpConfigPaths: [...new Set([configPath, resolveHome('~/.claude.json')].map((value) => path.resolve(value)))],
+      // exactly as the ownership matcher recomputes it, captured as whole-path
+      // evidence: this is what authenticates MCP backups during rollback.
+      ownedMcpConfigPaths: await Promise.all(
+        [...new Set([configPath, resolveHome('~/.claude.json')].map((value) => path.resolve(value)))].map((value) => pathEvidence(value))
+      ),
+      bundleDestinations: [],
       approvedDestinationRoots: [getSkillsDir(), getHarnessSkillsPath('claude')].map((value) => path.resolve(value)),
     }
     const gateItem: UpdatePlanItem = {
@@ -212,10 +218,11 @@ describe('fallback strategy parent gate', () => {
     return { identity, trackingPath, skillPath, trackedConfigPath: options.trackedMcp === true ? trackedConfigPath : undefined, item: gateItem }
   }
 
-  /** Simulate the verified child: it legitimately holds the nonce, so it may stage and apply through the journal API. */
+  /** Simulate the verified child: it recomputes the canonical manifest digest from the transaction manifest it verified, claims the mutating journal, and only then stages and applies through the journal API. */
   async function childStagesAndApplies (fixture: GateFixture, target: string, bytes: Buffer): Promise<void> {
-    const journal = JSON.parse(readFileSync(fallbackJournalPath(fixture.identity.trackingPath), 'utf8'))
-    const staged = await registerFallbackStage(journal, target, { bytes })
+    const claimed = await claimFallbackJournalMutation(fixture.identity, manifestDigestOf(fixture.identity))
+    assert.ok(claimed, 'the simulated child must be able to claim the mutating journal')
+    const staged = await registerFallbackStage(claimed, target, { bytes })
     await applyFallbackEntry(staged, target)
   }
 
@@ -359,11 +366,16 @@ describe('fallback strategy structured child result', () => {
       harness: 'claude',
       trackingPath,
       trackingDigest: trackingDigest(trackingPath)!,
+      protocolVersion: FALLBACK_PROTOCOL_VERSION,
       nonce: randomUUID(),
+      plannedMissingFrontiers: [],
       ownedSkills: [await pathEvidence(skillPath)],
       ownedLinks: [await pathEvidence(path.join(getHarnessSkillsPath('claude'), 'tracked'))],
       ownedMcpFields: [],
-      ownedMcpConfigPaths: [resolveHome('~/.claude.json')],
+      // The adapter canonical path is usually absent on a fresh machine;
+      // missing evidence (no digest) is a legitimate planned state.
+      ownedMcpConfigPaths: [await pathEvidence(resolveHome('~/.claude.json'))],
+      bundleDestinations: [],
       approvedDestinationRoots: [getSkillsDir(), getHarnessSkillsPath('claude')].map((value) => path.resolve(value)),
     }
     const manifestDir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-manifest-'))
@@ -432,7 +444,7 @@ describe('fallback strategy structured child result', () => {
   it('surfaces the child MCP_RECONCILIATION_REQUIRED code instead of the generic fallback failure', async () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, childWritesEnvelope((nonce) => ({
-      schema: 1,
+      schema: FALLBACK_CHILD_RESULT_SCHEMA,
       nonce,
       code: 'MCP_RECONCILIATION_REQUIRED',
       rollback: { attempted: false },
@@ -455,7 +467,7 @@ describe('fallback strategy structured child result', () => {
   it('never publishes child-controlled text carried inside the envelope', async () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, childWritesEnvelope((nonce) => ({
-      schema: 1,
+      schema: FALLBACK_CHILD_RESULT_SCHEMA,
       nonce,
       code: 'MCP_RECONCILIATION_REQUIRED',
       rollback: { attempted: false },
@@ -471,7 +483,7 @@ describe('fallback strategy structured child result', () => {
   it('keeps raw child stdout/stderr out of the public error and trusts the envelope over output parsing', async () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, (child) => {
-      const quiet = childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'FALLBACK_MCP_DRIFT', rollback: { attempted: false } }))(child)
+      const quiet = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'FALLBACK_MCP_DRIFT', rollback: { attempted: false } }))(child)
       return {
         ...quiet,
         stdout: 'npm notice New version available\nnpm ERR code E404\nhttps://registry.npmjs.org/nsolid-plugin/-/nsolid-plugin-1.0.1.tgz',
@@ -503,25 +515,25 @@ describe('fallback strategy structured child result', () => {
 
   it('fails safe when the result file exceeds the bounded size', async () => {
     const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED', pad: 'x'.repeat(8192) })))
+    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED', pad: 'x'.repeat(8192) })))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
   })
 
   it('fails safe on a stale result bound to a different transaction nonce', async () => {
     const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope(() => ({ schema: 1, nonce: randomUUID(), code: 'MCP_RECONCILIATION_REQUIRED' })))
+    const result = await execute(fixture, childWritesEnvelope(() => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: randomUUID(), code: 'MCP_RECONCILIATION_REQUIRED' })))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
   })
 
   it('fails safe on an unknown child code', async () => {
     const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'TOTALLY_UNKNOWN_CODE' })))
+    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'TOTALLY_UNKNOWN_CODE' })))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
   })
 
   it('fails safe on an unsafe child code shape', async () => {
     const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'bad code' })))
+    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'bad code' })))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
   })
 
@@ -533,7 +545,7 @@ describe('fallback strategy structured child result', () => {
 
   it('fails safe on a malformed rollback shape', async () => {
     const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: 1 } })))
+    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: 1 } })))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
   })
 
@@ -542,7 +554,7 @@ describe('fallback strategy structured child result', () => {
     const realDir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-result-real-'))
     const realTarget = path.join(realDir, 'real.json')
     const nonce = fixture.identity.nonce
-    writeFileSync(realTarget, JSON.stringify({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }), { mode: 0o600 })
+    writeFileSync(realTarget, JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }), { mode: 0o600 })
     rmSync(fixture.resultPath, { force: true })
     symlinkSync(realTarget, fixture.resultPath)
     const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }))
@@ -572,23 +584,44 @@ describe('fallback strategy structured child result', () => {
   it('never replays a prior envelope when the same plan item executes twice', async () => {
     const fixture = await setupResultFixture()
     const observedResultPaths: string[] = []
+    let blockedCommandRan = false
     // First execution: an unconfirmed-termination timeout preserves the
-    // transaction workspace, and the child still publishes a structured
-    // envelope before timing out.
+    // transaction workspace AND the journal for manual recovery.
     const first = await execute(fixture, (child) => {
       if (child.resultPath !== undefined) observedResultPaths.push(child.resultPath)
-      const quiet = childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+      const quiet = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
       return { ...quiet, timedOut: true }
     })
     assert.equal(first.error?.code, 'FALLBACK_TREE_TERMINATION_UNCONFIRMED')
-    // Second execution of the SAME item: the fresh per-execution result path
-    // must differ, and the first-run envelope must never surface.
+    // Second execution of the SAME item: the preserved journal is a pending
+    // next-run recovery state. Recovery never restores or commits on its own,
+    // so it must block the run before any command executes.
     const second = await execute(fixture, (child) => {
+      blockedCommandRan = true
       if (child.resultPath !== undefined) observedResultPaths.push(child.resultPath)
       return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }
     })
-    assert.equal(second.error?.code, 'FALLBACK_COMMAND_FAILED', 'the second execution must not replay the first envelope')
-    assert.equal(observedResultPaths.length, 2, 'both executions must receive an explicit result path')
+    assert.equal(second.error?.code, 'FALLBACK_RECOVERY_PENDING', 'a preserved journal must block the next run as pending')
+    assert.equal(blockedCommandRan, false, 'the pending-blocked run must never execute the child command')
+    // The blocked run cleans the planning-owned manifest workspace on its way
+    // out, so the preserved first-run envelope also disappears with it.
+    assert.equal(existsSync(fixture.manifestDir), false, 'the blocked run must not preserve the previous planning workspace')
+    // The user applies the prescribed manual remedy (remove the pending
+    // journal and its snapshot). A retry then RE-PLANS: a fresh fixture means
+    // a fresh manifest, fresh nonce, and fresh per-execution result location,
+    // so the first envelope (already gone with its workspace) could never
+    // replay even if some copy survived.
+    const pendingJournalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const snapshotDirectory = (JSON.parse(readFileSync(pendingJournalPath, 'utf8')) as { snapshotDirectory: string }).snapshotDirectory
+    rmSync(pendingJournalPath, { force: true })
+    rmSync(snapshotDirectory, { recursive: true, force: true })
+    const rePlannedFixture = await setupResultFixture()
+    const third = await execute(rePlannedFixture, (child) => {
+      if (child.resultPath !== undefined) observedResultPaths.push(child.resultPath)
+      return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }
+    })
+    assert.equal(third.error?.code, 'FALLBACK_COMMAND_FAILED', 'the post-remedy execution must not replay the first envelope')
+    assert.equal(observedResultPaths.length, 2, 'both executed runs must receive an explicit result path')
     assert.notEqual(observedResultPaths[0], observedResultPaths[1], 'each execution must use a fresh result location')
   })
 
@@ -597,7 +630,7 @@ describe('fallback strategy structured child result', () => {
     const foreignDir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-result-foreign-'))
     const foreignResult = path.join(foreignDir, 'result.json')
     const nonce = fixture.identity.nonce
-    writeFileSync(foreignResult, JSON.stringify({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }), { mode: 0o600 })
+    writeFileSync(foreignResult, JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }), { mode: 0o600 })
     fixture.item.steps = [{
       kind: 'command',
       description: 'refresh',
@@ -619,7 +652,7 @@ describe('fallback strategy structured child result', () => {
   it('fails safe when the plan item carries no transaction to bind the nonce', async () => {
     const fixture = await setupResultFixture()
     delete (fixture.item as { fallbackTransaction?: unknown }).fallbackTransaction
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED' })))
+    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' })))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
   })
 
@@ -629,7 +662,7 @@ describe('fallback strategy structured child result', () => {
     // so the structured child code (not FALLBACK_ROLLBACK_FAILED) is reported.
     {
       const fixture = await setupResultFixture()
-      const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: true, succeeded: false } })))
+      const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: true, succeeded: false } })))
       assert.equal(result.error?.code, 'MCP_RECONCILIATION_REQUIRED')
       assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
     }
@@ -639,7 +672,7 @@ describe('fallback strategy structured child result', () => {
     {
       const fixture = await setupResultFixture()
       const result = await execute(fixture, (child) => {
-        const outcome = childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: true, succeeded: true } }))(child)
+        const outcome = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: true, succeeded: true } }))(child)
         // Between the child failure and parent recovery, corrupt one journaled
         // backup so the parent restore preflight provably fails.
         const journal = JSON.parse(readFileSync(fallbackJournalPath(fixture.identity.trackingPath), 'utf8')) as { entries: Array<{ backup?: string }> }
@@ -649,8 +682,8 @@ describe('fallback strategy structured child result', () => {
         else writeFileSync(backup, 'tampered')
         return outcome
       })
-      assert.equal(result.error?.code, 'FALLBACK_ROLLBACK_FAILED')
-      assert.equal(result.error?.message, 'Fallback refresh command failed and its rollback was incomplete')
+      assert.equal(result.error?.code, 'FALLBACK_STATE_UNPROVEN')
+      assert.equal(result.error?.message, 'The fallback transaction could not prove the state of its owned files, so the automatic rollback was refused. Its journal, snapshot, and preserved artifacts were left untouched for manual recovery.')
       assert.deepEqual(result.rollback, { attempted: true, succeeded: false })
     }
   })
@@ -658,7 +691,7 @@ describe('fallback strategy structured child result', () => {
   it('keeps FALLBACK_COMMAND_TIMEOUT precedence when the confirmed timeout carries a structured result', async () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, (child) => {
-      const quiet = childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+      const quiet = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
       return { ...quiet, timedOut: true, treeTerminated: true }
     })
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_TIMEOUT')
@@ -672,7 +705,7 @@ describe('fallback strategy structured child result', () => {
     // A prior attempt left a valid envelope at the planned result path. The
     // parent now points each execution at a FRESH result location, so the
     // stale file is never read regardless of its nonce.
-    writeFileSync(fixture.resultPath, JSON.stringify({ schema: 1, nonce: fixture.identity.nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: false } }), { mode: 0o600 })
+    writeFileSync(fixture.resultPath, JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: fixture.identity.nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: false } }), { mode: 0o600 })
     const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED', 'the stale envelope must not surface its structured code')
     // (The planned-path file may still be removed as part of the parent-owned
@@ -683,7 +716,7 @@ describe('fallback strategy structured child result', () => {
   it('keeps unconfirmed tree termination precedence and preserves recovery artifacts', async () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, (child) => {
-      const quiet = childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+      const quiet = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
       return { ...quiet, timedOut: true }
     })
     assert.equal(result.error?.code, 'FALLBACK_TREE_TERMINATION_UNCONFIRMED')
@@ -694,10 +727,193 @@ describe('fallback strategy structured child result', () => {
   it('keeps MISSING_EXECUTABLE precedence when the spawn fails with a structured result present', async () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, (child) => {
-      const quiet = childWritesEnvelope((nonce) => ({ schema: 1, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+      const quiet = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
       return { ...quiet, spawnErrorCode: 'ENOENT' }
     })
     assert.equal(result.error?.code, 'MISSING_EXECUTABLE')
+  })
+
+  it('maps a validated FALLBACK_PROTOCOL_UNSUPPORTED pre-mutation rejection to a no-rollback failure and disposes its own untouched journal', async () => {
+    const fixture = await setupResultFixture()
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const result = await execute(fixture, childWritesEnvelope((nonce) => ({
+      schema: FALLBACK_CHILD_RESULT_SCHEMA,
+      nonce,
+      code: 'FALLBACK_PROTOCOL_UNSUPPORTED',
+      rollback: { attempted: false },
+    })))
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error?.code, 'FALLBACK_PROTOCOL_UNSUPPORTED')
+    assert.equal(result.error?.message, 'This fallback update was planned by an incompatible nsolid-plugin version. Update nsolid-plugin manually (for example with your package manager) and retry the update.')
+    assert.deepEqual(result.rollback, { attempted: false }, 'a pre-mutation child rejection must never report a parent rollback')
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked', 'a pre-mutation rejection must not mutate owned state')
+    // The parent proved, from its own in-memory manifest, that nothing was
+    // mutated: its pre-mutation journal and snapshot are pure residue and are
+    // disposed so the prescribed manual update + retry is not blocked.
+    assert.equal(existsSync(journalPath), false, 'the proven pre-mutation journal must be disposed')
+    assert.deepEqual(
+      readdirSync(path.dirname(fixture.identity.trackingPath)).filter((name) => name.startsWith('.nsolid-plugin-update-')),
+      [],
+      'the proven pre-mutation snapshot must be disposed'
+    )
+    assert.equal(result.preservedArtifacts, undefined)
+    assert.equal(result.preservedPaths, undefined)
+  })
+
+  it('preserves its pre-mutation journal when a protocol rejection cannot be proven pre-mutation', async () => {
+    const fixture = await setupResultFixture()
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const result = await execute(fixture, childWritesEnvelope((nonce) => {
+      // Hostile drift during the transaction window: the live owned state no
+      // longer matches the planned evidence, so the parent can NOT prove the
+      // rejection was pre-mutation and must fail closed.
+      writeFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'mutated during the window')
+      return { schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'FALLBACK_PROTOCOL_UNSUPPORTED', rollback: { attempted: false } }
+    }))
+
+    assert.equal(result.error?.code, 'FALLBACK_PROTOCOL_UNSUPPORTED')
+    assert.deepEqual(result.rollback, { attempted: false })
+    // The mutated live bytes are never rolled back on this path; the journal
+    // and snapshot stay preserved and are reported for manual recovery.
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'mutated during the window', 'an unprovable rejection must never authorize a restore')
+    assert.equal(existsSync(journalPath), true, 'the unprovable journal must be preserved, not disposed')
+    assert.ok((result.preservedArtifacts ?? []).includes(journalPath), 'the preserved journal must be reported')
+  })
+
+  it('treats a child-disposed parent journal as unproven while keeping validated child preservation reporting', async () => {
+    const fixture = await setupResultFixture()
+    const childArtifact = path.join(home, 'preserved', 'stage-container')
+    const childPath = path.join(home, 'preserved', 'live-path')
+    mkdirSync(path.dirname(childArtifact), { recursive: true })
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const result = await execute(fixture, childWritesEnvelope((nonce) => {
+      // The child removed the parent journal before exiting: losing journal
+      // authority is never proof of a successful rollback, so the envelope
+      // claim must not become a verified success. Only its validated
+      // reporting survives, alongside the retained recovery locations.
+      rmSync(journalPath, { force: true })
+      return {
+        schema: FALLBACK_CHILD_RESULT_SCHEMA,
+        nonce,
+        code: 'FALLBACK_MCP_DRIFT',
+        rollback: { attempted: true, succeeded: true },
+        preservedArtifacts: [childArtifact],
+        preservedPaths: [childPath],
+      }
+    }))
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error?.code, 'FALLBACK_STATE_UNPROVEN')
+    assert.deepEqual(result.rollback, { attempted: true, succeeded: false }, 'a lost journal must never be promoted to a child-claimed success')
+    assert.ok((result.preservedArtifacts ?? []).includes(childArtifact), 'child preservation reporting must survive a child-disposed journal')
+    assert.ok((result.preservedArtifacts ?? []).includes(journalPath), 'the lost journal location must be retained for manual guidance')
+    assert.deepEqual(result.preservedPaths, [childPath])
+  })
+
+  it('treats a reclaim failure with only a stdout rollback claim as unproven and preserves live bytes', async () => {
+    const fixture = await setupResultFixture()
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    let snapshotDirectory = ''
+    const result = await execute(fixture, () => {
+      // Failing child with no envelope: it changed live owned bytes, deleted
+      // the journal, and left a bare stdout success claim behind.
+      snapshotDirectory = (JSON.parse(readFileSync(journalPath, 'utf8')) as { snapshotDirectory: string }).snapshotDirectory
+      writeFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'mutated by child')
+      rmSync(journalPath, { force: true })
+      return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false }
+    })
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error?.code, 'FALLBACK_STATE_UNPROVEN')
+    assert.deepEqual(result.rollback, { attempted: true, succeeded: false }, 'the stdout claim must not become a verified success')
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'mutated by child', 'unproven live bytes must be preserved, never silently restored or removed')
+    assert.ok((result.preservedArtifacts ?? []).includes(journalPath), 'the lost journal location must be retained for manual guidance')
+    assert.ok((result.preservedArtifacts ?? []).includes(snapshotDirectory), 'the surviving snapshot must be retained for manual guidance')
+    assert.equal(existsSync(snapshotDirectory), true, 'the surviving snapshot must not be removed')
+  })
+
+  it('treats a reclaim failure with a nonce-valid success envelope as unproven and preserves live bytes', async () => {
+    const fixture = await setupResultFixture()
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const result = await execute(fixture, childWritesEnvelope((nonce) => {
+      // Failing child with a nonce-valid envelope: it changed live owned
+      // bytes, corrupted the journal transaction identity, and still claims
+      // a successful rollback.
+      writeFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'mutated by child')
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as Record<string, unknown>
+      writeFileSync(journalPath, JSON.stringify({ ...journal, transactionId: randomUUID() }, null, 2) + '\n')
+      return {
+        schema: FALLBACK_CHILD_RESULT_SCHEMA,
+        nonce,
+        code: 'FALLBACK_MCP_DRIFT',
+        rollback: { attempted: true, succeeded: true },
+      }
+    }))
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error?.code, 'FALLBACK_STATE_UNPROVEN')
+    assert.deepEqual(result.rollback, { attempted: true, succeeded: false }, 'even a nonce-valid envelope must not become a verified success without reclaim')
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'mutated by child', 'unproven live bytes must be preserved, never silently restored or removed')
+    assert.ok((result.preservedArtifacts ?? []).includes(journalPath), 'the corrupted journal location must be retained for manual guidance')
+    assert.equal(existsSync(journalPath), true, 'the corrupted journal must survive for manual recovery')
+  })
+
+  it('still reports a verified parent rollback when the journal survives a mutating failing child', async () => {
+    // Positive control: the child mutates the live tracking file through the
+    // genuine journal API and then fails. The parent reclaims, restores from
+    // authenticated backups, and proves the rollback.
+    const fixture = await setupResultFixture()
+    const result = await fallbackStrategy.execute(fixture.item, {
+      options: {},
+      commandRunner: {
+        run: async () => {
+          const claimed = await claimFallbackJournalMutation(fixture.identity, manifestDigestOf(fixture.identity))
+          assert.ok(claimed, 'the simulated child must be able to claim the mutating journal')
+          const mutated = { ...(await readTrackingFile())!, bundleVersions: { claude: '9.9.9' } }
+          const staged = await registerFallbackStage(claimed, fixture.identity.trackingPath, { bytes: Buffer.from(JSON.stringify(mutated, null, 2) + '\n') })
+          await applyFallbackEntry(staged, fixture.identity.trackingPath)
+          return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false }
+        },
+      },
+    })
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
+    assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
+    assert.equal((await readTrackingFile())?.bundleVersions?.claude, '1.0.0', 'the verified parent restore must bring back the planned tracking bytes')
+    assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked')
+  })
+
+  it('deterministically merges child preservation reporting with an unproven parent restore', async () => {
+    const fixture = await setupResultFixture()
+    const childArtifactLate = path.join(home, 'preserved', 'z-artifact')
+    const childArtifactEarly = path.join(home, 'preserved', 'a-artifact')
+    const childPath = path.join(home, 'preserved', 'm-path')
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const result = await execute(fixture, childWritesEnvelope((nonce) => {
+      // Tamper one journaled backup so the parent's own restore fails closed
+      // (unproven) while the validated child reporting still propagates.
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { entries: Array<{ backup?: string }> }
+      const backup = journal.entries.find((entry) => entry.backup)?.backup
+      assert.ok(backup, 'the fixture journal must hold at least one backup')
+      if (statSync(backup).isDirectory()) writeFileSync(path.join(backup, '__tampered__'), 'tampered')
+      else writeFileSync(backup, 'tampered')
+      return {
+        schema: FALLBACK_CHILD_RESULT_SCHEMA,
+        nonce,
+        code: 'FALLBACK_STATE_UNPROVEN',
+        rollback: { attempted: true, succeeded: false },
+        preservedArtifacts: [childArtifactLate, childArtifactEarly],
+        preservedPaths: [childPath],
+      }
+    }))
+
+    assert.equal(result.error?.code, 'FALLBACK_STATE_UNPROVEN')
+    assert.deepEqual(result.rollback, { attempted: true, succeeded: false })
+    assert.deepEqual(result.preservedArtifacts, [childArtifactEarly, childArtifactLate], 'merged reporting must be deduplicated and deterministically ordered')
+    assert.deepEqual(result.preservedPaths, [childPath])
+    assert.equal(existsSync(journalPath), true, 'an unproven restore must preserve the journal')
   })
 
   it('stays compatible with older children that publish no structured result', async () => {
@@ -763,6 +979,445 @@ describe('fallback strategy structured child result', () => {
     assert.ok(!stderr.includes(childRawFragment), 'raw child stderr must never be forwarded to public stderr')
     assert.ok(!parsed.error?.message.includes(childRawFragment), 'raw child text must never be promoted into the public message')
     assert.equal(JSON.parse(JSON.stringify(parsed)) && true, true, 'the public document must round-trip as one stable JSON value')
+  })
+})
+
+describe('fallback strategy frontier planning', () => {
+  let home: string
+  let previousHome: string | undefined
+  let previousUserProfile: string | undefined
+  let previousOpenCodeSkillsDir: string | undefined
+  const createdManifestDirectories: string[] = []
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-frontier-'))
+    previousHome = process.env.HOME
+    previousUserProfile = process.env.USERPROFILE
+    previousOpenCodeSkillsDir = process.env.NSOLID_OPENCODE_SKILLS_DIR
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+  })
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousUserProfile
+    if (previousOpenCodeSkillsDir === undefined) delete process.env.NSOLID_OPENCODE_SKILLS_DIR
+    else process.env.NSOLID_OPENCODE_SKILLS_DIR = previousOpenCodeSkillsDir
+    while (createdManifestDirectories.length > 0) {
+      rmSync(createdManifestDirectories.pop()!, { recursive: true, force: true })
+    }
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  /** Minimal ustar builder so fixture bundles never depend on a system tar. */
+  function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 'utf8')
+    const size = body ? body.length : 0
+    header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
+    header[156] = type.charCodeAt(0)
+    header.write('ustar', 257, 'ascii')
+    header.write('00', 263, 'ascii')
+    const blocks = Math.ceil(size / 512)
+    const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
+    return Buffer.concat([header, padded])
+  }
+
+  function writeBundleTarball (bundle: object): string {
+    const tarball = path.join(home, 'artifact.tgz')
+    writeFileSync(tarball, gzipSync(Buffer.concat([
+      tarEntry('package/', undefined, '5'),
+      tarEntry('package/bundle.json', Buffer.from(JSON.stringify(bundle)), '0'),
+      Buffer.alloc(1024),
+    ])))
+    return tarball
+  }
+
+  async function writeFixtureTracking (options: {
+    harness: 'opencode' | 'claude'
+    skills: readonly { name: string, path: string }[]
+    mcpServers?: readonly Record<string, unknown>[]
+  }): Promise<void> {
+    const trackingPath = path.join(home, '.agents', '.nodesource-installed.json')
+    mkdirSync(path.dirname(trackingPath), { recursive: true })
+    await writeTrackingFile({
+      version: '1.0.0',
+      installedAt: new Date().toISOString(),
+      harness: options.harness,
+      bundleVersions: { [options.harness]: '1.0.0' },
+      skills: options.skills.map((skill) => ({
+        ...skill,
+        installedAt: new Date().toISOString(),
+        harnesses: [options.harness],
+        paths: { [options.harness]: skill.path },
+      })),
+      mcpServers: [...(options.mcpServers ?? [])],
+    } as never)
+  }
+
+  function buildInstallation (options: {
+    harness: 'opencode' | 'claude'
+    tarball: string
+    trackedSkills: readonly { name: string, path: string }[]
+    trackedMcpConfigPath?: string
+    trackedMcpNames?: readonly string[]
+    trackedMcpFields?: readonly { configPath: string, server: string, field: string, expectedDigest: string }[]
+  }): UpdateInstallation {
+    return {
+      installationId: `${options.harness}:fallback`,
+      target: options.harness,
+      ownership: 'fallback',
+      installed: true,
+      source: { kind: 'fallback', bundleVersion: '1.0.0', executor: 'npm-exec' },
+      version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+      artifact: {
+        kind: 'npm',
+        packageName: 'nsolid-plugin',
+        version: '1.0.1',
+        registry: 'https://registry.example.com',
+        tarball: 'artifact.tgz',
+        integrity: 'sha512-unused-at-plan-time',
+        tarballPath: options.tarball,
+      },
+      metadata: {
+        trackedSkills: [...options.trackedSkills],
+        ...(options.trackedMcpConfigPath !== undefined ? { trackedMcpConfigPath: options.trackedMcpConfigPath } : {}),
+        ...(options.trackedMcpNames !== undefined ? { trackedMcpNames: [...options.trackedMcpNames] } : {}),
+        ...(options.trackedMcpFields !== undefined ? { trackedMcpFields: [...options.trackedMcpFields] } : {}),
+      },
+    }
+  }
+
+  async function planFixture (installation: UpdateInstallation): Promise<UpdatePlanItem> {
+    const planned = await fallbackStrategy.plan(installation, { options: {}, commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) } })
+    for (const directory of planned.temporaryDirectories ?? []) createdManifestDirectories.push(directory)
+    return planned
+  }
+
+  function anchorIdentityOfFixture (anchorPath: string): Record<string, unknown> {
+    const stats = statSync(anchorPath, { bigint: true })
+    return { path: anchorPath, realpath: anchorPath, type: 'directory', device: stats.dev.toString(), inode: stats.ino.toString() }
+  }
+
+  function readManifest (planned: UpdatePlanItem): Record<string, unknown> {
+    const manifestPath = path.join(planned.temporaryDirectories![0], 'transaction.json')
+    return JSON.parse(readFileSync(manifestPath, 'utf8'))
+  }
+
+  it('embeds the exact deterministic frontier graph in the manifest and binds the command digest to it', async () => {
+    const skillsRoot = path.join(home, '.config', 'opencode', 'skills')
+    mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true })
+    await writeFixtureTracking({
+      harness: 'opencode',
+      skills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
+    })
+    const tarball = writeBundleTarball({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [
+        { name: 'tracked', path: 'skills/tracked', description: 'tracked' },
+        { name: 'added', path: 'skills/added', description: 'added' },
+      ],
+      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
+    })
+    const planned = await planFixture(buildInstallation({
+      harness: 'opencode',
+      tarball,
+      trackedSkills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
+    }))
+
+    assert.equal(planned.planningError, undefined)
+    assert.equal(planned.steps.length, 4)
+    const expectedFrontier = {
+      frontierPath: skillsRoot,
+      activation: 'required',
+      anchor: anchorIdentityOfFixture(path.join(home, '.config', 'opencode')),
+      leaves: [
+        { id: 'skill:added', role: 'skill', activation: 'required', path: path.join(skillsRoot, 'added') },
+        { id: 'skill:tracked', role: 'skill', activation: 'required', path: path.join(skillsRoot, 'tracked') },
+      ],
+    }
+    const manifest = readManifest(planned)
+    assert.deepEqual(manifest.plannedMissingFrontiers, [expectedFrontier])
+    // The published child command digest covers exactly the embedded graph.
+    const commandStep = planned.steps.find((entry) => entry.kind === 'command')
+    assert.ok(commandStep !== undefined && commandStep.kind === 'command')
+    const command = commandStep.command
+    const digestArgumentIndex = command.args.indexOf('--manifest-digest')
+    assert.ok(digestArgumentIndex >= 0)
+    assert.equal(command.args[digestArgumentIndex + 1], manifestDigestOf(manifest as never))
+    // Derivation is deterministic: an identical planned state yields a
+    // byte-identical frontier graph.
+    const replanned = await planFixture(buildInstallation({
+      harness: 'opencode',
+      tarball,
+      trackedSkills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
+    }))
+    assert.deepEqual(readManifest(replanned).plannedMissingFrontiers, [expectedFrontier])
+  })
+
+  it('derives complete leaf roles inside a frontier including planned removals while existing parents keep their leaves out', async () => {
+    const skillsRoot = path.join(home, '.agents', 'skills')
+    const linkRoot = path.resolve(getHarnessSkillsPath('claude'))
+    mkdirSync(path.join(home, '.agents'), { recursive: true })
+    mkdirSync(linkRoot, { recursive: true })
+    await writeFixtureTracking({
+      harness: 'claude',
+      skills: [
+        { name: 'kept', path: path.join(skillsRoot, 'kept') },
+        { name: 'dropped', path: path.join(skillsRoot, 'dropped') },
+      ],
+    })
+    const tarball = writeBundleTarball({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [
+        { name: 'kept', path: 'skills/kept', description: 'kept' },
+        { name: 'brand-new', path: 'skills/brand-new', description: 'brand-new' },
+      ],
+      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
+    })
+    const planned = await planFixture(buildInstallation({
+      harness: 'claude',
+      tarball,
+      trackedSkills: [
+        { name: 'kept', path: path.join(skillsRoot, 'kept') },
+        { name: 'dropped', path: path.join(skillsRoot, 'dropped') },
+      ],
+    }))
+
+    assert.equal(planned.planningError, undefined)
+    const manifest = readManifest(planned)
+    assert.deepEqual(manifest.plannedMissingFrontiers, [{
+      frontierPath: skillsRoot,
+      activation: 'required',
+      anchor: anchorIdentityOfFixture(path.join(home, '.agents')),
+      leaves: [
+        { id: 'skill:brand-new', role: 'skill', activation: 'required', path: path.join(skillsRoot, 'brand-new') },
+        { id: 'owned-skill:dropped', role: 'skill', activation: 'conditional', path: path.join(skillsRoot, 'dropped') },
+        { id: 'skill:kept', role: 'skill', activation: 'required', path: path.join(skillsRoot, 'kept') },
+      ],
+    }])
+  })
+
+  it('treats a missing file leaf under an existing parent as a normal destination, never a frontier', async () => {
+    const skillsRoot = path.join(home, '.config', 'opencode', 'skills')
+    mkdirSync(path.join(skillsRoot, 'tracked'), { recursive: true })
+    writeFileSync(path.join(skillsRoot, 'tracked', 'SKILL.md'), 'tracked')
+    await writeFixtureTracking({
+      harness: 'opencode',
+      skills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
+    })
+    const tarball = writeBundleTarball({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
+      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
+    })
+    const planned = await planFixture(buildInstallation({
+      harness: 'opencode',
+      tarball,
+      trackedSkills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
+    }))
+
+    // The canonical MCP config (~/.config/opencode/opencode.jsonc) is missing
+    // but its parent exists: an independent leaf destination, so the update
+    // stays fully supported with an explicitly empty frontier list.
+    assert.equal(planned.planningError, undefined)
+    assert.equal(planned.steps.length, 4)
+    assert.deepEqual(readManifest(planned).plannedMissingFrontiers, [])
+  })
+
+  it('keeps frontiers sharing one parent together and separates distinct missing parents', async () => {
+    const skillsRoot = path.join(home, '.agents', 'skills')
+    const linkRoot = path.resolve(getHarnessSkillsPath('claude'))
+    mkdirSync(path.join(home, '.agents'), { recursive: true })
+    mkdirSync(path.join(home, '.claude'), { recursive: true })
+    await writeFixtureTracking({
+      harness: 'claude',
+      skills: [{ name: 'kept', path: path.join(skillsRoot, 'kept') }],
+    })
+    const tarball = writeBundleTarball({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [
+        { name: 'kept', path: 'skills/kept', description: 'kept' },
+        { name: 'brand-new', path: 'skills/brand-new', description: 'brand-new' },
+      ],
+      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
+    })
+    const planned = await planFixture(buildInstallation({
+      harness: 'claude',
+      tarball,
+      trackedSkills: [{ name: 'kept', path: path.join(skillsRoot, 'kept') }],
+    }))
+
+    assert.equal(planned.planningError, undefined)
+    const manifest = readManifest(planned)
+    const frontiers = manifest.plannedMissingFrontiers as Record<string, unknown>[]
+    assert.deepEqual(frontiers, [
+      {
+        frontierPath: skillsRoot,
+        activation: 'required',
+        anchor: anchorIdentityOfFixture(path.join(home, '.agents')),
+        leaves: [
+          { id: 'skill:brand-new', role: 'skill', activation: 'required', path: path.join(skillsRoot, 'brand-new') },
+          { id: 'skill:kept', role: 'skill', activation: 'required', path: path.join(skillsRoot, 'kept') },
+        ],
+      },
+      {
+        frontierPath: linkRoot,
+        activation: 'required',
+        anchor: anchorIdentityOfFixture(path.join(home, '.claude')),
+        leaves: [
+          { id: 'link:brand-new', role: 'link', activation: 'required', path: path.join(linkRoot, 'brand-new') },
+          { id: 'link:kept', role: 'link', activation: 'required', path: path.join(linkRoot, 'kept') },
+        ],
+      },
+    ])
+  })
+
+  it('fails a leaf ancestor collision closed before any manifest workspace exists', async () => {
+    // Destination root = ~/.config so the bundle skill `opencode` plans the
+    // leaf ~/.config/opencode, a proper ancestor of the canonical MCP config
+    // leaf ~/.config/opencode/opencode.jsonc.
+    process.env.NSOLID_OPENCODE_SKILLS_DIR = path.join(home, '.config')
+    mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true })
+    await writeFixtureTracking({
+      harness: 'opencode',
+      skills: [{ name: 'opencode', path: path.join(home, '.config', 'opencode') }],
+    })
+    const tarball = writeBundleTarball({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'opencode', path: 'skills/opencode', description: 'opencode' }],
+      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
+    })
+    const planned = await planFixture(buildInstallation({
+      harness: 'opencode',
+      tarball,
+      trackedSkills: [{ name: 'opencode', path: path.join(home, '.config', 'opencode') }],
+    }))
+
+    assert.equal(planned.planningError?.code, 'FALLBACK_FRONTIER_COLLISION')
+    assert.equal(planned.steps.length, 0)
+    assert.equal(planned.temporaryDirectories, undefined)
+  })
+
+  it('rejects an active frontier on unsupported platforms before the manifest exists and keeps existing-parent updates supported', async () => {
+    const skillsRoot = path.join(home, '.config', 'opencode', 'skills')
+    mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true })
+    await writeFixtureTracking({
+      harness: 'opencode',
+      skills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
+    })
+    const tarball = writeBundleTarball({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
+      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
+    })
+    const installation = buildInstallation({
+      harness: 'opencode',
+      tarball,
+      trackedSkills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
+    })
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    try {
+      const rejected = await planFixture(installation)
+      assert.equal(rejected.planningError?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+      assert.ok(rejected.planningError?.message.includes(skillsRoot))
+      assert.equal(rejected.steps.length, 0)
+      assert.equal(rejected.temporaryDirectories, undefined)
+      assert.deepEqual(rejected.manualCommands, ['nsolid-plugin install --harness opencode'])
+
+      // Once every parent and leaf exists, the frontier gate passes on the
+      // same faked platform: the rejection is strictly frontier-conditional.
+      // (The subsequent UNSAFE_FALLBACK_EXECUTOR outcome, if any, is an
+      // artifact of faking win32 while resolving a POSIX npm path and is
+      // already covered by the real-platform existing-parent test above.)
+      mkdirSync(path.join(skillsRoot, 'tracked'), { recursive: true })
+      const pastGate = await planFixture(installation)
+      assert.notEqual(pastGate.planningError?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+      assert.equal(pastGate.temporaryDirectories, undefined)
+    } finally {
+      Object.defineProperty(process, 'platform', platformDescriptor)
+    }
+    // Existing-parent support on the REAL platform: once every parent and
+    // leaf exists, with no frontier the plan carries a full command step and
+    // an explicitly empty frontier list.
+    const supported = await planFixture(installation)
+    assert.equal(supported.planningError, undefined)
+    assert.equal(supported.steps.length, 4)
+    assert.deepEqual(readManifest(supported).plannedMissingFrontiers, [])
+  })
+
+  it('keeps a conditional MCP-only frontier active on unsupported platforms instead of inferring a no-op', async () => {
+    const skillsRoot = path.join(home, '.config', 'opencode', 'skills')
+    mkdirSync(path.join(skillsRoot, 'kept'), { recursive: true })
+    mkdirSync(path.join(home, 'custom'), { recursive: true })
+    const deepConfigPath = path.join(home, 'custom', 'deep', 'nested', 'config.json')
+    const fields = {
+      url: valueDigest('https://old.example.com/mcp'),
+      headers: valueDigest({ AUTH: 'x' }),
+    }
+    await writeFixtureTracking({
+      harness: 'opencode',
+      skills: [{ name: 'kept', path: path.join(skillsRoot, 'kept') }],
+      mcpServers: [{ name: 'alpha-console', configPath: deepConfigPath, harness: 'opencode', configuredAt: new Date().toISOString(), fields }],
+    })
+    const trackedMcpFields = [
+      { configPath: deepConfigPath, server: 'alpha-console', field: 'url', expectedDigest: fields.url },
+      { configPath: deepConfigPath, server: 'alpha-console', field: 'headers', expectedDigest: fields.headers },
+    ]
+    const tarball = writeBundleTarball({
+      name: 'nsolid-plugin',
+      version: '1.0.1',
+      skills: [{ name: 'kept', path: 'skills/kept', description: 'kept' }],
+      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
+    })
+    const installation = buildInstallation({
+      harness: 'opencode',
+      tarball,
+      trackedSkills: [{ name: 'kept', path: path.join(skillsRoot, 'kept') }],
+      trackedMcpConfigPath: deepConfigPath,
+      trackedMcpNames: ['alpha-console'],
+      trackedMcpFields,
+    })
+
+    // Linux plans the conditional frontier: the parent cannot prove the
+    // config render is a no-op, so the frontier is carried as conditional
+    // evidence and never marked inactive.
+    const linuxPlanned = await planFixture(installation)
+    assert.equal(linuxPlanned.planningError, undefined)
+    assert.deepEqual(readManifest(linuxPlanned).plannedMissingFrontiers, [{
+      frontierPath: path.join(home, 'custom', 'deep'),
+      activation: 'conditional',
+      anchor: anchorIdentityOfFixture(path.join(home, 'custom')),
+      leaves: [
+        // Sorted union index 1: the canonical ~/.config/opencode/opencode.jsonc
+        // leaf sorts before custom/... and is a missing leaf (parent exists).
+        { id: 'mcp-config:1', role: 'mcp-config', activation: 'conditional', path: deepConfigPath },
+      ],
+    }])
+
+    // An unsupported platform must not infer frontier inactivity from that
+    // mutable plan state: the same conditional frontier fails the plan closed
+    // before any manifest workspace exists.
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    try {
+      const rejected = await planFixture(installation)
+      assert.equal(rejected.planningError?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+      assert.ok(rejected.planningError?.message.includes(path.join(home, 'custom', 'deep')))
+      assert.equal(rejected.steps.length, 0)
+      assert.equal(rejected.temporaryDirectories, undefined)
+    } finally {
+      Object.defineProperty(process, 'platform', platformDescriptor)
+    }
   })
 })
 

@@ -26,7 +26,7 @@ import { codexStrategy } from './strategies/codex.js'
 import { antigravityStrategy } from './strategies/antigravity.js'
 import { piStrategy } from './strategies/pi.js'
 import { fallbackStrategy } from './strategies/fallback.js'
-import { recoverFallbackJournal } from './fallback-journal.js'
+import { inspectFallbackJournal, recoverFallbackJournal } from './fallback-journal.js'
 import { getTrackingFilePath } from '../utils/path.js'
 import { cliExactVersionManualCommands } from './cli-guidance.js'
 
@@ -44,11 +44,30 @@ const STATUSES: readonly UpdateStatus[] = [
 
 export async function planUpdates (options: UpdateOptions = {}): Promise<UpdatePlan> {
   validateScope(options)
-  const pendingRecovery = await recoverFallbackJournal(getTrackingFilePath(), options.check !== true)
-  if (pendingRecovery.pending && !pendingRecovery.recovered) {
-    return {
-      checkOnly: options.check === true,
-      items: [recoveryPlanItem(options.check === true)],
+  // A read-only check never restores: it inspects the pending journal without
+  // creating recovery storage, renaming, copying, removing, or rewriting any
+  // journal, tracking, snapshot, or backup bytes. Only a real (non-check)
+  // plan may run restore-only next-run recovery, which rewrites owned tracked
+  // paths from the authenticated snapshot while the journal and snapshot
+  // always survive. Any pending journal (restored, unrestorable, malformed,
+  // or forged) still blocks the plan with guidance instead of committing or
+  // cleaning anything. The concrete outcome is carried into the guidance so
+  // the message never claims "preserved untouched" after a restore happened.
+  if (options.check === true) {
+    const pendingRecovery = await inspectFallbackJournal(getTrackingFilePath())
+    if (pendingRecovery.pending) {
+      return {
+        checkOnly: true,
+        items: [recoveryPlanItem(pendingRecovery)],
+      }
+    }
+  } else {
+    const pendingRecovery = await recoverFallbackJournal(getTrackingFilePath())
+    if (pendingRecovery.pending) {
+      return {
+        checkOnly: false,
+        items: [recoveryPlanItem(pendingRecovery)],
+      }
     }
   }
   const commandRunner = options.commandRunner ?? createCommandRunner()
@@ -203,7 +222,7 @@ export async function executeUpdatePlan (plan: UpdatePlan, options: UpdateOption
   const recoveryItem = plan.items.find((item) => item.planningError?.code === 'FALLBACK_RECOVERY_PENDING' || item.planningError?.code === 'FALLBACK_RECOVERY_FAILED')
   if (recoveryItem?.planningError) {
     const results = plan.items.map((item) => item.planningError
-      ? resultFromPlan(item, 'failed', { error: item.planningError })
+      ? resultFromPlan(item, 'failed', { error: item.planningError, ...preservationExtras(item) })
       : item.requiresConfirmation
         ? resultFromPlan(item, 'failed', { error: recoveryItem.planningError })
         : resultFromPlan(item, statusForPlan(item, false)))
@@ -255,7 +274,9 @@ export async function executeUpdatePlan (plan: UpdatePlan, options: UpdateOption
   return summarizeResults(false, results)
 }
 
-function recoveryPlanItem (checkOnly: boolean): UpdatePlanItem {
+type FallbackRecoveryOutcome = Awaited<ReturnType<typeof recoverFallbackJournal>>
+
+function recoveryPlanItem (recovery: FallbackRecoveryOutcome): UpdatePlanItem {
   const installation = {
     installationId: 'fallback:recovery' as const,
     target: 'opencode' as const,
@@ -264,15 +285,53 @@ function recoveryPlanItem (checkOnly: boolean): UpdatePlanItem {
     source: { kind: 'fallback' as const },
     version: { status: 'unknown' as const },
   }
-  return {
+  // Report the actual outcome instead of a static claim. Restore-only
+  // recovery may have rewritten some tracked paths while preserving others:
+  // the message must name exactly what was restored, what was left for
+  // manual inspection, and never claim "preserved untouched" after a
+  // restoration happened.
+  const inspectDetail = recovery.preservedPaths.length > 0
+    ? ` Live paths left for manual inspection: ${recovery.preservedPaths.join(', ')}.`
+    : ''
+  const restoredDetail = recovery.restoredPaths.length > 0
+    ? ` Restored to tracked state: ${recovery.restoredPaths.join(', ')}.`
+    : ''
+  let message: string
+  if (recovery.restoredPaths.length > 0 && recovery.preservedPaths.length > 0) {
+    message = `A previous fallback transaction was PARTIALLY restored to its tracked state automatically.${restoredDetail}${inspectDetail} Its journal and snapshot were preserved next to the tracking file; resolve the remaining paths and remove them deliberately (restore or delete) before updating.`
+  } else if (recovery.restoredPaths.length > 0) {
+    message = `A previous fallback transaction was restored to its tracked state automatically.${restoredDetail} Its journal and snapshot were preserved next to the tracking file. Remove them deliberately (restore or delete) before updating.`
+  } else if (recovery.recovered) {
+    message = `A previous fallback transaction needs no restoration: every owned path is already at its tracked state.${inspectDetail} Its journal and snapshot were preserved next to the tracking file. Remove them deliberately (restore or delete) before updating.`
+  } else {
+    message = `A previous fallback transaction is still pending and was preserved untouched.${inspectDetail} Resolve it manually (inspect the journal and snapshot next to the tracking file, restore or remove them deliberately) before updating.`
+  }
+  const item: UpdatePlanItem = {
     ...planItem(installation),
     planningError: {
-      code: checkOnly ? 'FALLBACK_RECOVERY_PENDING' : 'FALLBACK_RECOVERY_FAILED',
-      message: checkOnly
-        ? 'A pending fallback transaction requires recovery before the next mutable update'
-        : 'A pending fallback transaction could not be recovered',
+      code: 'FALLBACK_RECOVERY_PENDING',
+      message,
     },
   }
+  // Reporting-only structural evidence of what recovery left on disk; it
+  // never authorizes filesystem mutation. Empty arrays are omitted so the
+  // public plan/result shape stays stable.
+  if (recovery.preservedArtifacts.length > 0) item.preservedArtifacts = recovery.preservedArtifacts
+  if (recovery.preservedPaths.length > 0) item.preservedPaths = recovery.preservedPaths
+  return item
+}
+
+/**
+ * Reporting-only propagation of recovery preservation evidence from a plan
+ * item into its public result. The arrays describe what recovery left on
+ * disk; they never authorize filesystem mutation. Empty/absent arrays are
+ * omitted so structured output keeps one stable schema.
+ */
+function preservationExtras (item: Pick<UpdatePlanItem, 'preservedArtifacts' | 'preservedPaths'>): Partial<UpdateResult> {
+  const extra: Partial<UpdateResult> = {}
+  if (item.preservedArtifacts !== undefined && item.preservedArtifacts.length > 0) extra.preservedArtifacts = item.preservedArtifacts
+  if (item.preservedPaths !== undefined && item.preservedPaths.length > 0) extra.preservedPaths = item.preservedPaths
+  return extra
 }
 
 async function cleanupPlanState (item: UpdatePlanItem): Promise<void> {
@@ -290,7 +349,7 @@ function mustPreservePlanState (result: UpdateResult): boolean {
 
 export function summarizePlan (plan: UpdatePlan): UpdateSummary {
   return summarizeResults(plan.checkOnly, plan.items.map((item) => item.planningError
-    ? resultFromPlan(item, 'failed', { error: item.planningError })
+    ? resultFromPlan(item, 'failed', { error: item.planningError, ...preservationExtras(item) })
     : resultFromPlan(item, statusForPlan(item, plan.checkOnly))))
 }
 

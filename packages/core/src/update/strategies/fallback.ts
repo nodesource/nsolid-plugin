@@ -4,20 +4,24 @@ import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { UpdateContext, UpdateInstallation, UpdatePlanItem, UpdateResult, UpdateStrategy } from '../types.js'
-import type { HarnessType } from '../../types.js'
+import type { FallbackPathEvidence, FallbackTransactionIdentity } from '../types.js'
+import { FALLBACK_PROTOCOL_VERSION } from '../types.js'
+import { deriveFallbackFrontierLeafTargets, deriveFallbackFrontierPlan, evaluateFallbackFrontierPlatformSupport, fallbackLinkMaterialization, FallbackFrontierError, type FallbackFrontierPlan } from '../fallback-frontier.js'
+import type { HarnessType, BundleDescriptor } from '../../types.js'
 import { DEFAULT_COMMAND_TIMEOUT_MS, resolveExecutableIdentity, isCommandSuccessful } from '../command-runner.js'
 import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
 import { getTrackingFilePath, getSkillsDir, resolveHome } from '../../utils/path.js'
 import { getAdapter } from '../../harnesses/index.js'
 import { getHarnessSkillsPath } from '../../skills/skill-linker.js'
-import { beginFallbackJournal, captureFallbackJournalState, commitFallbackJournal, markFallbackJournalMutating, pathDigest, pathKind, recoverFallbackJournal, reloadFallbackJournal, restoreFallbackJournal, trackingDigest, type FallbackJournal } from '../fallback-journal.js'
+import { beginFallbackJournal, commitFallbackJournal, manifestDigestOf, markFallbackJournalMutating, pathDigest, pathKind, reclaimFallbackJournalMutation, recoverFallbackJournal, reloadFallbackJournal, restoreFallbackJournal, trackingDigest, type FallbackJournalHandle } from '../fallback-journal.js'
 import { cleanupNpmArtifact } from '../version-source.js'
 import { managerArgsForIdentity, verifyLocalArtifact } from '../package-manager.js'
 import { readTrackingFile } from '../../skills/skill-tracker.js'
 import { harnessMcpKey, readMcpFieldDigests } from '../mcp-lookup.js'
-import { readTarEntryTextFromBytes } from '../tarball.js'
+import { readTarEntryText, readTarEntryTextFromBytes } from '../tarball.js'
 import { validateBundle } from '../../validate.js'
-import { childResultArgs, containmentDirectoryMatches, fallbackChildResultMessage, readValidatedFallbackChildResult, recordContainmentDirectoryIdentity, FALLBACK_CHILD_RESULT_FILENAME, type ContainmentDirectoryIdentity } from '../fallback-result-protocol.js'
+import { assertSafeSkillName } from '../../utils/skill-name.js'
+import { childResultArgs, containmentDirectoryMatches, fallbackChildResultMessage, readValidatedFallbackChildResult, recordContainmentDirectoryIdentity, FALLBACK_CHILD_RESULT_FILENAME, type ContainmentDirectoryIdentity, type FallbackChildResultEnvelope } from '../fallback-result-protocol.js'
 
 export const fallbackStrategy: UpdateStrategy = {
   target: 'opencode',
@@ -70,14 +74,68 @@ export const fallbackStrategy: UpdateStrategy = {
     if (installation.artifact?.kind !== 'npm' || !installation.artifact.tarballPath) {
       return planItem(installation, [], [], undefined, { code: 'ARTIFACT_IDENTITY_REQUIRED', message: 'Fallback update requires a verified registry tarball identity' })
     }
+    // Parse the verified bundle BEFORE the manifest is written: every planned
+    // destination must be derived from the verified tarball itself. A bundle
+    // that cannot be parsed fails the mutable plan closed.
+    const verifiedBundle = await parseVerifiedBundle(installation.artifact.tarballPath)
+    if (!verifiedBundle) {
+      return planItem(installation, [], [], undefined, { code: 'BUNDLE_INVALID', message: 'Fallback update could not read the verified bundle descriptor' })
+    }
+    try {
+      for (const skill of verifiedBundle.skills) assertSafeSkillName(skill.name)
+    } catch {
+      return planItem(installation, [], [], undefined, { code: 'BUNDLE_INVALID', message: 'Update bundle contains an unsafe skill destination' })
+    }
+    // Derive the complete frontier/leaf graph from the verified bundle plus
+    // the trusted identity BEFORE the manifest is written: planning evidence
+    // must fail closed before any manifest, journal, or live state exists.
+    const { destination, linkDir } = resolveFallbackDestinations(installation.target as HarnessType)
+    let frontierPlan: FallbackFrontierPlan
+    try {
+      // One shared derivation feeds both the external and the local planner:
+      // identical planned state must produce an identical leaf graph.
+      frontierPlan = await deriveFallbackFrontierPlan(deriveFallbackFrontierLeafTargets({
+        ownedSkills: identity.ownedSkills,
+        ownedLinks: identity.ownedLinks,
+        ownedMcpConfigPaths: identity.ownedMcpConfigPaths,
+        trackingPath: identity.trackingPath,
+        destination,
+        linkDir,
+        bundleSkillNames: verifiedBundle.skills.map((skill) => skill.name),
+      }), fallbackLinkMaterialization(installation.target as HarnessType))
+    } catch (error) {
+      const code = error instanceof FallbackFrontierError ? error.code : 'FALLBACK_FRONTIER_INVALID_INPUT'
+      return planItem(installation, [], [], undefined, { code, message: `Fallback update could not derive its destination evidence: ${(error as Error).message}` })
+    }
+    // Publishing a planned-missing frontier is supported on Linux only for
+    // now; unsupported platforms fail the plan closed BEFORE the manifest
+    // workspace exists. Every derived frontier counts as active: conditional
+    // (MCP-only) inactivity cannot be proven from mutable planning state.
+    const frontierSupport = evaluateFallbackFrontierPlatformSupport(frontierPlan.frontiers)
+    if (!frontierSupport.supported) {
+      return {
+        ...planItem(installation, [], [], undefined, {
+          code: frontierSupport.code,
+          message: `This platform cannot yet create the missing parent directories (${frontierSupport.frontierPaths.join(', ')}) inside a fallback transaction. Create them manually or reinstall, then retry; no files were changed.`,
+        }),
+        manualCommands: [`nsolid-plugin install --harness ${installation.target}`],
+      }
+    }
     const executableIdentity = resolveExecutableIdentity(executor === 'npm-exec' ? 'npm' : 'pnpm')
     if (executableIdentity.kind === 'unsupported') {
       return planItem(installation, [], [], undefined, { code: 'UNSAFE_FALLBACK_EXECUTOR', message: 'Fallback update requires a verified absolute npm or pnpm executable identity' })
     }
-    const { manifestPath, resultPath, resultContainment } = await createManifest(identity)
+    const plannedIdentity: FallbackTransactionIdentity = {
+      ...identity,
+      bundleDestinations: await captureDestinationEvidence(installation.target as HarnessType, verifiedBundle),
+      // Exact deterministic frontier evidence derived above; the child never
+      // adds leaves. Explicitly present (empty when no frontier applies).
+      plannedMissingFrontiers: frontierPlan.frontiers,
+    }
+    const { manifestPath, manifestDigest, resultPath, resultContainment } = await createManifest(plannedIdentity)
     const version = installation.version.latest!
     const changes = await summarizeFallbackChanges(installation, installation.artifact.tarballPath)
-    const childCommand = ['nsolid-plugin-refresh-owned', '--transaction', manifestPath, ...childResultArgs(resultPath)]
+    const childCommand = ['nsolid-plugin-refresh-owned', '--transaction', manifestPath, '--manifest-digest', manifestDigest, ...childResultArgs(resultPath)]
     const managerArgs = executor === 'npm-exec'
       ? ['exec', '--yes', `--package=${installation.artifact.tarballPath}`, '--', ...childCommand]
       : [`--package=${installation.artifact.tarballPath}`, 'dlx', ...childCommand]
@@ -86,7 +144,7 @@ export const fallbackStrategy: UpdateStrategy = {
     const paths = installation.metadata?.trackedSkills?.map((skill) => skill.path) ?? []
     if (installation.metadata?.trackedMcpConfigPath) paths.push(installation.metadata.trackedMcpConfigPath)
     const planned = planItem(
-      { ...installation, source: { ...installation.source, executor }, fallbackTransaction: identity },
+      { ...installation, source: { ...installation.source, executor }, fallbackTransaction: plannedIdentity },
       [
         { kind: 'filesystem', description: 'Back up tracked NodeSource-owned fallback assets', operation: 'backup', paths },
         { kind: 'command', description: `Refresh the owned ${installation.target} bundle at exact version ${version}`, command },
@@ -118,7 +176,11 @@ export const fallbackStrategy: UpdateStrategy = {
     // there is no check/delete race against a swapped directory.
     const freshResultDir = await mkdtemp(path.join(tmpdir(), 'nsolid-plugin-result-'))
     let freshResultIdentity: ContainmentDirectoryIdentity | undefined
-    let journal: FallbackJournal | undefined
+    let journal: FallbackJournalHandle | undefined
+    // Snapshot directory created by this invocation; kept in memory so a
+    // proven pre-mutation abort can dispose exactly this transaction's
+    // residue without ever trusting the journal file for paths.
+    let begunSnapshotDirectory: string | undefined
     let preserveRecoveryArtifacts = false
     try {
       await chmod(workspace, 0o700)
@@ -143,14 +205,23 @@ export const fallbackStrategy: UpdateStrategy = {
         return failedResult(item, { code: 'ARTIFACT_INTEGRITY_FAILED', message: 'The planned fallback tarball no longer matches its registry integrity' })
       }
       if (item.fallbackTransaction) {
-        const recovery = await recoverFallbackJournal(item.fallbackTransaction.trackingPath, true)
-        if (!recovery.recovered) return failedResult(item, { code: 'FALLBACK_RECOVERY_FAILED', message: 'A previous fallback transaction could not be recovered' }, { attempted: true, succeeded: false })
+        // A journal left by an earlier run is never restored or cleaned here:
+        // next-run recovery is a strictly pending state that blocks the
+        // update until a human resolves it.
+        const recovery = await recoverFallbackJournal(item.fallbackTransaction.trackingPath)
+        if (recovery.pending) {
+          return failedResult(item, { code: 'FALLBACK_RECOVERY_PENDING', message: 'A previous fallback transaction is still pending. Restore or remove it manually before updating; its journal and snapshot are preserved next to the tracking file.' }, { attempted: false })
+        }
         try {
-          journal = (await beginFallbackJournal(item.fallbackTransaction)).journal
-          journal = await markFallbackJournalMutating(journal)
+          const begun = await beginFallbackJournal(item.fallbackTransaction)
+          begunSnapshotDirectory = begun.journal.snapshotDirectory
+          journal = await markFallbackJournalMutating(begun.handle)
         } catch (error) {
           if (error instanceof Error && error.message === 'FALLBACK_TRACKING_DRIFT') {
             return failedResult(item, { code: 'FALLBACK_TRACKING_DRIFT', message: 'Fallback tracking file changed after planning' }, { attempted: false })
+          }
+          if (error instanceof Error && error.message === 'FALLBACK_JOURNAL_BUSY') {
+            return failedResult(item, { code: 'FALLBACK_RECOVERY_PENDING', message: 'A previous fallback transaction is still pending. Restore or remove it manually before updating.' }, { attempted: false })
           }
           return failedResult(item, { code: 'FALLBACK_BACKUP_FAILED', message: 'Fallback parent snapshot could not be completed' }, { attempted: false })
         }
@@ -189,15 +260,84 @@ export const fallbackStrategy: UpdateStrategy = {
           : undefined
         const structuredMessage = structured === undefined ? undefined : fallbackChildResultMessage(structured.code, item.target)
         const childRollbackClaim = structured?.rollback ?? parseRollbackState(`${result.stdout}\n${result.stderr}`)
-        if (journal) journal = await reloadFallbackJournal(journal)
-        const parentRecovered = journal ? await restoreFallbackJournal(journal) : undefined
+        // Validated child reporting arrays seed the preservation evidence;
+        // parent-side outcomes are merged in below. Child paths stay strictly
+        // reporting-only: no delete or overwrite is ever justified by them.
+        const preservation = childPreservationEvidence(structured)
+        // A validated FALLBACK_PROTOCOL_UNSUPPORTED is a PRE-MUTATION
+        // rejection: the child refused before claiming the journal or touching
+        // any live path. The parent must not report a rollback and must not
+        // restore. It disposes its own pre-mutation journal + snapshot (paths
+        // recorded in memory at begin time) only when its IN-MEMORY manifest
+        // proves the live state is still exactly the planned original;
+        // otherwise everything stays preserved for manual recovery (fail
+        // closed) and the next run blocks as pending.
+        let preMutationRejection = false
+        if (journal !== undefined && !result.timedOut && result.spawnErrorCode !== 'ENOENT' && structured?.code === 'FALLBACK_PROTOCOL_UNSUPPORTED') {
+          preMutationRejection = true
+          const journalPath = journal.journalPath
+          const snapshotDirectory = begunSnapshotDirectory
+          const provablyUntouched = await liveStateMatchesPlannedEvidence(journal.manifest)
+          journal = undefined
+          if (provablyUntouched) {
+            await rm(journalPath, { force: true }).catch(() => { preservation.preservedArtifacts.push(journalPath) })
+            if (snapshotDirectory !== undefined) await rm(snapshotDirectory, { recursive: true, force: true }).catch(() => { preservation.preservedArtifacts.push(snapshotDirectory) })
+          } else {
+            if (journalPath !== undefined) preservation.preservedArtifacts.push(journalPath)
+            if (snapshotDirectory !== undefined) preservation.preservedArtifacts.push(snapshotDirectory)
+          }
+        }
+        // Hybrid rollback: the parent reclaims owner authority (only after a
+        // confirmed command completion) and restores using its IN-MEMORY
+        // manifest as the sole authority. Owned paths are rewritten from
+        // backups authenticated against that manifest; planned-missing
+        // destinations are only ever moved to a parent-randomized quarantine,
+        // never rm'd. If the journal no longer matches the in-memory manifest
+        // or a backup fails authentication, nothing is mutated and the state
+        // is reported unproven.
+        let parentRecovered: boolean | undefined
+        let stateUnproven = false
+        // A failed reclaim leaves the final live state UNPROVEN: the journal
+        // no longer matches the trusted in-memory manifest (or is gone), so
+        // no verified restore ran. Losing journal authority is never proof of
+        // a successful child rollback, so the child claim — stdout hint or
+        // validated envelope — is never promoted to a success here. Known
+        // recovery locations are retained for manual guidance instead.
+        let reclaimFailed = false
+        if (journal) {
+          try {
+            const ownerHandle = await reclaimFallbackJournalMutation(journal)
+            journal = ownerHandle
+            const restored = await restoreFallbackJournal(ownerHandle)
+            parentRecovered = restored.succeeded
+            stateUnproven = restored.unproven === true
+            mergePreservation(preservation, restored)
+          } catch {
+            reclaimFailed = true
+            stateUnproven = true
+            for (const location of [journal?.journalPath, begunSnapshotDirectory]) {
+              if (location !== undefined && !preservation.preservedArtifacts.includes(location)) {
+                preservation.preservedArtifacts.push(location)
+              }
+            }
+            preservation.preservedArtifacts.sort()
+            journal = undefined
+          }
+        }
         // Parent-owned journal recovery remains authoritative over any child
         // rollback claim: while a parent journal exists, its verified restore
-        // outcome is the public rollback state; the child claim only applies
-        // when the parent holds no journal (older flows, no transaction).
-        const rollback = journal
-          ? { attempted: true, succeeded: parentRecovered === true }
-          : childRollbackClaim ?? { attempted: false }
+        // outcome is the public rollback state. A failed reclaim is an
+        // unproven failure, never a child-claimed success; the child claim
+        // only applies when the parent never held a journal. A proven
+        // pre-mutation protocol rejection needs no rollback at all, from
+        // either side.
+        const rollback = preMutationRejection
+          ? { attempted: false }
+          : reclaimFailed
+            ? { attempted: true, succeeded: false }
+            : journal
+              ? { attempted: true, succeeded: parentRecovered === true }
+              : childRollbackClaim ?? { attempted: false }
         const rollbackFailed = rollback.attempted && rollback.succeeded === false
         return failedResult(
           item,
@@ -206,46 +346,61 @@ export const fallbackStrategy: UpdateStrategy = {
               ? 'MISSING_EXECUTABLE'
               : result.timedOut
                 ? 'FALLBACK_COMMAND_TIMEOUT'
-                : rollbackFailed
-                  ? 'FALLBACK_ROLLBACK_FAILED'
-                  : structured !== undefined && structuredMessage !== undefined
-                    ? structured.code
-                    : 'FALLBACK_COMMAND_FAILED',
+                : stateUnproven
+                  ? 'FALLBACK_STATE_UNPROVEN'
+                  : rollbackFailed
+                    ? 'FALLBACK_ROLLBACK_FAILED'
+                    : structured !== undefined && structuredMessage !== undefined
+                      ? structured.code
+                      : 'FALLBACK_COMMAND_FAILED',
             message: result.spawnErrorCode === 'ENOENT'
               ? `${step.command.executable} executable was not found on PATH`
               : result.timedOut
                 ? 'Fallback refresh command timed out'
-                : rollbackFailed
-                  ? 'Fallback refresh command failed and its rollback was incomplete'
-                  : structuredMessage ?? 'Fallback refresh command failed',
+                : stateUnproven
+                  ? 'The fallback transaction could not prove the state of its owned files, so the automatic rollback was refused. Its journal, snapshot, and preserved artifacts were left untouched for manual recovery.'
+                  : rollbackFailed
+                    ? 'Fallback refresh command failed and its rollback was incomplete'
+                    : structuredMessage ?? 'Fallback refresh command failed',
           },
-          rollback
+          rollback,
+          reportedPreservation(preservation)
         )
       }
       if (journal) {
+        let ownerHandle: FallbackJournalHandle
         try {
-          journal = await captureFallbackJournalState(journal)
+          ownerHandle = await reclaimFallbackJournalMutation(journal)
+          journal = ownerHandle
         } catch {
           preserveRecoveryArtifacts = true
-          return failedResult(item, { code: 'FALLBACK_STATE_UNPROVEN', message: 'Fallback child completed but the resulting owned state could not be captured safely' }, { attempted: false })
+          return failedResult(item, { code: 'FALLBACK_STATE_UNPROVEN', message: 'Fallback child completed but the parent journal could not be reclaimed safely; its state was left untouched for manual recovery' }, { attempted: false })
         }
-        // The child's journal is trusted only when its live state independently
-        // proves what it claims: applied stages match their registered digest,
-        // deletions are gone, and untouched entries are byte-identical to the
-        // journaled original. Comparing against expectedCurrentDigest is
-        // meaningless here — capture overwrote it with the current live state.
-        if (!await journalProvesAppliedState(journal)) {
-          const recovered = await restoreFallbackJournal(journal)
-          return failedResult(item, { code: recovered ? 'FALLBACK_VALIDATION_FAILED' : 'FALLBACK_ROLLBACK_FAILED', message: recovered ? 'Fallback child completed without proving the planned owned-state mutation' : 'Fallback validation failed and parent recovery was incomplete' }, { attempted: true, succeeded: recovered })
+        // The child's claims are validated from the strictly reloaded journal
+        // and the live filesystem: applied stages must carry exactly their
+        // registered stage digest, deletions must be gone, and untouched
+        // entries must be byte-identical to the journaled original. These
+        // mutable fields are success-validation evidence only — they never
+        // authorize the restore or commit below.
+        if (!await journalProvesAppliedState(await reloadFallbackJournal(ownerHandle))) {
+          const restored = await restoreFallbackJournal(ownerHandle)
+          return failedResult(item, { code: restored.succeeded ? 'FALLBACK_VALIDATION_FAILED' : 'FALLBACK_ROLLBACK_FAILED', message: restored.succeeded ? 'Fallback child completed without proving the planned owned-state mutation' : 'Fallback validation failed and parent recovery was incomplete' }, { attempted: true, succeeded: restored.succeeded }, { preservedArtifacts: restored.preservedArtifacts, preservedPaths: restored.preservedPaths })
         }
         const tracking = await readTrackingFile()
         const bundleEvidence = tracking?.bundleVersions?.[item.target as keyof typeof tracking.bundleVersions] ?? tracking?.bundleVersion
         if (!tracking || bundleEvidence !== item.version.latest || !validateFallbackPostconditions(tracking, item.target)) {
-          const recovered = await restoreFallbackJournal(journal)
-          return failedResult(item, { code: recovered ? 'FALLBACK_VALIDATION_FAILED' : 'FALLBACK_ROLLBACK_FAILED', message: recovered ? 'Fallback child completed without the planned bundle evidence' : 'Fallback validation failed and parent recovery was incomplete' }, { attempted: true, succeeded: recovered })
+          const restored = await restoreFallbackJournal(ownerHandle)
+          return failedResult(item, { code: restored.succeeded ? 'FALLBACK_VALIDATION_FAILED' : 'FALLBACK_ROLLBACK_FAILED', message: restored.succeeded ? 'Fallback child completed without the planned bundle evidence' : 'Fallback validation failed and parent recovery was incomplete' }, { attempted: true, succeeded: restored.succeeded }, { preservedArtifacts: restored.preservedArtifacts, preservedPaths: restored.preservedPaths })
         }
+        const commitResult = await commitFallbackJournal(ownerHandle)
+        await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
+        return resultFromPlan(item, 'updated', {
+          resultingVersion: item.version.latest,
+          rollback: { attempted: false },
+          preservedArtifacts: commitResult.preservedArtifacts.length > 0 ? commitResult.preservedArtifacts : undefined,
+          preservedPaths: commitResult.preservedPaths.length > 0 ? commitResult.preservedPaths : undefined,
+        })
       }
-      if (journal) await commitFallbackJournal(journal)
       await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
       return resultFromPlan(item, 'updated', { resultingVersion: item.version.latest, rollback: { attempted: false } })
     } finally {
@@ -308,7 +463,7 @@ export async function summarizeFallbackChangesFromBytes (installation: UpdateIns
   }
 }
 
-async function createFallbackIdentity (installation: UpdateInstallation) {
+async function createFallbackIdentity (installation: UpdateInstallation): Promise<FallbackTransactionIdentity | undefined> {
   const trackingPath = getTrackingFilePath()
   const digest = trackingDigest(trackingPath)
   if (!digest) return undefined
@@ -321,14 +476,18 @@ async function createFallbackIdentity (installation: UpdateInstallation) {
   const trackedConfigPaths = [...new Set(trackedFields.map((field) => path.resolve(field.configPath)))]
   if (configPath) trackedConfigPaths.push(path.resolve(configPath))
   const canonical = getAdapter(harness).getMcpConfigPath()
-  const ownedMcpConfigPaths = [...new Set([...trackedConfigPaths, ...(canonical ? [path.resolve(canonical)] : [])])]
+  const mcpConfigPaths = [...new Set([...trackedConfigPaths, ...(canonical ? [path.resolve(canonical)] : [])])]
   const skillPaths = skills.map((skill) => path.resolve(skill.path))
   const linkPaths = harness === 'opencode' ? [] : skills.map((skill) => path.resolve(getHarnessSkillsPath(harness), skill.name))
   let ownedSkills
   let ownedLinks
+  let ownedMcpConfigPaths: FallbackPathEvidence[]
   try {
     ownedSkills = await capturePathEvidence(skillPaths)
     ownedLinks = await capturePathEvidence(linkPaths)
+    // Whole-file kind/digest evidence for every MCP config path: this is what
+    // authenticates MCP backups during rollback.
+    ownedMcpConfigPaths = await capturePathEvidence(mcpConfigPaths)
   } catch {
     return undefined
   }
@@ -337,6 +496,8 @@ async function createFallbackIdentity (installation: UpdateInstallation) {
     harness,
     trackingPath,
     trackingDigest: digest,
+    protocolVersion: FALLBACK_PROTOCOL_VERSION,
+    digestAlgorithm: 'fallback-path-v2',
     nonce: randomUUID(),
     ownedSkills,
     ownedLinks,
@@ -346,13 +507,21 @@ async function createFallbackIdentity (installation: UpdateInstallation) {
         ? names.flatMap((name) => Object.entries(readMcpFieldDigests(configPath, name, { preferredKey: harnessMcpKey(harness) }) ?? {}).map(([field, expectedDigest]) => ({ configPath: path.resolve(configPath), server: name, field, expectedDigest })))
         : [],
     ownedMcpConfigPaths,
+    // Filled in by the planner from the verified tarball's bundle descriptor
+    // before the manifest is written; empty here so direct callers still get
+    // a shape-valid identity.
+    bundleDestinations: [],
+    // Required protocol-v3 field: the planner overwrites this with the exact
+    // derived graph (plannedMissingFrontiers: frontierPlan.frontiers) before
+    // the manifest is written; empty here only for the transient base shape.
+    plannedMissingFrontiers: [],
     approvedDestinationRoots: [
       harness === 'opencode'
         ? path.resolve(process.env.NSOLID_OPENCODE_SKILLS_DIR ?? resolveHome('~/.config/opencode/skills'))
         : getSkillsDir(),
       ...(harness !== 'opencode' ? [path.resolve(getHarnessSkillsPath(harness))] : []),
     ],
-  } as const
+  }
 }
 
 async function capturePathEvidence (paths: readonly string[]) {
@@ -365,7 +534,37 @@ async function capturePathEvidence (paths: readonly string[]) {
   }))
 }
 
-async function createManifest (identity: Awaited<NonNullable<ReturnType<typeof createFallbackIdentity>>>): Promise<{ manifestPath: string; resultPath: string; resultContainment: ContainmentDirectoryIdentity }> {
+/** Read and validate package/bundle.json from the verified tarball, in-process. */
+async function parseVerifiedBundle (tarballPath: string): Promise<BundleDescriptor | undefined> {
+  try {
+    const raw = await readTarEntryText(tarballPath, 'package/bundle.json')
+    if (raw === undefined) return undefined
+    return validateBundle(JSON.parse(raw))
+  } catch {
+    return undefined
+  }
+}
+
+/** The live destination roots this harness's fallback flow reads and writes. */
+function resolveFallbackDestinations (harness: HarnessType): { destination: string; linkDir?: string } {
+  const destination = harness === 'opencode'
+    ? path.resolve(process.env.NSOLID_OPENCODE_SKILLS_DIR ?? resolveHome('~/.config/opencode/skills'))
+    : getSkillsDir()
+  const linkDir = harness !== 'opencode' ? path.resolve(getHarnessSkillsPath(harness)) : undefined
+  return { destination, linkDir }
+}
+
+/** Capture planning-time evidence for every skill and harness-link destination the verified bundle will create. */
+async function captureDestinationEvidence (harness: HarnessType, bundle: BundleDescriptor): Promise<FallbackPathEvidence[]> {
+  const { destination, linkDir } = resolveFallbackDestinations(harness)
+  const paths = [...new Set([
+    ...bundle.skills.map((skill) => path.join(destination, skill.name)),
+    ...(linkDir !== undefined ? bundle.skills.map((skill) => path.join(linkDir, skill.name)) : []),
+  ].map((value) => path.resolve(value)))]
+  return await capturePathEvidence(paths)
+}
+
+async function createManifest (identity: FallbackTransactionIdentity): Promise<{ manifestPath: string; manifestDigest: string; resultPath: string; resultContainment: ContainmentDirectoryIdentity }> {
   // The private 0700 staging directory is created and owned by this process;
   // the structured result path lives inside it so parent validation can bind
   // the envelope to workspace ownership and cleanup removes it with the
@@ -377,7 +576,10 @@ async function createManifest (identity: Awaited<NonNullable<ReturnType<typeof c
   const manifestPath = path.join(directory, 'transaction.json')
   await writeFile(manifestPath, JSON.stringify(identity, null, 2) + '\n', { mode: 0o600 })
   const resultContainment = await recordContainmentDirectoryIdentity(directory)
-  return { manifestPath, resultPath: path.join(directory, FALLBACK_CHILD_RESULT_FILENAME), resultContainment }
+  // The canonical digest is computed from the trusted in-memory manifest and
+  // transported explicitly to the child; the child recomputes it from the
+  // parsed transaction file and rejects any disagreement before claiming.
+  return { manifestPath, manifestDigest: manifestDigestOf(identity), resultPath: path.join(directory, FALLBACK_CHILD_RESULT_FILENAME), resultContainment }
 }
 
 /** Point the planned child command at a fresh per-execution result path; older plans without --result gain it safely. */
@@ -396,6 +598,50 @@ function parseRollbackState (output: string): UpdateResult['rollback'] | undefin
   if (!match) return undefined
   if (match[1].toLowerCase() === 'not-attempted') return { attempted: false }
   return { attempted: true, succeeded: match[1].toLowerCase() === 'succeeded' }
+}
+
+interface PreservationEvidence {
+  preservedArtifacts: string[]
+  preservedPaths: string[]
+}
+
+/** Seed preservation evidence from a validated child envelope. The arrays are reporting data only: nothing deletes or overwrites because of them. */
+function childPreservationEvidence (structured: FallbackChildResultEnvelope | undefined): PreservationEvidence {
+  return {
+    preservedArtifacts: structured?.preservedArtifacts === undefined ? [] : [...structured.preservedArtifacts],
+    preservedPaths: structured?.preservedPaths === undefined ? [] : [...structured.preservedPaths],
+  }
+}
+
+/** Deterministically merge reporting arrays: order-stable, deduplicated union. */
+function mergePreservation (target: PreservationEvidence, source: { preservedArtifacts?: readonly string[]; preservedPaths?: readonly string[] } | undefined): void {
+  if (source === undefined) return
+  target.preservedArtifacts = [...new Set([...target.preservedArtifacts, ...(source.preservedArtifacts ?? [])])].sort()
+  target.preservedPaths = [...new Set([...target.preservedPaths, ...(source.preservedPaths ?? [])])].sort()
+}
+
+/** Emit preservation arrays only when non-empty so results keep one stable shape. */
+function reportedPreservation (preservation: PreservationEvidence): Pick<UpdateResult, 'preservedArtifacts' | 'preservedPaths'> {
+  return {
+    preservedArtifacts: preservation.preservedArtifacts.length > 0 ? preservation.preservedArtifacts : undefined,
+    preservedPaths: preservation.preservedPaths.length > 0 ? preservation.preservedPaths : undefined,
+  }
+}
+
+/**
+ * Prove, from the trusted IN-MEMORY manifest only, that every manifest-owned
+ * path still carries exactly its planned kind/digest and the tracking file its
+ * planned digest. Validation-only read (nothing is mutated); the journal file
+ * is never consulted because it cannot authenticate the live state.
+ */
+async function liveStateMatchesPlannedEvidence (manifest: FallbackTransactionIdentity): Promise<boolean> {
+  for (const planned of [...manifest.ownedSkills, ...manifest.ownedLinks, ...manifest.ownedMcpConfigPaths]) {
+    const kind = await pathKind(planned.path)
+    if (kind !== planned.kind) return false
+    if (kind === 'missing') continue
+    if (await pathDigest(planned.path) !== planned.digest) return false
+  }
+  return trackingDigest(manifest.trackingPath) === manifest.trackingDigest
 }
 
 function detectExecutor (): 'npm-exec' | 'pnpm-dlx' | undefined {
@@ -437,7 +683,7 @@ function validateFallbackPostconditions (tracking: TrackingDataOrNull, harness: 
  * stage digest, applied deletions must be gone, and entries the child never
  * staged must still be byte-identical to the journaled original.
  */
-async function journalProvesAppliedState (journal: FallbackJournal): Promise<boolean> {
+async function journalProvesAppliedState (journal: Awaited<ReturnType<typeof reloadFallbackJournal>>): Promise<boolean> {
   for (const entry of journal.entries) {
     const target = path.resolve(entry.path)
     if (entry.stageDigest !== undefined) {

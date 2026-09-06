@@ -115,13 +115,77 @@ export interface FallbackPathEvidence {
   digest?: string
 }
 
+/** Role of an authorized fallback leaf destination; drives activation and later semantic proof. */
+export type FallbackLeafRole = 'skill' | 'link' | 'mcp-config' | 'tracking'
+
+/** Whether a planned fallback destination requires parent creation during this run. */
+export type FallbackLeafActivation = 'required' | 'conditional'
+
+/**
+ * One authorized leaf destination planned for a fallback update. Leaves are
+ * supplied by the planner from verified evidence only; the frontier module
+ * never widens this set on its own.
+ */
+export interface FallbackLeafTarget {
+  /** Stable planner-supplied identity retained for semantic postcondition proof. */
+  id: string
+  role: FallbackLeafRole
+  activation: FallbackLeafActivation
+  /** Absolute canonical destination path; never a remote, relative, or `..`-spelled path. */
+  path: string
+}
+
+/**
+ * Immutable local filesystem identity of an existing anchor directory,
+ * captured with `lstat({ bigint: true })` plus `realpath`. Decimal strings
+ * keep the evidence JSON-stable across processes without precision loss.
+ * `type: 'directory'` records the observed kind; strict evidence parsing and
+ * identity capture both require it.
+ */
+export interface FallbackAnchorIdentity {
+  path: string
+  realpath: string
+  /** Observed anchor kind; strictly required to be `'directory'`. */
+  type: 'directory'
+  device: string
+  inode: string
+}
+
+/**
+ * A topmost missing directory (the frontier) whose publication a fallback
+ * transaction will own, attached to its authenticated existing anchor. The
+ * frontier path is a direct child of the anchor; everything from the frontier
+ * down to each leaf is missing at planning time.
+ */
+export interface FallbackFrontierEvidence {
+  /** First missing path component; a direct child of `anchor.path`. */
+  frontierPath: string
+  /** `required` when any covered leaf requires creation this run. */
+  activation: FallbackLeafActivation
+  anchor: FallbackAnchorIdentity
+  /** Every authorized leaf this frontier creates, in UTF-8 byte order. */
+  leaves: readonly FallbackLeafTarget[]
+}
+
+/**
+ * Current fallback journal/manifest protocol. A manifest whose protocolVersion
+ * differs is rejected by the child BEFORE any mutation with the stable code
+ * FALLBACK_PROTOCOL_UNSUPPORTED; there is intentionally no cross-version
+ * compatibility path (older protocol state was never deployed).
+ */
+export const FALLBACK_PROTOCOL_VERSION = 3
+
 export interface FallbackTransactionIdentity {
   installationId: string
   harness: HarnessType
   trackingPath: string
   trackingDigest: string
+  /** Protocol gate: the child rejects any other value before mutation. */
+  protocolVersion: number
   /** Shared secret authenticating the child transaction (never authorizing restores). */
   nonce?: string
+  /** Digest domain of every path digest in this manifest; never reinterpret across domains. */
+  digestAlgorithm?: 'fallback-path-v2'
   /** Planned kind/digest evidence for every tracked skill, captured before approval. */
   ownedSkills: readonly FallbackPathEvidence[]
   /** Planned kind/digest evidence for every harness link, captured before approval. */
@@ -132,10 +196,34 @@ export interface FallbackTransactionIdentity {
     field: string
     expectedDigest: string
   }[]
-  /** Union of tracked MCP config paths and the adapter canonical path, fixed at planning. */
-  ownedMcpConfigPaths: readonly string[]
-  /** Canonical roots under which the new bundle's skills/links may be created; the child may only journal new destinations directly inside one of these roots. */
+  /**
+   * Whole-file kind/digest evidence for the union of tracked MCP config paths
+   * and the adapter canonical path, fixed at planning. Whole-path evidence is
+   * what authenticates MCP backups during rollback.
+   */
+  ownedMcpConfigPaths: readonly FallbackPathEvidence[]
+  /**
+   * Every skill and harness-link destination the verified bundle will create,
+   * derived by the PARENT from bundle.json of the verified tarball before
+   * execution. The child never adds unplanned paths to the journal. Kept
+   * separate from the tracked owned sets so ownership semantics stay distinct.
+   */
+  bundleDestinations: readonly FallbackPathEvidence[]
+  /** Canonical roots under which the planned bundle destinations may be created. */
   approvedDestinationRoots: readonly string[]
+  /**
+   * Topmost missing parent frontiers this transaction is authorized to create,
+   * derived and validated by the shared frontier module before the journal is
+   * reserved. REQUIRED in protocol v3: explicit `[]` when no frontier applies,
+   * with NO absent-field fallback anywhere. Journal reservation, mutation
+   * claims, and child preflight reject any manifest whose frontier evidence
+   * fails strict parsing (absent, malformed, extra keys, tampered graph)
+   * before any mutation, with the stable FALLBACK_FRONTIER_EVIDENCE_INVALID
+   * code. protocolVersion 3 has no compatibility path: journals carrying
+   * frontier evidence that fails strict revalidation against the live
+   * filesystem fail closed.
+   */
+  plannedMissingFrontiers: readonly FallbackFrontierEvidence[]
 }
 
 export type AntigravityLayout =
@@ -381,6 +469,16 @@ export interface UpdatePlanItem {
    * Absent on items planned by older code or by non-fallback strategies.
    */
   resultContainment?: readonly ContainmentDirectoryIdentity[]
+  /**
+   * Reporting-only recovery evidence on a `fallback:recovery` plan item:
+   * journal/snapshot artifacts that restore-only recovery preserved next to
+   * the tracking file, and live paths left for manual inspection because
+   * their state could not be authorized. These arrays never authorize
+   * filesystem mutation and are omitted when empty so public shapes stay
+   * stable.
+   */
+  preservedArtifacts?: readonly string[]
+  preservedPaths?: readonly string[]
 }
 
 export interface UpdatePlan {
@@ -419,6 +517,10 @@ export interface UpdateResult {
     attempted: boolean
     succeeded?: boolean
   }
+  /** Paths/artifacts preserved because cleanup could not be authenticated. Reporting only. */
+  preservedArtifacts?: readonly string[]
+  /** Live paths left untouched because their state could not be authorized. Reporting only. */
+  preservedPaths?: readonly string[]
   error?: UpdateError
 }
 

@@ -27,13 +27,14 @@ export function matchesTrackedOwnership (tracking: TrackingData, identity: Fallb
   if (expectedMcpFields.length > 0 && (ownedMcpFields.size !== expectedMcpFields.length || !expectedMcpFields.every((value) => ownedMcpFields.has(value)))) return false
   // The MCP config-path set is the union of tracked paths and the adapter's
   // canonical path for this harness, recomputed from the same environment the
-  // transaction will run in.
+  // transaction will run in. Entries carry whole-file evidence in the current
+  // protocol; legacy journals record plain strings.
   const canonical = getAdapter(identity.harness).getMcpConfigPath()
   const expectedConfigPaths = new Set<string>([
     ...tracking.mcpServers.filter((entry) => entry.harness === identity.harness).map((entry) => path.resolve(entry.configPath)),
     ...(canonical ? [path.resolve(canonical)] : []),
   ])
-  const ownedConfigPaths = new Set(identity.ownedMcpConfigPaths.map((value) => path.resolve(value)))
+  const ownedConfigPaths = new Set(identity.ownedMcpConfigPaths.map((value) => path.resolve(typeof value === 'string' ? value : value.path)))
   if (ownedConfigPaths.size !== expectedConfigPaths.size || ![...expectedConfigPaths].every((value) => ownedConfigPaths.has(value))) return false
   return identity.ownedMcpFields.every((field) => tracking.mcpServers.some((entry) => {
     if (entry.harness !== identity.harness || entry.name !== field.server || path.resolve(entry.configPath) !== path.resolve(field.configPath)) return false

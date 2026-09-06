@@ -75,9 +75,11 @@ export function containmentDirectoryMatches (recorded: ContainmentDirectoryIdent
  * parent-owned templates keyed by an allowlisted code.
  */
 
-export const FALLBACK_CHILD_RESULT_SCHEMA = 1
+export const FALLBACK_CHILD_RESULT_SCHEMA = 2
 export const FALLBACK_CHILD_RESULT_MAX_BYTES = 4096
 export const FALLBACK_CHILD_RESULT_FILENAME = 'result.json'
+/** Bounded preservation reporting: arrays are child-supplied reporting data, never operation authority. */
+export const FALLBACK_CHILD_RESULT_MAX_PRESERVED = 32
 
 export interface FallbackChildResultRollback {
   attempted: boolean
@@ -89,6 +91,10 @@ export interface FallbackChildResultEnvelope {
   nonce: string
   code: string
   rollback?: FallbackChildResultRollback
+  /** Artifact containers preserved because cleanup could not be authenticated. Reporting only. */
+  preservedArtifacts?: readonly string[]
+  /** Live paths left untouched because their state could not be authorized. Reporting only. */
+  preservedPaths?: readonly string[]
 }
 
 /**
@@ -102,6 +108,9 @@ const CHILD_RESULT_MESSAGES: Record<string, (target: string) => string> = {
   FALLBACK_MCP_DRIFT: () => 'The harness MCP configuration did not match the state approved for this fallback update. The refresh was stopped before it could continue unsafely.',
   FALLBACK_OWNERSHIP_DRIFT: () => 'The tracked fallback ownership no longer matches this installation. The refresh was stopped.',
   UNTRACKED_INSTALLATION: () => 'No NodeSource tracking record covers this installation. Nothing was refreshed.',
+  FALLBACK_PROTOCOL_UNSUPPORTED: () => 'This fallback update was planned by an incompatible nsolid-plugin version. Update nsolid-plugin manually (for example with your package manager) and retry the update.',
+  FALLBACK_STATE_UNPROVEN: () => 'The fallback transaction could not prove the state of its owned files, so nothing was changed automatically. A previous transaction may need manual recovery; see the preserved artifacts reported by this update.',
+  FALLBACK_RECOVERY_PENDING: () => 'A previous fallback transaction is still pending. Restore or remove it manually before updating; the preserved artifacts reported earlier show what to inspect.',
 }
 
 /** The guidance target comes from the validated plan item, never from child data; shape-check it anyway before interpolation. */
@@ -133,6 +142,12 @@ export function fallbackChildResultMessage (code: string, target: string): strin
   return template(VALID_GUIDANCE_TARGET.test(target) ? target : 'harness')
 }
 
+/** Shape-check one bounded preservation array: absolute canonical-ish path strings only. */
+function isValidPreservationArray (value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.length <= FALLBACK_CHILD_RESULT_MAX_PRESERVED &&
+    value.every((entry) => typeof entry === 'string' && entry.length > 0 && entry.length <= 512 && path.isAbsolute(entry) && !entry.includes('..'))
+}
+
 /**
  * Child side: publish the structured result atomically with mode 0600.
  * Unpublishable inputs (unsafe code, missing nonce) are silently skipped so
@@ -142,7 +157,8 @@ export async function writeFallbackChildResult (
   resultPath: string,
   nonce: string,
   code: string,
-  rollback: FallbackChildResultRollback | undefined
+  rollback: FallbackChildResultRollback | undefined,
+  preservation: { preservedArtifacts?: readonly string[]; preservedPaths?: readonly string[] } = {}
 ): Promise<void> {
   if (!isValidChildResultCode(code)) return
   if (typeof nonce !== 'string' || nonce.length === 0) return
@@ -152,6 +168,12 @@ export async function writeFallbackChildResult (
     envelope.rollback = rollback.succeeded === undefined
       ? { attempted: rollback.attempted }
       : { attempted: rollback.attempted, succeeded: rollback.succeeded === true }
+  }
+  if (preservation.preservedArtifacts !== undefined && isValidPreservationArray(preservation.preservedArtifacts)) {
+    envelope.preservedArtifacts = [...preservation.preservedArtifacts]
+  }
+  if (preservation.preservedPaths !== undefined && isValidPreservationArray(preservation.preservedPaths)) {
+    envelope.preservedPaths = [...preservation.preservedPaths]
   }
   const payload = JSON.stringify(envelope)
   // The envelope must stay bounded: an over-limit result is never published so
@@ -257,9 +279,15 @@ export async function readValidatedFallbackChildResult (
       if (!rollback || typeof rollback !== 'object' || typeof rollback.attempted !== 'boolean') return undefined
       if (rollback.succeeded !== undefined && typeof rollback.succeeded !== 'boolean') return undefined
     }
-    return parsed.rollback !== undefined
-      ? { schema: parsed.schema, nonce: parsed.nonce, code: parsed.code, rollback: parsed.rollback as FallbackChildResultRollback }
-      : { schema: parsed.schema, nonce: parsed.nonce, code: parsed.code }
+    // Preservation arrays are reporting data with a strict shape: an invalid
+    // array rejects the whole envelope rather than degrading silently.
+    if (parsed.preservedArtifacts !== undefined && !isValidPreservationArray(parsed.preservedArtifacts)) return undefined
+    if (parsed.preservedPaths !== undefined && !isValidPreservationArray(parsed.preservedPaths)) return undefined
+    const result: FallbackChildResultEnvelope = { schema: parsed.schema, nonce: parsed.nonce, code: parsed.code }
+    if (parsed.rollback !== undefined) result.rollback = parsed.rollback as FallbackChildResultRollback
+    if (parsed.preservedArtifacts !== undefined) result.preservedArtifacts = [...parsed.preservedArtifacts]
+    if (parsed.preservedPaths !== undefined) result.preservedPaths = [...parsed.preservedPaths]
+    return result
   } catch {
     return undefined
   }
