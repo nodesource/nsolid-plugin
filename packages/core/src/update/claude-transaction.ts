@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
-import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, statSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, statSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { CommandRunner, CommandSpec, ResolvedArtifactIdentity, UpdateError } from './types.js'
@@ -69,6 +69,10 @@ interface PayloadSnapshot {
   originalDigest?: string
   postRoot?: string
   postDigest?: string | null
+  /** Approved plugin cache root recorded at backup; removals re-verify against it. */
+  approvedCacheRoot?: string
+  /** The post-command registry resolution was rejected: it must never be re-resolved. */
+  postRootRejected?: boolean
 }
 
 /** Injectable filesystem dependencies for deterministic tests. */
@@ -124,7 +128,17 @@ export async function executeClaudeTransaction (
         registration.push({ path: target, existed: false, foreignDigest: foreignRegistrationDigest(undefined, spec.pluginId, target) })
       }
     }
-    const previousRoot = installedClaudePayloadRoot(spec.configPath, spec.pluginId, spec.scope)
+    // A registry-named previous root outside the approved cache aborts
+    // before any backup or mutation; an absent root proceeds without a
+    // payload backup exactly as before.
+    const previousResolution = resolveClaudePayloadRoot(spec.configPath, spec.pluginId, spec.scope)
+    if (previousResolution.status === 'rejected') {
+      throw new Error(`installed Claude payload root rejected: ${previousResolution.reason}`)
+    }
+    const previousRoot = previousResolution.status === 'ok' ? previousResolution.root : undefined
+    payload.approvedCacheRoot = spec.configPath !== undefined && path.isAbsolute(spec.configPath)
+      ? path.resolve(path.dirname(spec.configPath), 'cache')
+      : undefined
     if (previousRoot) {
       payload.root = previousRoot
       payload.kind = await ownedPathKind(previousRoot)
@@ -205,7 +219,15 @@ export async function executeClaudeTransaction (
       }
     }
 
-    payload.postRoot = installedClaudePayloadRoot(spec.configPath, spec.pluginId, spec.scope, spec.expectedVersion)
+    // A rejected post-command root is recorded as rejected — never as an
+    // absent root — so restore treats it as drift instead of a legitimate
+    // removal.
+    const postResolution = resolveClaudePayloadRoot(spec.configPath, spec.pluginId, spec.scope, spec.expectedVersion)
+    if (postResolution.status === 'rejected') {
+      payload.postRootRejected = true
+    } else {
+      payload.postRoot = postResolution.status === 'ok' ? postResolution.root : undefined
+    }
     payload.postDigest = payload.postRoot ? await stateDigest(payload.postRoot) : null
     for (const entry of registration) entry.postDigest = existsSync(entry.path) ? await stateDigest(entry.path) : null
 
@@ -253,7 +275,17 @@ async function fail (
 ): Promise<ClaudeTransactionResult> {
   // Anchor the authorized post-mutation state to whatever this transaction
   // actually left behind when capture did not run (command failures).
-  if (payload.postRoot === undefined) payload.postRoot = installedClaudePayloadRoot(transactionSpec.configPath, transactionSpec.pluginId, transactionSpec.scope)
+  // A rejected post-command resolution stays rejected: the mutable registry
+  // is never re-read to resurrect it into removal authority. An absent root
+  // keeps the historical re-resolution for registrations removed mid-flight.
+  if (payload.postRoot === undefined && payload.postRootRejected !== true) {
+    const recapture = resolveClaudePayloadRoot(transactionSpec.configPath, transactionSpec.pluginId, transactionSpec.scope)
+    if (recapture.status === 'ok') {
+      payload.postRoot = recapture.root
+    } else if (recapture.status === 'rejected') {
+      payload.postRootRejected = true
+    }
+  }
   if (payload.postDigest === undefined && payload.postRoot) payload.postDigest = await stateDigest(payload.postRoot) ?? null
   for (const entry of registration) {
     if (entry.postDigest === undefined) entry.postDigest = existsSync(entry.path) ? await stateDigest(entry.path) : null
@@ -319,6 +351,10 @@ async function restore (payload: PayloadSnapshot, registration: readonly Registr
       const current = existsSync(entry.path) ? await stateDigest(entry.path) : null
       if (current !== entry.postDigest) return false
     }
+    // A post-command root rejected as outside the approved cache with no
+    // original root to restore is drift, not a legitimate removal: remove
+    // nothing, keep the backup bundle, report failure upstream.
+    if (payload.postRoot === undefined && payload.postRootRejected === true && !payload.root) return false
     if (payload.postRoot !== undefined) {
       const current = existsSync(payload.postRoot) ? await stateDigest(payload.postRoot) : null
       if (current !== payload.postDigest) return false
@@ -334,10 +370,16 @@ async function restore (payload: PayloadSnapshot, registration: readonly Registr
     // missing bytes. The original payload comes back even when the failed
     // update left no resolvable post-update root.
     if (payload.root && payload.kind && payload.kind !== 'missing' && payload.backupStorage) {
+      // Final authorization immediately before each destructive removal: a
+      // root that no longer sits inside the recorded cache, changed kind, or
+      // traverses a replaced ancestor blocks the restore instead of deleting.
+      if (payload.postRoot && !await claudeRemovalRootAuthorized(payload.postRoot, payload.approvedCacheRoot)) return false
+      if (!await claudeRemovalRootAuthorized(payload.root, payload.approvedCacheRoot)) return false
       if (payload.postRoot) await removeOwnedPath(payload.postRoot)
       await removeOwnedPath(payload.root)
       await copyOwnedPath(payload.backupStorage.path, payload.root)
     } else if (payload.postRoot) {
+      if (!await claudeRemovalRootAuthorized(payload.postRoot, payload.approvedCacheRoot)) return false
       await removeOwnedPath(payload.postRoot)
     }
     for (const entry of registration) {
@@ -383,22 +425,103 @@ async function restore (payload: PayloadSnapshot, registration: readonly Registr
   }
 }
 
-/** Resolve the single installed payload directory for a scoped Claude plugin. */
-export function installedClaudePayloadRoot (
+/** Discriminated registry resolution: absent means no payload is registered, rejected means the registry names a concrete path outside the approved cache. */
+type ClaudePayloadRootResolution =
+  | { readonly status: 'ok', readonly root: string }
+  | { readonly status: 'absent' }
+  | { readonly status: 'rejected', readonly reason: string }
+
+/** Lexical containment mirroring codex-transaction.ts; callers add the kind and ancestor proofs. */
+function isSameOrContained (candidate: string, parent: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate))
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+/** Every ancestor from the root's parent up to (not including) the cache root must be a real non-link directory. */
+function claudeAncestorChainOwned (root: string, approvedCacheRoot: string): boolean {
+  const stop = path.resolve(approvedCacheRoot)
+  let current = path.dirname(path.resolve(root))
+  while (true) {
+    let stats
+    try {
+      stats = lstatSync(current)
+    } catch {
+      return false
+    }
+    if (!stats.isDirectory() || stats.isSymbolicLink()) return false
+    if (current === stop) return true
+    const parent = path.dirname(current)
+    if (parent === current) return false
+    current = parent
+  }
+}
+
+/** The plugin segment of an approved cache layout must identify the intended plugin: a same-depth sibling plugin directory is never owned. */
+function claudeLayoutBindsPlugin (segments: readonly string[], pluginId: string): string | undefined {
+  const expectedName = pluginId.split('@', 1)[0]?.toLowerCase()
+  if (!expectedName) return 'the plugin identity is empty'
+  // <plugin>/<version> or <marketplace>/<plugin>/<version>.
+  if (segments.length !== 2 && segments.length !== 3) {
+    return 'it does not match the approved cache layout <plugin>/<version> or <marketplace>/<plugin>/<version>'
+  }
+  const pluginSegment = segments.length === 2 ? segments[0] : segments[1]
+  if (pluginSegment?.toLowerCase() !== expectedName) return `its plugin segment does not identify plugin ${pluginId}`
+  if (segments.length === 3 && pluginId.includes('@')) {
+    const expectedMarketplace = pluginId.split('@').at(-1)?.toLowerCase()
+    if (segments[0]?.toLowerCase() !== expectedMarketplace) {
+      return `its marketplace segment does not identify the ${expectedMarketplace} marketplace`
+    }
+  }
+  return undefined
+}
+
+/** Full approval proof for one registry-named root: containment, layout depth, plugin identity, leaf kind, ancestor chain. */
+function claudeApprovedPayloadRoot (root: string, approvedCacheRoot: string, pluginId: string): string | undefined {
+  const resolved = path.resolve(root)
+  const cacheResolved = path.resolve(approvedCacheRoot)
+  if (!isSameOrContained(resolved, cacheResolved) || resolved === cacheResolved) {
+    return `installed payload root ${root} is outside the approved plugin cache ${approvedCacheRoot}`
+  }
+  const segments = path.relative(cacheResolved, resolved).split(path.sep)
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    return `installed payload root ${root} does not match the approved cache layout <plugin>/<version> or <marketplace>/<plugin>/<version>`
+  }
+  const binding = claudeLayoutBindsPlugin(segments, pluginId)
+  if (binding !== undefined) {
+    return `installed payload root ${root} ${binding}`
+  }
+  let leaf
+  try {
+    leaf = lstatSync(resolved)
+  } catch {
+    return `installed payload root ${root} cannot be inspected`
+  }
+  if (!leaf.isDirectory() || leaf.isSymbolicLink()) {
+    return `installed payload root ${root} is not a real directory`
+  }
+  if (!claudeAncestorChainOwned(resolved, cacheResolved)) {
+    return `installed payload root ${root} traverses an unowned ancestor`
+  }
+  return undefined
+}
+
+function resolveClaudePayloadRoot (
   configPath: string | undefined,
   pluginId: string,
   scope: string,
   expectedVersion?: string
-): string | undefined {
-  if (!configPath || !path.isAbsolute(configPath)) return undefined
+): ClaudePayloadRootResolution {
+  if (!configPath || !path.isAbsolute(configPath)) return { status: 'absent' }
+  const approvedCacheRoot = path.resolve(path.dirname(configPath), 'cache')
+  let roots: string[]
   try {
     const data = JSON.parse(readFileSync(configPath, 'utf8')) as unknown
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return { status: 'absent' }
     const plugins = (data as Record<string, unknown>).plugins
-    if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return undefined
+    if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return { status: 'absent' }
     const value = (plugins as Record<string, unknown>)[pluginId]
     const records = Array.isArray(value) ? value : [value]
-    const roots = records.flatMap((record) => {
+    roots = records.flatMap((record) => {
       if (!record || typeof record !== 'object' || Array.isArray(record)) return []
       const entry = record as Record<string, unknown>
       if (readClaudePluginScope(entry) !== scope) return []
@@ -407,10 +530,46 @@ export function installedClaudePayloadRoot (
       const root = path.resolve(entry.installPath)
       return existsSync(root) ? [root] : []
     })
-    return roots.length === 1 ? roots[0] : undefined
   } catch {
-    return undefined
+    return { status: 'absent' }
   }
+  if (roots.length !== 1) return { status: 'absent' }
+  const root = roots[0]
+  if (typeof root !== 'string') return { status: 'absent' }
+  const rejection = claudeApprovedPayloadRoot(root, approvedCacheRoot, pluginId)
+  if (rejection !== undefined) return { status: 'rejected', reason: rejection }
+  return { status: 'ok', root }
+}
+
+/**
+ * Final authorization immediately before a destructive payload removal: the
+ * root must still sit inside the cache root recorded at backup, still be a
+ * real non-link directory, and still traverse only real directories up to the
+ * cache root. Snapshots without a recorded cache root (legacy manually
+ * constructed drift-gate fixtures) keep prior behavior.
+ */
+async function claudeRemovalRootAuthorized (root: string, approvedCacheRoot: string | undefined): Promise<boolean> {
+  if (approvedCacheRoot === undefined) return true
+  const cacheResolved = path.resolve(approvedCacheRoot)
+  const resolved = path.resolve(root)
+  if (!isSameOrContained(resolved, cacheResolved) || resolved === cacheResolved) return false
+  // A missing root is the authorized removed-payload case (the drift gate
+  // above already proved current bytes are the original or absent): only a
+  // live non-directory blocks the removal.
+  const kind = await ownedPathKind(resolved)
+  if (kind !== 'missing' && kind !== 'directory') return false
+  return claudeAncestorChainOwned(resolved, cacheResolved)
+}
+
+/** Resolve the single installed payload directory for a scoped Claude plugin. */
+export function installedClaudePayloadRoot (
+  configPath: string | undefined,
+  pluginId: string,
+  scope: string,
+  expectedVersion?: string
+): string | undefined {
+  const resolution = resolveClaudePayloadRoot(configPath, pluginId, scope, expectedVersion)
+  return resolution.status === 'ok' ? resolution.root : undefined
 }
 
 /** @internal Exported for unit tests only. */

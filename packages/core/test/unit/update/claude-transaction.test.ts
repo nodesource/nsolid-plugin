@@ -771,3 +771,182 @@ describe('foreignRegistrationDigest', () => {
     assert.notEqual(digest({ other: [1] }), digest({ other: [1, 2] }))
   })
 })
+
+describe('Claude payload root approval', () => {
+  function baseSpec (fixture: Fixture, commands: Array<{ executable: string, args: string[], timeoutMs: number }>) {
+    return {
+      commands,
+      registrationPaths: [fixture.registryPath, fixture.marketplacesPath],
+      configPath: fixture.registryPath,
+      pluginId: 'nsolid-plugin@nodesource',
+      scope: 'user'
+    }
+  }
+
+  function rewriteInstallPath (fixture: Fixture, installPath: string): void {
+    const registry = JSON.parse(readFileSync(fixture.registryPath, 'utf8')) as { plugins: Record<string, Array<Record<string, unknown>>> }
+    registry.plugins['nsolid-plugin@nodesource'] = [{ version: '9.9.9', installPath, scope: 'user' }]
+    writeFileSync(fixture.registryPath, JSON.stringify(registry) + '\n')
+  }
+
+  it('aborts before any mutation when the registry names a payload outside the cache', async () => {
+    const fixture = setupInstallation()
+    try {
+      const victim = path.join(fixture.home, 'victim')
+      mkdirSync(victim, { recursive: true })
+      writeFileSync(path.join(victim, 'marker.txt'), 'do not touch')
+      rewriteInstallPath(fixture, victim)
+      const runnerStub = runner(() => okResult)
+
+      const result = await executeClaudeTransaction(baseSpec(fixture, [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }]), runnerStub)
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(result.error?.code, 'CLAUDE_BACKUP_FAILED')
+      assert.deepEqual(runnerStub.commands, [], 'no command may run for a rejected payload root')
+      assert.equal(readFileSync(path.join(victim, 'marker.txt'), 'utf8'), 'do not touch')
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
+  it('aborts before any mutation when the registry names a sibling plugin directory inside the cache', async () => {
+    const fixture = setupInstallation()
+    try {
+      const sibling = path.join(fixture.home, '.claude', 'plugins', 'cache', 'other-plugin', '9.9.9')
+      mkdirSync(path.join(sibling, 'skills'), { recursive: true })
+      writeFileSync(path.join(sibling, 'marker.txt'), 'sibling bytes')
+      rewriteInstallPath(fixture, sibling)
+      const runnerStub = runner(() => okResult)
+
+      const result = await executeClaudeTransaction(baseSpec(fixture, [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }]), runnerStub)
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(result.error?.code, 'CLAUDE_BACKUP_FAILED')
+      assert.deepEqual(runnerStub.commands, [])
+      assert.equal(readFileSync(path.join(sibling, 'marker.txt'), 'utf8'), 'sibling bytes')
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
+  it('aborts before any mutation when a cache ancestor is a symlink', async (t) => {
+    const fixture = setupInstallation()
+    try {
+      const victimTree = path.join(fixture.home, 'victim-tree')
+      const pluginDir = path.join(fixture.home, '.claude', 'plugins', 'cache', 'nsolid-plugin')
+      mkdirSync(path.join(victimTree, '1.0.0', 'skills'), { recursive: true })
+      writeFileSync(path.join(victimTree, 'marker.txt'), 'victim bytes')
+      writeFileSync(path.join(victimTree, '1.0.0', 'bundle.json'), '{"version":"1.0.0"}\n')
+      rmSync(pluginDir, { recursive: true, force: true })
+      try {
+        symlinkSync(victimTree, pluginDir, 'dir')
+      } catch (error) {
+        if (process.platform === 'win32' && (error as NodeJS.ErrnoException).code === 'EPERM') {
+          t.skip('directory symlink creation requires Windows developer mode or elevation')
+          return
+        }
+        throw error
+      }
+      const runnerStub = runner(() => okResult)
+
+      const result = await executeClaudeTransaction(baseSpec(fixture, [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }]), runnerStub)
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(result.error?.code, 'CLAUDE_BACKUP_FAILED')
+      assert.deepEqual(runnerStub.commands, [])
+      assert.equal(readFileSync(path.join(victimTree, 'marker.txt'), 'utf8'), 'victim bytes')
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
+  it('never grants removal authority to a registry root rewritten outside the cache mid-transaction', async () => {
+    const fixture = setupInstallation()
+    try {
+      const victim = path.join(fixture.home, 'victim')
+      mkdirSync(victim, { recursive: true })
+      writeFileSync(path.join(victim, 'marker.txt'), 'do not touch')
+      const runnerStub = runner((_spec, index) => {
+        if (index === 0) {
+          // Poison the mutable registry after the backup, then fail: the
+          // failure path must not resurrect the rejected root.
+          rewriteInstallPath(fixture, victim)
+          return okResult
+        }
+        return failedResult
+      })
+
+      const result = await executeClaudeTransaction(baseSpec(fixture, [
+        { executable: 'claude', args: ['one'], timeoutMs: 1_000 },
+        { executable: 'claude', args: ['two'], timeoutMs: 1_000 }
+      ]), runnerStub)
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.equal(readFileSync(path.join(victim, 'marker.txt'), 'utf8'), 'do not touch')
+      assert.equal(existsSync(victim), true)
+      // The validated original payload and registration came back.
+      assert.equal(nativePayloadDigest(fixture.payloadRoot), fixture.payloadDigest)
+      assert.equal(readFileSync(fixture.registryPath, 'utf8'), fixture.registryBytes)
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
+  it('reports content mismatch and still restores when the registration is legitimately removed', async () => {
+    const fixture = setupInstallation()
+    try {
+      const runnerStub = runner(() => {
+        const registry = JSON.parse(fixture.registryBytes) as { plugins: Record<string, unknown> }
+        delete registry.plugins['nsolid-plugin@nodesource']
+        writeFileSync(fixture.registryPath, JSON.stringify(registry) + '\n')
+        return okResult
+      })
+
+      const result = await executeClaudeTransaction({
+        commands: [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }],
+        registrationPaths: [fixture.registryPath, fixture.marketplacesPath],
+        configPath: fixture.registryPath,
+        pluginId: 'nsolid-plugin@nodesource',
+        scope: 'user',
+        artifact: makeArtifact(fixture)
+      }, runnerStub)
+
+      // Absent is not rejected: the artifact gate fails the transaction but
+      // the validated original payload is still restored.
+      assert.equal(result.success, false)
+      assert.equal(result.error?.code, 'CLAUDE_CONTENT_MISMATCH')
+      assert.equal(result.rollbackAttempted, true)
+      assert.equal(result.rollbackSucceeded, true)
+      assert.equal(nativePayloadDigest(fixture.payloadRoot), fixture.payloadDigest)
+      assert.equal(readFileSync(fixture.registryPath, 'utf8'), fixture.registryBytes)
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+
+  it('aborts before any mutation when the marketplace segment does not match the plugin', async () => {
+    const fixture = setupInstallation()
+    try {
+      const foreign = path.join(fixture.home, '.claude', 'plugins', 'cache', 'evil-marketplace', 'nsolid-plugin', '9.9.9')
+      mkdirSync(path.join(foreign, 'skills'), { recursive: true })
+      writeFileSync(path.join(foreign, 'marker.txt'), 'foreign marketplace bytes')
+      rewriteInstallPath(fixture, foreign)
+      const runnerStub = runner(() => okResult)
+
+      const result = await executeClaudeTransaction(baseSpec(fixture, [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }]), runnerStub)
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(result.error?.code, 'CLAUDE_BACKUP_FAILED')
+      assert.deepEqual(runnerStub.commands, [])
+      assert.equal(readFileSync(path.join(foreign, 'marker.txt'), 'utf8'), 'foreign marketplace bytes')
+    } finally {
+      rmSync(fixture.home, { recursive: true, force: true })
+    }
+  })
+})
