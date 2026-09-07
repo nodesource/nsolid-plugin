@@ -1,3 +1,4 @@
+import { makeTar, writeOctal } from '../../helpers/tar.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -518,36 +519,6 @@ describe('native payload identity', () => {
   })
 })
 
-function makeTar (files: Map<string, Buffer>): Buffer {
-  const output: Buffer[] = []
-  for (const [relative, content] of files) {
-    const header = Buffer.alloc(512)
-    header.write(`repository-commit/${relative}`, 0, 100, 'utf8')
-    writeOctal(header, 100, 8, 0o644)
-    writeOctal(header, 108, 8, 0)
-    writeOctal(header, 116, 8, 0)
-    writeOctal(header, 124, 12, content.length)
-    writeOctal(header, 136, 12, 0)
-    header.fill(0x20, 148, 156)
-    header[156] = '0'.charCodeAt(0)
-    header.write('ustar\0', 257, 6, 'ascii')
-    header.write('00', 263, 2, 'ascii')
-    const checksum = header.reduce((sum, byte) => sum + byte, 0)
-    const checksumText = checksum.toString(8).padStart(6, '0')
-    header.write(checksumText, 148, 6, 'ascii')
-    header[154] = 0
-    header[155] = 0x20
-    output.push(header, content, Buffer.alloc((512 - (content.length % 512)) % 512))
-  }
-  output.push(Buffer.alloc(1024))
-  return Buffer.concat(output)
-}
-
-function writeOctal (target: Buffer, offset: number, length: number, value: number): void {
-  const encoded = value.toString(8).padStart(length - 1, '0') + '\0'
-  target.write(encoded, offset, length, 'ascii')
-}
-
 /** Tar combining regular files with one empty directory entry (GNU type '5'). */
 function makeTarWithDirectory (files: Map<string, Buffer>, directoryPath: string): Buffer {
   const regularTar = makeTar(files)
@@ -573,26 +544,7 @@ function makeTarWithDirectory (files: Map<string, Buffer>, directoryPath: string
 
 /** Tar combining regular files with one symlink entry (GNU type '2'). */
 function makeTarWithSymlink (files: Map<string, Buffer>, symlinkPath: string, symlinkTarget: string): Buffer {
-  const entries: Buffer[] = []
-  for (const [relative, content] of files) {
-    const header = Buffer.alloc(512)
-    header.write(`repository-commit/${relative}`, 0, 100, 'utf8')
-    writeOctal(header, 100, 8, 0o644)
-    writeOctal(header, 108, 8, 0)
-    writeOctal(header, 116, 8, 0)
-    writeOctal(header, 124, 12, content.length)
-    writeOctal(header, 136, 12, 0)
-    header.fill(0x20, 148, 156)
-    header[156] = '0'.charCodeAt(0)
-    header.write('ustar\0', 257, 6, 'ascii')
-    header.write('00', 263, 2, 'ascii')
-    const checksum = header.reduce((sum, byte) => sum + byte, 0)
-    const checksumText = checksum.toString(8).padStart(6, '0')
-    header.write(checksumText, 148, 6, 'ascii')
-    header[154] = 0
-    header[155] = 0x20
-    entries.push(header, content, Buffer.alloc((512 - (content.length % 512)) % 512))
-  }
+  const regularTar = makeTar(files)
   const linkHeader = Buffer.alloc(512)
   linkHeader.write(`repository-commit/${symlinkPath}`, 0, 100, 'utf8')
   writeOctal(linkHeader, 100, 8, 0o777)
@@ -609,6 +561,5 @@ function makeTarWithSymlink (files: Map<string, Buffer>, symlinkPath: string, sy
   linkHeader.write(checksum.toString(8).padStart(6, '0'), 148, 6, 'ascii')
   linkHeader[154] = 0
   linkHeader[155] = 0x20
-  entries.push(linkHeader, Buffer.alloc(1024))
-  return Buffer.concat(entries)
+  return Buffer.concat([regularTar.subarray(0, regularTar.length - 1024), linkHeader, Buffer.alloc(1024)])
 }

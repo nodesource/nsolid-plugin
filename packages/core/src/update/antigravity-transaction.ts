@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { isTreeTerminationUnconfirmed } from './command-runner.js'
 import { findNodeAtLocation, getNodeValue, parseTree, type Node } from 'jsonc-parser'
 import { resolveHome } from '../utils/path.js'
 import type { CommandRunner, UpdateError, UpdatePlanItem } from './types.js'
@@ -87,6 +88,9 @@ export async function executeAntigravityTransaction (
   // Single guarded post-mutation rollback path: a failed restore always
   // preserves both sibling backup containers for manual recovery.
   let rollbackSucceeded: boolean | undefined
+  const failed = (error: UpdateError): AntigravityTransactionResult => ({
+    success: false, rollbackAttempted, rollbackSucceeded, error,
+  })
   const attemptRollback = async (): Promise<boolean> => {
     rollbackAttempted = true
     const succeeded = await (dependencies.restoreState
@@ -132,56 +136,42 @@ export async function executeAntigravityTransaction (
 
     mutationStarted = true
     const commandResult = await runTransactionCommands(item.steps, commandRunner)
+    if (!commandResult.success && isTreeTerminationUnconfirmed(commandResult.result)) {
+      preserveBackup = true
+      return {
+        success: false,
+        rollbackAttempted: false,
+        error: {
+          code: 'ANTIGRAVITY_TREE_TERMINATION_UNCONFIRMED',
+          message: `Antigravity command ended and descendant termination could not be confirmed; backups were preserved at ${rootBackupStorage.directory} and ${manifestBackupStorage.directory}`,
+        },
+      }
+    }
+
     // Capture the exact post-mutation state this transaction is authorized to
     // replace during rollback, whether the commands succeeded or not.
     authorizedRootDigest = existsSync(pluginRoot) ? await treeDigest(pluginRoot) : null
     authorizedManifestDigest = existsSync(manifestPath) ? sha256Hex(readFileSync(manifestPath)) : null
     if (!commandResult.success) {
       const { result } = commandResult
-      if (result.timedOut && result.treeTerminated !== true) {
-        preserveBackup = true
-        return {
-          success: false,
-          rollbackAttempted: false,
-          error: {
-            code: 'ANTIGRAVITY_TREE_TERMINATION_UNCONFIRMED',
-            message: `Antigravity timed out and descendant termination could not be confirmed; backups were preserved at ${rootBackupStorage.directory} and ${manifestBackupStorage.directory}`,
-          },
-        }
-      }
       await attemptRollback()
-      return {
-        success: false,
-        rollbackAttempted,
-        rollbackSucceeded,
-        error: result.spawnErrorCode === 'ENOENT'
-          ? { code: 'MISSING_EXECUTABLE', message: 'agy executable was not found on PATH' }
-          : { code: result.timedOut ? 'ANTIGRAVITY_COMMAND_TIMEOUT' : 'ANTIGRAVITY_COMMAND_FAILED', message: 'Antigravity plugin replacement command failed' },
-      }
+      return failed(result.spawnErrorCode === 'ENOENT'
+        ? { code: 'MISSING_EXECUTABLE', message: 'agy executable was not found on PATH' }
+        : { code: result.timedOut ? 'ANTIGRAVITY_COMMAND_TIMEOUT' : 'ANTIGRAVITY_COMMAND_FAILED', message: 'Antigravity plugin replacement command failed' })
     }
 
     if (!validateStagedPlugin(pluginRoot, manifestPath, item.version.latest, item.artifact?.kind === 'git' ? item.artifact.contentDigest : undefined) ||
       (originalManifestText !== undefined && !preservesUnrelatedManifestBytes(originalManifestText, readFileSync(manifestPath, 'utf8')))) {
       await attemptRollback()
-      return {
-        success: false,
-        rollbackAttempted,
-        rollbackSucceeded,
-        error: { code: 'ANTIGRAVITY_VALIDATION_FAILED', message: 'Antigravity staged plugin or import manifest did not validate' },
-      }
+      return failed({ code: 'ANTIGRAVITY_VALIDATION_FAILED', message: 'Antigravity staged plugin or import manifest did not validate' })
     }
     return { success: true, rollbackAttempted: false }
   } catch {
     if (backupsComplete && mutationStarted) await attemptRollback()
-    return {
-      success: false,
-      rollbackAttempted,
-      rollbackSucceeded,
-      error: {
-        code: rollbackAttempted ? 'ANTIGRAVITY_TRANSACTION_FAILED' : 'ANTIGRAVITY_BACKUP_FAILED',
-        message: rollbackAttempted ? 'Antigravity replacement transaction failed' : 'Antigravity backup phase did not complete',
-      },
-    }
+    return failed({
+      code: rollbackAttempted ? 'ANTIGRAVITY_TRANSACTION_FAILED' : 'ANTIGRAVITY_BACKUP_FAILED',
+      message: rollbackAttempted ? 'Antigravity replacement transaction failed' : 'Antigravity backup phase did not complete',
+    })
   } finally {
     if (!preserveBackup) {
       await Promise.all([

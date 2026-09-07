@@ -1,4 +1,4 @@
-import { applyEdits, findNodeAtLocation, getNodeValue, modify, parseTree, type FormattingOptions, type JSONPath, type ModificationOptions, type Node, type ParseError } from 'jsonc-parser'
+import { applyEdits, findNodeAtLocation, getNodeValue, modify, parseTree, type FormattingOptions, type JSONPath, type ModificationOptions, type ParseError } from 'jsonc-parser'
 
 export type JsonMcpKey = 'mcpServers' | 'mcp'
 
@@ -41,30 +41,6 @@ export function detectJsonMcpKey (raw: string, preferred: JsonMcpKey = 'mcpServe
   return preferred
 }
 
-/** Read the parsed value at an MCP path without altering anything. */
-export function readMcpNodeValue (raw: string, segments: readonly string[]): unknown {
-  const tree = parseTree(raw)
-  if (!tree) return undefined
-  activeRaw = raw
-  try {
-    const node = findNodeAtLocation(tree, [...segments] as JSONPath)
-    if (!node) return undefined
-    return jsonNodeValue(node)
-  } finally {
-    activeRaw = ''
-  }
-}
-
-function jsonNodeValue (node: Node): unknown {
-  const text = activeRaw.slice(node.offset, node.offset + node.length)
-  if (node.type === 'string' || node.type === 'number' || node.type === 'boolean' || node.type === 'null') {
-    try { return JSON.parse(text) } catch { return text }
-  }
-  try { return JSON.parse(text) } catch { return text }
-}
-
-let activeRaw = ''
-
 /**
  * Apply localized AST edits to a JSON/JSONC document, preserving every byte
  * outside the edited properties: comments, CRLF line endings, indentation,
@@ -83,80 +59,75 @@ export function editMcpJsonBytes (raw: string, edit: McpByteEdit, options?: { mc
     const servers = edit.upsertServers ?? {}
     return JSON.stringify({ [mcpKey]: servers }, null, 2) + '\n'
   }
-  activeRaw = raw
-  try {
-    const errors: ParseError[] = []
-    const tree = parseTree(raw, errors, { allowTrailingComma: true })
-    if (!tree || tree.type !== 'object' || errors.length > 0) {
-      throw new McpEditError('MCP_PARSE_FAILED', 'The MCP configuration is not a valid JSON object')
-    }
-    const mcpNode = findNodeAtLocation(tree, [mcpKey])
-    if (mcpNode && mcpNode.type !== 'object') {
-      throw new McpEditError('MCP_BLOCK_INVALID', `The ${mcpKey} container is ${mcpNode.type} and cannot be replaced safely`)
-    }
-    if (!mcpNode) {
-      if (hasStructuralEdits) {
-        throw new McpEditError('MCP_BLOCK_MISSING', `The ${mcpKey} block is absent`)
-      }
-      // Only wholesale upserts against a document without the MCP block:
-      // insert one localized block before the outer closing brace so every
-      // other byte of the document is preserved. Legacy keys still migrate.
-      let inserted = insertMcpBlockBeforeClosingBrace(raw, mcpKey, edit.upsertServers ?? {})
-      for (const legacyKey of edit.removeKeys ?? []) {
-        inserted = removeRootProperty(inserted, legacyKey)
-      }
-      return inserted
-    }
-    let current = raw
-    const modification: ModificationOptions = { formattingOptions: formattingOptionsFor(raw) }
-    // jsonc-parser edits from separate modify() calls can overlap, so each
-    // operation is applied and re-parsed sequentially.
-    const apply = (path: JSONPath, value: unknown): void => {
-      const edits = modify(current, path, value, modification)
-      if (edits && edits.length > 0) current = applyEdits(current, edits)
-    }
-
-    for (const [name, value] of Object.entries(edit.upsertServers ?? {})) {
-      apply([mcpKey, name], value)
-    }
-    for (const name of edit.removeServers ?? []) {
-      const liveTree = parseTree(current)
-      const liveMcp = liveTree ? findNodeAtLocation(liveTree, [mcpKey]) : undefined
-      if (!liveMcp || !findNodeAtLocation(liveMcp, [name])) throw new McpEditError('MCP_BLOCK_MISSING', `Server ${name} is absent from ${mcpKey}`)
-      apply([mcpKey, name], undefined)
-    }
-    for (const { server, field, value } of edit.setFields ?? []) {
-      // A field already holding the desired value is not rewritten: a no-op
-      // AST edit still re-serializes the node and would cosmetically drift
-      // bytes the transaction does not need to touch.
-      const liveTree = parseTree(current)
-      const liveMcp = liveTree ? findNodeAtLocation(liveTree, [mcpKey]) : undefined
-      const liveServer = liveMcp ? findNodeAtLocation(liveMcp, [server]) : undefined
-      const liveField = liveServer ? findNodeAtLocation(liveServer, [field]) : undefined
-      if (liveField && JSON.stringify(getNodeValue(liveField)) === JSON.stringify(value)) continue
-      apply([mcpKey, server, field], value)
-    }
-    for (const { server, field } of edit.removeFields ?? []) {
-      const liveTree = parseTree(current)
-      const liveMcp = liveTree ? findNodeAtLocation(liveTree, [mcpKey]) : undefined
-      const liveServer = liveMcp ? findNodeAtLocation(liveMcp, [server]) : undefined
-      if (!liveServer || !findNodeAtLocation(liveServer, [field])) throw new McpEditError('MCP_BLOCK_MISSING', `Field ${server}.${field} is absent`)
-      apply([mcpKey, server, field], undefined)
-    }
-    // Whole-container and legacy-key removals run last: an empty MCP block is
-    // deleted only after its servers were removed individually, and legacy
-    // container keys (for example a pre-migration mcpServers block in an
-    // OpenCode config) are migrated away wholesale.
-    if (edit.removeBlock) {
-      current = removeRootProperty(current, mcpKey)
-    }
-    for (const legacyKey of edit.removeKeys ?? []) {
-      current = removeRootProperty(current, legacyKey)
-    }
-    return current
-  } finally {
-    activeRaw = ''
+  const errors: ParseError[] = []
+  const tree = parseTree(raw, errors, { allowTrailingComma: true })
+  if (!tree || tree.type !== 'object' || errors.length > 0) {
+    throw new McpEditError('MCP_PARSE_FAILED', 'The MCP configuration is not a valid JSON object')
   }
+  const mcpNode = findNodeAtLocation(tree, [mcpKey])
+  if (mcpNode && mcpNode.type !== 'object') {
+    throw new McpEditError('MCP_BLOCK_INVALID', `The ${mcpKey} container is ${mcpNode.type} and cannot be replaced safely`)
+  }
+  if (!mcpNode) {
+    if (hasStructuralEdits) {
+      throw new McpEditError('MCP_BLOCK_MISSING', `The ${mcpKey} block is absent`)
+    }
+    // Only wholesale upserts against a document without the MCP block:
+    // insert one localized block before the outer closing brace so every
+    // other byte of the document is preserved. Legacy keys still migrate.
+    let inserted = insertMcpBlockBeforeClosingBrace(raw, mcpKey, edit.upsertServers ?? {})
+    for (const legacyKey of edit.removeKeys ?? []) {
+      inserted = removeRootProperty(inserted, legacyKey)
+    }
+    return inserted
+  }
+  let current = raw
+  const modification: ModificationOptions = { formattingOptions: formattingOptionsFor(raw) }
+  // jsonc-parser edits from separate modify() calls can overlap, so each
+  // operation is applied and re-parsed sequentially.
+  const apply = (path: JSONPath, value: unknown): void => {
+    const edits = modify(current, path, value, modification)
+    if (edits && edits.length > 0) current = applyEdits(current, edits)
+  }
+
+  for (const [name, value] of Object.entries(edit.upsertServers ?? {})) {
+    apply([mcpKey, name], value)
+  }
+  for (const name of edit.removeServers ?? []) {
+    const liveTree = parseTree(current)
+    const liveMcp = liveTree ? findNodeAtLocation(liveTree, [mcpKey]) : undefined
+    if (!liveMcp || !findNodeAtLocation(liveMcp, [name])) throw new McpEditError('MCP_BLOCK_MISSING', `Server ${name} is absent from ${mcpKey}`)
+    apply([mcpKey, name], undefined)
+  }
+  for (const { server, field, value } of edit.setFields ?? []) {
+    // A field already holding the desired value is not rewritten: a no-op
+    // AST edit still re-serializes the node and would cosmetically drift
+    // bytes the transaction does not need to touch.
+    const liveTree = parseTree(current)
+    const liveMcp = liveTree ? findNodeAtLocation(liveTree, [mcpKey]) : undefined
+    const liveServer = liveMcp ? findNodeAtLocation(liveMcp, [server]) : undefined
+    const liveField = liveServer ? findNodeAtLocation(liveServer, [field]) : undefined
+    if (liveField && JSON.stringify(getNodeValue(liveField)) === JSON.stringify(value)) continue
+    apply([mcpKey, server, field], value)
+  }
+  for (const { server, field } of edit.removeFields ?? []) {
+    const liveTree = parseTree(current)
+    const liveMcp = liveTree ? findNodeAtLocation(liveTree, [mcpKey]) : undefined
+    const liveServer = liveMcp ? findNodeAtLocation(liveMcp, [server]) : undefined
+    if (!liveServer || !findNodeAtLocation(liveServer, [field])) throw new McpEditError('MCP_BLOCK_MISSING', `Field ${server}.${field} is absent`)
+    apply([mcpKey, server, field], undefined)
+  }
+  // Whole-container and legacy-key removals run last: an empty MCP block is
+  // deleted only after its servers were removed individually, and legacy
+  // container keys (for example a pre-migration mcpServers block in an
+  // OpenCode config) are migrated away wholesale.
+  if (edit.removeBlock) {
+    current = removeRootProperty(current, mcpKey)
+  }
+  for (const legacyKey of edit.removeKeys ?? []) {
+    current = removeRootProperty(current, legacyKey)
+  }
+  return current
 }
 
 function formattingOptionsFor (raw: string): FormattingOptions {

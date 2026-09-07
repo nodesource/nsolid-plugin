@@ -58,7 +58,7 @@ function installation (target: UpdateInstallation['target'], source: UpdateSourc
 function context () {
   return {
     options: {},
-    commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) },
+    commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) },
   }
 }
 
@@ -247,7 +247,7 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
       let commands = 0
       const result = await claudeStrategy.execute(item, {
         options: {},
-        commandRunner: { run: async () => { commands++; return { exitCode: 0, stdout: '', stderr: '', timedOut: false } } },
+        commandRunner: { run: async () => { commands++; return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true } } },
       })
 
       assert.equal(result.status, 'failed')
@@ -277,7 +277,7 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
       let commands = 0
       const result = await claudeStrategy.execute(unpinned, {
         options: {},
-        commandRunner: { run: async () => { commands++; return { exitCode: 0, stdout: '', stderr: '', timedOut: false } } },
+        commandRunner: { run: async () => { commands++; return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true } } },
       })
 
       assert.equal(result.status, 'failed')
@@ -319,33 +319,64 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
     }
   })
 
-  it('claude: degrades an unverifiable launcher to planningError + manualCommands', async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-claude-'))
-    writeFileSync(path.join(root, 'claude'), 'not executable\n', { mode: 0o644 })
-    process.env.PATH = root
-    try {
-      const candidate = installation('claude', claudeSource())
-      candidate.artifact = {
-        kind: 'git',
-        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
-        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
-        contentDigest: 'planned-content',
+  for (const { target, executable, strategy, source, manualCommands } of [
+    {
+      target: 'claude',
+      executable: 'claude',
+      strategy: claudeStrategy,
+      source: claudeSource,
+      manualCommands: ['claude plugin marketplace update nodesource', 'claude plugin update nsolid-plugin@nodesource --scope user'],
+    },
+    {
+      target: 'codex',
+      executable: 'codex',
+      strategy: codexStrategy,
+      source: codexSource,
+      manualCommands: ['codex plugin marketplace upgrade nodesource', 'codex plugin remove nsolid-plugin@nodesource', 'codex plugin add nsolid-plugin@nodesource'],
+    },
+    {
+      target: 'pi',
+      executable: 'pi',
+      strategy: piStrategy,
+      source: (): UpdateSource => ({ kind: 'pi-package', spec: 'npm:nsolid-pi-plugin', scopes: ['user'] }),
+      manualCommands: ['pi update npm:nsolid-pi-plugin --no-approve'],
+    },
+    {
+      target: 'antigravity',
+      executable: 'agy',
+      strategy: antigravityStrategy,
+      source: antigravitySource,
+      manualCommands: ['agy plugin uninstall nsolid-plugin', 'agy plugin install https://github.com/NodeSource/nsolid-plugin.git'],
+    },
+  ] as const) {
+    it(`${target}: degrades an unverifiable launcher to planningError + manualCommands`, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), `nsolid-strategy-${target}-`))
+      writeFileSync(path.join(root, executable), 'not executable\n', { mode: 0o644 })
+      process.env.PATH = root
+      try {
+        const candidate = target === 'pi' ? piInstallation(root, source()) : installation(target, source())
+        if (target === 'claude' || target === 'codex') {
+          candidate.artifact = {
+            kind: 'git',
+            repository: 'https://github.com/NodeSource/nsolid-plugin.git',
+            commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
+            contentDigest: 'planned-content',
+          }
+        }
+        const item = await strategy.plan(candidate, context())
+        assert.equal(item.steps.length, 0)
+        assert.equal(item.planningError?.code, 'UNSAFE_HARNESS_LAUNCHER')
+        assert.deepEqual(item.manualCommands, manualCommands)
+        if (target === 'claude') {
+          const result = await strategy.execute(item, context())
+          assert.equal(result.status, 'failed')
+          assert.equal(result.error?.code, 'UNSAFE_HARNESS_LAUNCHER')
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
       }
-      const item = await claudeStrategy.plan(candidate, context())
-      assert.equal(item.steps.length, 0)
-      assert.equal(item.planningError?.code, 'UNSAFE_HARNESS_LAUNCHER')
-      assert.deepEqual(item.manualCommands, [
-        'claude plugin marketplace update nodesource',
-        'claude plugin update nsolid-plugin@nodesource --scope user',
-      ])
-      const result = await claudeStrategy.execute(item, context())
-      assert.equal(result.status, 'failed')
-      assert.equal(result.error?.code, 'UNSAFE_HARNESS_LAUNCHER')
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
+    })
+  }
   it('claude: validates the newly registered versioned payload after update', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-claude-update-'))
     const bin = path.join(root, 'bin')
@@ -384,7 +415,7 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
                 },
               }))
             }
-            return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         },
       })
@@ -432,7 +463,7 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
                 }
                 writeFileSync(installedPath, JSON.stringify({ plugins: { 'nsolid-plugin@nodesource': [registration] } }))
               }
-              return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+              return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
             },
           },
         })
@@ -480,31 +511,6 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
     }
   })
 
-  it('codex: degrades an unverifiable launcher to planningError + manualCommands', async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-codex-'))
-    writeFileSync(path.join(root, 'codex'), 'not executable\n', { mode: 0o644 })
-    process.env.PATH = root
-    try {
-      const candidate = installation('codex', codexSource())
-      candidate.artifact = {
-        kind: 'git',
-        repository: 'https://github.com/NodeSource/nsolid-plugin.git',
-        commit: 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c',
-        contentDigest: 'planned-content',
-      }
-      const item = await codexStrategy.plan(candidate, context())
-      assert.equal(item.steps.length, 0)
-      assert.equal(item.planningError?.code, 'UNSAFE_HARNESS_LAUNCHER')
-      assert.deepEqual(item.manualCommands, [
-        'codex plugin marketplace upgrade nodesource',
-        'codex plugin remove nsolid-plugin@nodesource',
-        'codex plugin add nsolid-plugin@nodesource',
-      ])
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
   it('pi: plans a spawn-safe command with embedded identity for a verified launcher', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-pi-'))
     const exe = writeVerifiedLauncher(root, 'pi')
@@ -546,21 +552,6 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
     }
   })
 
-  it('pi: degrades an unverifiable launcher to planningError + manualCommands', async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-pi-'))
-    writeFileSync(path.join(root, 'pi'), 'not executable\n', { mode: 0o644 })
-    process.env.PATH = root
-    try {
-      const source: UpdateSource = { kind: 'pi-package', spec: 'npm:nsolid-pi-plugin', scopes: ['user'] }
-      const item = await piStrategy.plan(piInstallation(root, source), context())
-      assert.equal(item.steps.length, 0)
-      assert.equal(item.planningError?.code, 'UNSAFE_HARNESS_LAUNCHER')
-      assert.deepEqual(item.manualCommands, ['pi update npm:nsolid-pi-plugin --no-approve'])
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
   it('antigravity: plans spawn-safe commands with embedded identity for a verified launcher', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-agy-'))
     const exe = writeVerifiedLauncher(root, 'agy')
@@ -578,23 +569,6 @@ describe('harness strategies degrade unsupported launchers at plan time', () => 
       assert.deepEqual(commands.map((step) => (step.kind === 'command' ? step.command.args : [])), [
         ['plugin', 'uninstall', 'nsolid-plugin'],
         ['plugin', 'install', 'https://github.com/NodeSource/nsolid-plugin.git'],
-      ])
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  it('antigravity: degrades an unverifiable launcher to planningError + manualCommands', async () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-strategy-agy-'))
-    writeFileSync(path.join(root, 'agy'), 'not executable\n', { mode: 0o644 })
-    process.env.PATH = root
-    try {
-      const item = await antigravityStrategy.plan(installation('antigravity', antigravitySource()), context())
-      assert.equal(item.steps.length, 0)
-      assert.equal(item.planningError?.code, 'UNSAFE_HARNESS_LAUNCHER')
-      assert.deepEqual(item.manualCommands, [
-        'agy plugin uninstall nsolid-plugin',
-        'agy plugin install https://github.com/NodeSource/nsolid-plugin.git',
       ])
     } finally {
       rmSync(root, { recursive: true, force: true })

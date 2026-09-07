@@ -120,7 +120,7 @@ describe('update flow coordinator', () => {
       commandRunner: {
         run: async (spec: { executable: string; args: readonly string[] }) => {
           commands.push([spec.executable, ...spec.args].join(' '))
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -146,7 +146,7 @@ describe('update flow coordinator', () => {
       commandRunner: {
         run: async (spec: { executable: string; args: readonly string[] }) => {
           commands.push([spec.executable, ...spec.args].join(' '))
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -164,7 +164,7 @@ describe('update flow coordinator', () => {
     const commandRunner = {
       run: async (spec: { executable: string }) => {
         calls.push(spec.executable)
-        return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     }
     const summary = await checkUpdates({

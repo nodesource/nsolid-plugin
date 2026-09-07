@@ -10,7 +10,6 @@ import {
   assertNoSymlinksInTree,
   copyOwnedPath,
   ownedFileDigest,
-  ownedPathDigest,
   ownedPathKind,
   ownedTreeDigest,
   OwnedFsError,
@@ -197,34 +196,6 @@ describe('owned-fs primitives', () => {
       const firstEmpty = await ownedTreeDigest(makeDir(path.join(root, 'bare')))
       assert.ok(firstEmpty)
       assert.equal(await ownedTreeDigest(makeDir(path.join(root, 'bare-2'))), firstEmpty)
-    })
-  })
-
-  describe('ownedPathDigest', () => {
-    it('dispatches per kind: file, directory, symlink, missing', async (t) => {
-      makeFile(filePath(), 'abc')
-      const fileDigest = await ownedPathDigest(filePath())
-      assert.equal(fileDigest, await ownedFileDigest(filePath()))
-
-      const tree = makeDir()
-      makeFile(path.join(tree, 'a.txt'))
-      assert.ok(await ownedPathDigest(tree))
-      assert.equal(await ownedPathDigest(tree), await ownedTreeDigest(tree))
-
-      const link = path.join(root, 'link')
-      if (!makeFileLink(t, '../relative-target', link)) return
-      assert.equal(await ownedPathDigest(link), 'symlink:../relative-target')
-
-      assert.equal(await ownedPathDigest(path.join(root, 'absent')), null)
-    })
-
-    it('propagates SYMLINK_IN_TREE from a directory instead of dereferencing', async (t) => {
-      const tree = makeDir()
-      if (!makeFileLink(t, filePath(), path.join(tree, 'link'))) return
-      await assert.rejects(
-        ownedPathDigest(tree),
-        (error: unknown) => error instanceof OwnedFsError && error.code === 'SYMLINK_IN_TREE'
-      )
     })
   })
 

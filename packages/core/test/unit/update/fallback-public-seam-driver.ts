@@ -10,6 +10,7 @@
  */
 
 import path from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { FallbackTransactionIdentity, UpdatePlanItem } from '../../../src/update/types.js'
@@ -61,6 +62,26 @@ const item: UpdatePlanItem = {
   resultContainment: [await recordContainmentDirectoryIdentity(fixture.manifestDir)],
 }
 
-const result = await fallbackStrategy.execute(item, { options: {}, commandRunner: createCommandRunner() })
+const runner = createCommandRunner()
+const result = await fallbackStrategy.execute(item, {
+  options: {},
+  commandRunner: {
+    async run (command) {
+      const completion = await runner.run(command)
+      const envelope = JSON.parse(readFileSync(command.args[command.args.indexOf('--result') + 1]!, 'utf8'))
+      // Observe the real runner without changing its verdict or forwarding raw
+      // child output. This evidence belongs to the test's isolated HOME.
+      writeFileSync(path.join(fixture.home, 'command-completion.json'), JSON.stringify({
+        exitCode: completion.exitCode,
+        timedOut: completion.timedOut,
+        treeTerminated: completion.treeTerminated,
+        spawnErrorCode: completion.spawnErrorCode,
+        childCode: envelope.code,
+        childNonce: envelope.nonce,
+      }))
+      return completion
+    },
+  },
+})
 // Exactly one JSON document on stdout, mirroring the CLI's --json rendering.
 console.log(JSON.stringify(result))

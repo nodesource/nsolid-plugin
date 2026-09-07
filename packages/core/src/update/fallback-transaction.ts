@@ -1,11 +1,11 @@
 import { existsSync, lstatSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { BundleDescriptor, Credentials, HarnessType, McpServerRef } from '../types.js'
 import { validateBundle } from '../validate.js'
 import { readJsonFile } from '../utils/config.js'
-import { resolveHome, getSkillsDir, getAuthFilePath, getTrackingFilePath } from '../utils/path.js'
+import { getAuthFilePath } from '../utils/path.js'
+import { resolveFallbackDestinations } from './fallback-planning.js'
 import { deriveMcpUrlFromConsoleUrl } from '../auth/mcp-url.js'
 import { expandVariables } from '../mcp/mcp-config-merger.js'
 import { applyHarnessWriteFormat } from '../mcp/mcp-config-writer.js'
@@ -14,9 +14,9 @@ import { installSkillsToDirectory } from '../skills/skill-copier.js'
 import { getHarnessSkillsPath, materializeSkillLink } from '../skills/skill-linker.js'
 import { assertSafeSkillName } from '../utils/skill-name.js'
 import { getAdapter } from '../harnesses/index.js'
-import type { FallbackPathEvidence, FallbackTransactionIdentity, UpdateError } from './types.js'
+import type { FallbackFrontierEvidence, FallbackLeafTarget, FallbackPathEvidence, FallbackTransactionIdentity, UpdateError } from './types.js'
 import { FALLBACK_PROTOCOL_VERSION } from './types.js'
-import { applyFallbackEntry, beginFallbackJournal, claimFallbackJournalMutation, commitFallbackJournal, manifestDigestOf, markFallbackJournalMutating, reclaimFallbackJournalMutation, registerFallbackFrontierStage, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, trackingDigest, pathDigest, pathKind, type FallbackJournalHandle } from './fallback-journal.js'
+import { applyFallbackEntry, claimFallbackJournalMutation, manifestDigestOf, registerFallbackFrontierStage, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, trackingDigest, pathDigest, pathKind, type FallbackJournalHandle } from './fallback-journal.js'
 import { planMcpReconciliation, type McpConfigPlanEntry } from './mcp-reconciliation.js'
 import { detectJsonMcpKey, editMcpJsonBytes, McpEditError } from './mcp-edit.js'
 import { editMcpTomlBytes, McpTomlEditError } from './mcp-toml-edit.js'
@@ -24,13 +24,13 @@ import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpSe
 import { readPackageVersion } from './package-manager.js'
 import { isStableVersion } from './version.js'
 import { isCanonicalPath, isSafeDirectChild, matchesTrackedOwnership, mcpRecordIsExclusivelyOwned } from './fallback-ownership.js'
-import { assertFallbackFrontierEvidenceList, deriveFallbackFrontierLeafTargets, deriveFallbackFrontierPlan, evaluateFallbackFrontierPlatformSupport, fallbackLinkMaterialization, FallbackFrontierError } from './fallback-frontier.js'
+import { assertFallbackFrontierEvidenceList } from './fallback-frontier.js'
 
 export interface FallbackRefreshOptions {
   harness: HarnessType
   bundlePath: string
   skillsSource: string
-  transaction?: FallbackTransactionIdentity
+  transaction: FallbackTransactionIdentity
   /** Explicit canonical manifest digest transported to an external child; same-process callers may omit it and derive it from the trusted transaction argument. */
   manifestDigest?: string
 }
@@ -46,29 +46,13 @@ export interface FallbackRefreshResult {
   error?: UpdateError
 }
 
-type LocalFallbackManifestObserver = (manifest: FallbackTransactionIdentity) => void | Promise<void>
-
-let localFallbackManifestObserverForTests: LocalFallbackManifestObserver | undefined
-
-/**
- * Test-only awaited observer for the transaction-less local manifest. It fires
- * exactly once after local planning completes and before the platform
- * preflight and the journal lifecycle start. Production code never installs
- * one; tests must reset it in `finally`. The private manifest builder itself
- * is never exported.
- */
-export function setLocalFallbackManifestObserverForTests (observer?: LocalFallbackManifestObserver): void {
-  localFallbackManifestObserverForTests = observer
-}
-
 export async function refreshOwnedInstallation (options: FallbackRefreshOptions): Promise<FallbackRefreshResult> {
-  if (options.transaction) {
-    const validation = await validateTransactionIdentity(options.transaction)
-    if (validation) return failure(validation.code, validation.message)
-  }
+  if (!options.transaction) return failure('INVALID_TRANSACTION_MANIFEST', 'Owned refresh requires a parent transaction manifest')
+  const validation = await validateTransactionIdentity(options.transaction)
+  if (validation) return failure(validation.code, validation.message)
   const tracking = await readTrackingFile()
   if (!tracking) return failure('UNTRACKED_INSTALLATION', 'No NodeSource tracking record exists')
-  if (options.transaction && !matchesTrackedOwnership(tracking, options.transaction)) {
+  if (!matchesTrackedOwnership(tracking, options.transaction)) {
     return failure('FALLBACK_OWNERSHIP_DRIFT', 'Fallback ownership no longer matches the approved transaction manifest')
   }
   const previousSkills = tracking.skills.filter((entry) => entry.harnesses.includes(options.harness))
@@ -89,11 +73,7 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
     return failure('FALLBACK_BUNDLE_VERSION_MISMATCH', 'Update bundle version does not match the executing package version')
   }
 
-  const destination = options.harness === 'opencode'
-    ? path.resolve(process.env.NSOLID_OPENCODE_SKILLS_DIR ?? resolveHome('~/.config/opencode/skills'))
-    : getSkillsDir()
-  const linkSkills = options.harness !== 'opencode'
-  const linkDir = linkSkills ? getHarnessSkillsPath(options.harness) : undefined
+  const { destination, linkDir } = resolveFallbackDestinations(options.harness)
   const oldPaths = previousSkills.map((entry) => entry.paths?.[options.harness] ?? entry.path)
   if (oldPaths.some((value) => typeof value !== 'string' || !path.isAbsolute(value))) {
     return failure('UNTRACKED_INSTALLATION', 'Tracked skill ownership does not contain safe absolute paths')
@@ -117,14 +97,12 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
     }
   }
 
-  const previousConfigPaths = [...new Set(previousMcps.map((entry) => path.resolve(entry.configPath)))]
   // The child uses the canonical path transported by the transaction; the
   // environment is only consulted to validate it has not moved.
   const adapterCanonical = getAdapter(options.harness).getMcpConfigPath()
-  const canonicalConfigPath: string | undefined = options.transaction && adapterCanonical
+  const canonicalConfigPath: string | undefined = adapterCanonical
     ? options.transaction.ownedMcpConfigPaths.map((value) => (typeof value === 'string' ? value : value.path)).find((value) => path.resolve(value) === path.resolve(adapterCanonical))
     : adapterCanonical ?? undefined
-  const allConfigPaths = [...new Set([...previousConfigPaths, canonicalConfigPath].filter((value): value is string => typeof value === 'string'))]
   const previousSkillNames = new Set(previousSkills.map((entry) => entry.name))
 
   // linkSkillsToHarness historically renamed any regular destination to a
@@ -140,606 +118,436 @@ export async function refreshOwnedInstallation (options: FallbackRefreshOptions)
     }
   }
 
-  let stagedSkillsRoot: string | undefined
-  let linksStageRoot: string | undefined
-  const mcpStageRoots: string[] = []
+  const stageRoots: { skills?: string; links?: string; mcp: string[] } = { mcp: [] }
   let journal: FallbackJournalHandle | undefined
   let preserveRecoveryArtifacts = false
-  let preservedArtifacts: string[] = []
-  let preservedPaths: string[] = []
   try {
-    try {
-      const credentials = readValidCredentials()
-      const canReconcileMcp = credentials !== null
-      const previousMcpNames = previousMcps.map((entry) => entry.name)
-      const desiredMcpNames = bundle.mcpServers.map((server) => server.name)
-      if (!canReconcileMcp && !sameNameSet(previousMcpNames, desiredMcpNames)) {
-        throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', 'Fallback MCP state changed but valid credentials are unavailable')
-      }
+    const credentials = readValidCredentials()
+    const canReconcileMcp = credentials !== null
+    const previousMcpNames = previousMcps.map((entry) => entry.name)
+    const desiredMcpNames = bundle.mcpServers.map((server) => server.name)
+    if (!canReconcileMcp && !sameNameSet(previousMcpNames, desiredMcpNames)) {
+      throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', 'Fallback MCP state changed but valid credentials are unavailable')
+    }
 
-      // Plan every MCP change grouped by owning file before anything is
-      // staged or written. The desired harness-formatted values are shared
-      // with the tracking update: their keys are exactly the fields
-      // NodeSource renders, so tracking evidence can be filtered to owned
-      // keys instead of every field that survived in the config bytes.
-      const configuredMcpServers = canReconcileMcp ? bundle.mcpServers : []
-      const desiredMcpValues = canReconcileMcp && credentials
-        ? Object.fromEntries(bundle.mcpServers.map((server) => [server.name, harnessServerValue(options.harness, server, credentials)]))
-        : {}
-      const plan = canReconcileMcp && credentials
-        ? planMcpReconciliation({
-          previousServers: previousMcps.map((entry) => ({ name: entry.name, configPath: path.resolve(entry.configPath), fields: entry.fields })),
-          desiredServers: bundle.mcpServers,
-          desiredValues: desiredMcpValues,
-          canonicalConfigPath: canonicalConfigPath ?? undefined,
-        })
-        : { kind: 'planned' as const, entries: [] as McpConfigPlanEntry[], destinations: {} }
-      if (plan.kind === 'reconciliation-required') {
-        throw new FallbackTransactionError(plan.code, plan.message)
-      }
-      const staleByName = new Map(previousMcps
-        .filter((entry) => !desiredMcpNames.includes(entry.name))
-        .map((entry) => [entry.name, entry]))
-      for (const planEntry of plan.entries) {
-        for (const name of planEntry.removeServers) {
-          const entry = staleByName.get(name)
-          if (!entry || !mcpRecordIsExclusivelyOwned(entry.configPath, entry.name, entry.fields, harnessMcpKey(options.harness))) {
-            throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', 'Fallback MCP cleanup would remove fields that are not proven NodeSource-owned')
-          }
-        }
-      }
-
-      // Render preflight: compute every final MCP byte from the observed
-      // source bytes BEFORE the journal is claimed or any live path changes.
-      // Parse or editor failures here abort with zero mutation. Source
-      // digests are retained and revalidated right before staging/applying so
-      // the drift gates keep working at mutation time.
-      const plannedMcpBytes = new Map<string, { bytes: Buffer; sourceDigest: string | null }>()
-      for (const planEntry of plan.entries) {
-        // A missing config file is a legitimate preflight state (fresh
-        // installs): null revalidates as still-missing at mutation time.
-        const sourceDigest = existsSync(planEntry.configPath) ? await pathDigest(planEntry.configPath) : null
-        const finalBytes = await renderConfigBytes(planEntry, harnessMcpKey(options.harness))
-        if (finalBytes === undefined) continue
-        if (sourceDigest === undefined) {
-          throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} could not be hashed for the transaction`)
-        }
-        plannedMcpBytes.set(path.resolve(planEntry.configPath), { bytes: finalBytes, sourceDigest })
-      }
-
-      // Claim the parent's journal (transaction path) or begin a local one
-      // (transaction-less path). Both happen AFTER every preflight so a
-      // rejection here leaves zero mutation and zero journal state.
-      if (options.transaction) {
-        const expectedDigest = options.manifestDigest ?? manifestDigestOf(options.transaction)
-        const claimed = await claimFallbackJournalMutation(options.transaction, expectedDigest)
-        if (claimed === undefined || claimed === null) {
-          return failure('FALLBACK_JOURNAL_CLAIM_FAILED', 'Fallback mutation journal could not be claimed safely')
-        }
-        journal = claimed
-      } else {
-        // Local (transaction-less) lifecycle: this one process is planner,
-        // owner, and mutator. It still walks the same role ladder as the
-        // external flow — begin → markMutating → self-claim → stage/apply as
-        // mutator → reclaim → prove → commit — so no code path ever mutates
-        // through an owner-role handle.
-        let localManifest: FallbackTransactionIdentity
-        try {
-          localManifest = await buildLocalTransactionManifest(options.harness, tracking, bundle, destination, linkDir, previousSkills, previousMcps, allConfigPaths)
-        } catch (error) {
-          // Frontier planning failures are preflight rejections with their own
-          // stable codes; nothing has been reserved or mutated at this point.
-          if (error instanceof FallbackFrontierError) {
-            return failure(error.code, `Fallback update could not derive its destination evidence: ${error.message}`)
-          }
-          return failure('FALLBACK_BACKUP_FAILED', 'Owned fallback snapshot could not be completed')
-        }
-        if (localFallbackManifestObserverForTests !== undefined) await localFallbackManifestObserverForTests(localManifest)
-        // Platform preflight BEFORE journal reservation, snapshot creation, or
-        // any live mkdir. Every derived frontier counts as active: conditional
-        // (MCP-only) inactivity cannot be proven from mutable planning state.
-        const frontierSupport = evaluateFallbackFrontierPlatformSupport(localManifest.plannedMissingFrontiers)
-        if (!frontierSupport.supported) {
-          return failure(frontierSupport.code, `This platform cannot yet create the missing parent directories (${frontierSupport.frontierPaths.join(', ')}) inside a fallback transaction. Create them manually or reinstall, then retry; no files were changed.`, { attempted: false })
-        }
-        let ownerHandle: FallbackJournalHandle
-        try {
-          const begun = await beginFallbackJournal(localManifest)
-          ownerHandle = begun.handle
-        } catch (error) {
-          if (error instanceof Error && error.message === 'FALLBACK_JOURNAL_BUSY') {
-            return failure('FALLBACK_RECOVERY_PENDING', 'A previous fallback transaction is still pending. Restore or remove it manually before updating; its journal and snapshot are preserved next to the tracking file.')
-          }
-          return failure('FALLBACK_BACKUP_FAILED', 'Owned fallback snapshot could not be completed')
-        }
-        try {
-          await markFallbackJournalMutating(ownerHandle)
-        } catch {
-          return failure('FALLBACK_JOURNAL_CLAIM_FAILED', 'The fallback mutation journal could not be advanced safely')
-        }
-        // Self-claim the mutator role from the manifest this process just
-        // planned. A null claim fails closed BEFORE any live mutation; the
-        // journal and snapshot stay in place for manual recovery.
-        const claimed = await claimFallbackJournalMutation(localManifest, manifestDigestOf(localManifest))
-        if (claimed === undefined || claimed === null) {
-          return failure('FALLBACK_JOURNAL_CLAIM_FAILED', 'The fallback mutation journal could not be claimed safely')
-        }
-        journal = claimed
-      }
-
-      // Stage containers live as direct siblings of their targets (the
-      // authenticated-container invariant), so every planned target's parent
-      // must exist before staging. Creating a plan-approved root or config
-      // directory here is journaled-transaction work: each target itself
-      // stays untouched until its apply, and every path below is either an
-      // approved destination root or a manifest-planned config location.
-      // A missing shared destination root that the planner derived as a
-      // planned-missing frontier is NOT created here: its publication is the
-      // journaled frontier transaction below. The matching frontier is the
-      // unique one equal to the destination root OR a proper segment ancestor
-      // of it (e.g. ~/.config covering ~/.config/opencode/skills) carrying at
-      // least one required skill leaf where every other leaf is either a
-      // skill leaf or a CONDITIONAL mcp-config leaf (active or not: active
-      // config bytes join the same staged subtree before the single
-      // registration). Link, tracking, and other roles are never claimable
-      // here. Ambiguous roots (zero or several matching candidates) are NOT
-      // claimed: their covered leaves then fail the ordinary per-entry
-      // journal gate instead of ever being double-registered.
-      // ---- PURE FRONTIER CLASSIFICATION (before any live mutation) ----
-      // Every planned-missing frontier carrying at least one ACTIVE leaf must
-      // be claimed by exactly one supported publication route before the
-      // first live directory is created. Active leaves: required leaves are
-      // always active; conditional mcp-config leaves are active exactly when
-      // their exact path has rendered transaction bytes; conditional skill
-      // leaves are active only when the unique destination-root frontier
-      // covers a staged bundle skill at that exact path (the demonstrable
-      // deferred selection); every other conditional leaf is inactive.
-      const plannedFrontiers = journal.manifest.plannedMissingFrontiers ?? []
-      const activeMcpLeafPaths = new Set([...plannedMcpBytes.keys()].map((value) => path.resolve(value)))
-      const bundleSkillLivePaths = new Set(bundle.skills.map((skill) => path.resolve(path.join(destination, skill.name))))
-      const destinationFrontierCandidates = plannedFrontiers.filter((candidate) => {
-        const frontierRoot = path.resolve(candidate.frontierPath)
-        const resolvedDestination = path.resolve(destination)
-        if (frontierRoot !== resolvedDestination && !resolvedDestination.startsWith(frontierRoot + path.sep)) return false
-        if (candidate.leaves.length === 0) return false
-        if (!candidate.leaves.some((leaf) => leaf.role === 'skill' && leaf.activation === 'required')) return false
-        return candidate.leaves.every((leaf) =>
-          leaf.role === 'skill' ||
-          (leaf.role === 'mcp-config' && leaf.activation === 'conditional'))
+    // Plan every MCP change grouped by owning file before anything is
+    // staged or written. The desired harness-formatted values are shared
+    // with the tracking update: their keys are exactly the fields
+    // NodeSource renders, so tracking evidence can be filtered to owned
+    // keys instead of every field that survived in the config bytes.
+    const configuredMcpServers = canReconcileMcp ? bundle.mcpServers : []
+    const desiredMcpValues = canReconcileMcp && credentials
+      ? Object.fromEntries(bundle.mcpServers.map((server) => [server.name, harnessServerValue(options.harness, server, credentials)]))
+      : {}
+    const plan = canReconcileMcp && credentials
+      ? planMcpReconciliation({
+        previousServers: previousMcps.map((entry) => ({ name: entry.name, configPath: path.resolve(entry.configPath), fields: entry.fields })),
+        desiredServers: bundle.mcpServers,
+        desiredValues: desiredMcpValues,
+        canonicalConfigPath: canonicalConfigPath ?? undefined,
       })
-      const destinationRootFrontier = destinationFrontierCandidates.length === 1 ? destinationFrontierCandidates[0] : undefined
-      const destinationFrontierRoot = destinationRootFrontier !== undefined ? path.resolve(destinationRootFrontier.frontierPath) : undefined
-      // A missing link root that the planner derived as a planned-missing
-      // frontier is NOT created here: its publication is the journaled
-      // frontier transaction below. The matching frontier is the unique one
-      // equal to linkDir or a proper segment ancestor of it whose leaves are
-      // all link leaves (e.g. ~/.claude covering ~/.claude/skills/<name>).
-      // Any other linkDir keeps the generic recursive creation.
-      const linkFrontierCandidates = linkDir === undefined
-        ? []
-        : plannedFrontiers.filter((candidate) => {
-          const frontierRoot = path.resolve(candidate.frontierPath)
-          const resolvedLinkDir = path.resolve(linkDir)
-          if (frontierRoot !== resolvedLinkDir && !resolvedLinkDir.startsWith(frontierRoot + path.sep)) return false
-          return candidate.leaves.length > 0 && candidate.leaves.every((leaf) => leaf.role === 'link')
-        })
-      const linkRootFrontier = linkFrontierCandidates.length === 1 ? linkFrontierCandidates[0] : undefined
-      const linkFrontierRoot = linkRootFrontier !== undefined ? path.resolve(linkRootFrontier.frontierPath) : undefined
-      // Unsupported/ambiguous frontier audit gate: fail closed BEFORE any
-      // live destination/link/config directory creation. A frontier with
-      // active leaves that no supported route uniquely claims (skill+link or
-      // link+MCP mixes, ambiguous destination/link candidates, overlapping
-      // or broader-than-exact single-skill shapes) must never reach the
-      // mkdir fallthroughs below: those would create live parents the
-      // journaled frontier transaction is supposed to own.
-      for (const frontier of plannedFrontiers) {
-        const activeLeaves = frontier.leaves.filter((leaf) =>
-          leaf.activation === 'required' ||
-          (leaf.role === 'mcp-config' && leaf.activation === 'conditional' && activeMcpLeafPaths.has(path.resolve(leaf.path))) ||
-          (leaf.role === 'skill' && leaf.activation === 'conditional' && frontier === destinationRootFrontier && bundleSkillLivePaths.has(path.resolve(leaf.path))))
-        if (activeLeaves.length === 0) continue
-        const isDestinationClaim = frontier === destinationRootFrontier
-        const isLinkClaim = frontier === linkRootFrontier
-        const isMcpClaim = frontier.leaves.length > 0 && frontier.leaves.every((leaf) => leaf.role === 'mcp-config')
-        const isSingleSkillClaim = activeLeaves.length === 1 &&
-          activeLeaves[0].role === 'skill' &&
-          activeLeaves[0].activation === 'required' &&
-          path.resolve(frontier.frontierPath) === path.resolve(activeLeaves[0].path)
-        if (!isDestinationClaim && !isLinkClaim && !isMcpClaim && !isSingleSkillClaim) {
-          throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `Fallback frontier ${frontier.frontierPath} carries active leaves that no supported publication route claims; refusing to mutate live paths before the frontier is claimed`)
+      : { kind: 'planned' as const, entries: [] as McpConfigPlanEntry[], destinations: {} }
+    if (plan.kind === 'reconciliation-required') {
+      throw new FallbackTransactionError(plan.code, plan.message)
+    }
+    const staleByName = new Map(previousMcps
+      .filter((entry) => !desiredMcpNames.includes(entry.name))
+      .map((entry) => [entry.name, entry]))
+    for (const planEntry of plan.entries) {
+      for (const name of planEntry.removeServers) {
+        const entry = staleByName.get(name)
+        if (!entry || !mcpRecordIsExclusivelyOwned(entry.configPath, entry.name, entry.fields, harnessMcpKey(options.harness))) {
+          throw new FallbackTransactionError('MCP_RECONCILIATION_REQUIRED', 'Fallback MCP cleanup would remove fields that are not proven NodeSource-owned')
         }
       }
-      if (destinationRootFrontier === undefined) await mkdir(destination, { recursive: true })
-      if (linkDir !== undefined && linkRootFrontier === undefined) await mkdir(linkDir, { recursive: true })
-      // Active MCP configuration leaves whose parent chain is missing are
-      // grouped by their all-MCP frontier. The private staged subtree mirrors
-      // paths relative to that frontier; no live parent is created here.
-      const mcpFrontierPlans = journal.manifest.plannedMissingFrontiers
-        .filter((frontier) => frontier.leaves.length > 0 && frontier.leaves.every((leaf) => leaf.role === 'mcp-config'))
-        .map((frontier) => ({
-          frontier,
-          root: path.resolve(frontier.frontierPath),
-          activeLeaves: frontier.leaves.filter((leaf) => plannedMcpBytes.has(path.resolve(leaf.path))),
-        }))
-        .filter((frontierPlan) => frontierPlan.activeLeaves.length > 0)
-        .sort((left, right) => Buffer.compare(Buffer.from(left.root, 'utf8'), Buffer.from(right.root, 'utf8')))
-      const mcpFrontierByPath = new Map<string, typeof mcpFrontierPlans[number]>()
-      for (const frontierPlan of mcpFrontierPlans) {
-        for (const leaf of frontierPlan.activeLeaves) {
-          const leafPath = path.resolve(leaf.path)
-          if (mcpFrontierByPath.has(leafPath)) {
-            throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `Multiple fallback frontiers cover the MCP configuration ${leafPath}`)
-          }
-          mcpFrontierByPath.set(leafPath, frontierPlan)
-        }
-      }
-      // Every leaf path covered by the link-root frontier is published as one
-      // journaled unit; per-leaf staging/apply must skip them entirely.
-      const frontierCoveredLinkPaths = new Set((linkRootFrontier?.leaves ?? []).map((leaf) => path.resolve(leaf.path)))
-      // Every leaf path covered by the destination-root frontier is published
-      // as one journaled unit; per-skill staging/apply must skip them too.
-      const frontierCoveredSkillPaths = new Set((destinationRootFrontier?.leaves ?? []).map((leaf) => path.resolve(leaf.path)))
-      // Active conditional mcp-config leaves claimed by the destination-root
-      // frontier: their bytes join the SAME deferred staged subtree and their
-      // publication is the single frontier apply (no live parent mkdir and no
-      // ordinary per-config stage/apply, so no double publication).
-      const destinationFrontierMcpPaths = new Set((destinationRootFrontier?.leaves ?? [])
-        .filter((leaf) => leaf.role === 'mcp-config' && leaf.activation === 'conditional' && plannedMcpBytes.has(path.resolve(leaf.path)))
-        .map((leaf) => path.resolve(leaf.path)))
-      for (const plannedConfigPath of plannedMcpBytes.keys()) {
-        if (mcpFrontierByPath.has(path.resolve(plannedConfigPath))) continue
-        if (destinationFrontierMcpPaths.has(path.resolve(plannedConfigPath))) continue
-        await mkdir(path.dirname(plannedConfigPath), { recursive: true })
-      }
+    }
 
-      // ---- STAGE: skills, links, MCP bytes, and tracking bytes are prepared
-      // completely before any live path is touched. Every staged path is a
-      // parent-planned journal entry: the child never adds unplanned paths.
-      {
-        // The stage container must be a direct sibling of the frontier root
-        // (the authenticated-container invariant). For an ancestor frontier
-        // the staged skills live under the exact sub-path the frontier covers
-        // (path.relative(frontierRoot, destination)), so the registered
-        // payload mirrors the frontier tree; link copySource keeps pointing
-        // at the staged skills directory either way. The mirror directories
-        // are created inside the scratch container only, never live.
-        const skillsStageContainer = destinationFrontierRoot !== undefined
-          ? await mkdtemp(path.join(path.dirname(destinationFrontierRoot), `.${path.basename(destinationFrontierRoot)}.nsolid-stage-`))
-          : await mkdtemp(path.join(path.dirname(destination), `.${path.basename(destination)}.nsolid-stage-`))
-        stagedSkillsRoot = skillsStageContainer
-        const relativeSkillsStage = destinationFrontierRoot !== undefined ? path.relative(destinationFrontierRoot, path.resolve(destination)) : ''
-        const skillsStage = relativeSkillsStage === '' ? skillsStageContainer : path.join(skillsStageContainer, relativeSkillsStage)
-        if (skillsStage !== skillsStageContainer) await mkdir(skillsStage, { recursive: true })
-        if (destinationRootFrontier !== undefined) {
-          // The destination-root frontier payload is the whole staged subtree:
-          // materialize only the required bundle skill leaves it covers; the
-          // frontier publication replaces the missing root as one unit.
-          await installSkillsToDirectory(bundle.skills.filter((skill) => frontierCoveredSkillPaths.has(path.resolve(path.join(destination, skill.name)))), options.skillsSource, skillsStage)
-        } else {
-          await installSkillsToDirectory(bundle.skills, options.skillsSource, skillsStage)
-        }
-        for (const skill of bundle.skills) {
-          const livePath = path.join(destination, skill.name)
-          const resolvedLive = path.resolve(livePath)
-          if (destinationRootFrontier !== undefined && frontierCoveredSkillPaths.has(resolvedLive)) continue
-          const manifest: FallbackTransactionIdentity = journal.manifest
-          // An exact single-skill frontier (frontierPath equals the live skill
-          // path and carries a required directory skill leaf at the frontier
-          // root) is one journaled frontier publication unit, not a plain
-          // staged leaf; the apply loop already targets livePath exactly once.
-          const skillFrontier = manifest.plannedMissingFrontiers.find((candidate) => {
-            if (path.resolve(candidate.frontierPath) !== resolvedLive) return false
-            return candidate.leaves.some((leaf) => leaf.role === 'skill' && leaf.activation === 'required' && path.resolve(leaf.path) === resolvedLive)
-          })
-          journal = skillFrontier !== undefined
-            ? await registerFallbackFrontierStage(journal, livePath, path.join(skillsStage, skill.name), { activeConditionalLeafIds: [] })
-            : await registerFallbackStage(requireJournalEntry(journal, livePath), livePath, { directory: path.join(skillsStage, skill.name) })
-        }
-        // The destination-root frontier publication keeps its private stage
-        // container and is registered LATER, after the MCP staging loop, so
-        // later work can add payload to the exact same staged subtree before
-        // the one journaled registration. Only conditional leaves whose bytes
-        // were actually staged may be selected as active: conditional skill
-        // leaves covered by the staged bundle (normally none: required bundle
-        // leaves supersede conditional evidence at the same destination) and
-        // conditional mcp-config leaves whose render planned real bytes.
-        let deferredDestinationFrontier: { activeConditionalLeafIds: readonly string[] } | undefined
-        if (destinationRootFrontier !== undefined && destinationFrontierRoot !== undefined) {
-          const stagedCoveredSkillPaths = new Set(bundle.skills
-            .filter((skill) => frontierCoveredSkillPaths.has(path.resolve(path.join(destination, skill.name))))
-            .map((skill) => path.resolve(path.join(destination, skill.name))))
-          deferredDestinationFrontier = {
-            activeConditionalLeafIds: (destinationRootFrontier.leaves ?? [])
-              .filter((leaf) => leaf.activation === 'conditional' && (
-                (leaf.role === 'skill' && stagedCoveredSkillPaths.has(path.resolve(leaf.path))) ||
-                (leaf.role === 'mcp-config' && destinationFrontierMcpPaths.has(path.resolve(leaf.path)))))
-              .map((leaf) => leaf.id),
-          }
-        }
-        // Link staging/registration runs AFTER the deferred destination-root
-        // skill frontier registration below, so every bundle-skill payload
-        // digest binding is available in the private registry before any
-        // copied link is registered. Apply order still runs skills before
-        // links; only the registration order changed.
-        const stagedMcpBytes = new Map<string, Buffer>()
-        for (const planEntry of plan.entries) {
-          const planned = plannedMcpBytes.get(path.resolve(planEntry.configPath))
-          if (planned === undefined) continue
-          // The staged bytes were rendered from an earlier observation:
-          // revalidate the source digest so drift between preflight and
-          // staging is rejected before anything is registered.
-          const currentDigest = existsSync(planEntry.configPath) ? await pathDigest(planEntry.configPath) : null
-          if (currentDigest === undefined || currentDigest !== planned.sourceDigest) {
-            throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} changed after the render preflight`)
-          }
-          stagedMcpBytes.set(planEntry.configPath, planned.bytes)
-          const resolvedConfig = path.resolve(planEntry.configPath)
-          if (mcpFrontierByPath.has(resolvedConfig)) continue
-          if (destinationFrontierMcpPaths.has(resolvedConfig)) {
-            // Active config shared with the destination-root frontier: the
-            // bytes join the SAME deferred staged subtree at the exact
-            // frontier-relative path. Directories are created inside the
-            // scratch container only; the live parent chain stays missing
-            // until the single journaled frontier publication installs both
-            // roles. No ordinary per-config journal entry is registered, so
-            // the config can never be double-published.
-            if (destinationFrontierRoot === undefined) {
-              throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `The MCP configuration ${planEntry.configPath} has no deferred destination frontier root`)
-            }
-            const relativeConfig = path.relative(destinationFrontierRoot, resolvedConfig)
-            if (relativeConfig === '' || relativeConfig.startsWith('..') || path.isAbsolute(relativeConfig)) {
-              throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `The MCP configuration ${planEntry.configPath} is not a strict child of its destination frontier ${destinationFrontierRoot}`)
-            }
-            const stagedConfigPath = path.join(skillsStageContainer, relativeConfig)
-            await mkdir(path.dirname(stagedConfigPath), { recursive: true })
-            await writeFile(stagedConfigPath, planned.bytes, { mode: 0o600 })
-            continue
-          }
-          journal = await registerFallbackStage(requireJournalEntry(journal, planEntry.configPath), planEntry.configPath, { bytes: planned.bytes })
-        }
-        for (const frontierPlan of mcpFrontierPlans) {
-          const stageRoot = await mkdtemp(path.join(path.dirname(frontierPlan.root), `.${path.basename(frontierPlan.root)}.nsolid-stage-`))
-          mcpStageRoots.push(stageRoot)
-          for (const leaf of frontierPlan.activeLeaves) {
-            const planned = plannedMcpBytes.get(path.resolve(leaf.path))
-            if (planned === undefined) throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `The active MCP frontier leaf ${leaf.path} has no planned bytes`)
-            const stagedPath = path.join(stageRoot, path.relative(frontierPlan.root, path.resolve(leaf.path)))
-            await mkdir(path.dirname(stagedPath), { recursive: true })
-            await writeFile(stagedPath, planned.bytes, { mode: 0o600 })
-          }
-          journal = await registerFallbackFrontierStage(journal, frontierPlan.root, stageRoot, {
-            activeConditionalLeafIds: frontierPlan.activeLeaves.filter((leaf) => leaf.activation === 'conditional').map((leaf) => leaf.id),
-          })
-        }
-        // The deferred destination-root frontier registration: the exact same
-        // single journaled publication unit as before, performed after the
-        // MCP per-entry staging loop and before the link staging block below
-        // (so copied links can bind to its registered skill payloads) and
-        // before the tracking bytes are built.
-        if (deferredDestinationFrontier !== undefined && destinationFrontierRoot !== undefined) {
-          journal = await registerFallbackFrontierStage(journal, destinationFrontierRoot, skillsStageContainer, { activeConditionalLeafIds: deferredDestinationFrontier.activeConditionalLeafIds })
-        }
-        if (linkDir) {
-          // The stage container is a direct sibling of the frontier root (the
-          // authenticated-container invariant); the frontier root's parent is
-          // the anchor that already exists.
-          const linksStage = await mkdtemp(path.join(path.dirname(linkFrontierRoot ?? linkDir), `.${path.basename(linkFrontierRoot ?? linkDir)}.nsolid-stage-`))
-          linksStageRoot = linksStage
-          if (linkRootFrontier !== undefined && linkFrontierRoot !== undefined) {
-            // Missing link-root frontier (equal to linkDir or a proper
-            // ancestor): stage the active required bundle links as one
-            // complete frontier subtree at their exact paths relative to the
-            // frontier root (e.g. staged/skills/<name> for frontier ~/.claude
-            // with linkDir ~/.claude/skills), then register it as a single
-            // frontier publication unit. Stale conditional link leaves are
-            // intentionally absent from the staged tree.
-            for (const skill of bundle.skills) {
-              const linkPath = path.resolve(path.join(linkDir, skill.name))
-              if (!frontierCoveredLinkPaths.has(linkPath)) continue
-              const stagedLink = path.join(linksStage, path.relative(linkFrontierRoot, linkPath))
-              await mkdir(path.dirname(stagedLink), { recursive: true })
-              await materializeSkillLink({
-                linkSource: path.join(destination, skill.name),
-                copySource: path.join(skillsStage, skill.name),
-                target: stagedLink,
-                alwaysCopy: options.harness === 'pi',
-              })
-            }
-            journal = await registerFallbackFrontierStage(journal, linkFrontierRoot, linksStage, { activeConditionalLeafIds: [] })
-          } else {
-            for (const skill of bundle.skills) {
-              const linkPath = path.join(linkDir, skill.name)
-              const stagedLink = path.join(linksStage, skill.name)
-              // Staged links follow the same Windows-safe policy as normal
-              // harness linking: the junction/symlink references the final
-              // live shared skill path, and the copy fallback comes from the
-              // newly prepared staged bytes, never the old live content.
-              await materializeSkillLink({
-                linkSource: path.join(destination, skill.name),
-                copySource: path.join(skillsStage, skill.name),
-                target: stagedLink,
-                alwaysCopy: options.harness === 'pi',
-              })
-              journal = await registerFallbackStage(requireJournalEntry(journal, linkPath), linkPath, { directory: stagedLink })
-            }
-          }
-        }
-        // Field evidence must describe the bytes that will exist after the
-        // swap, not the pre-update files.
-        const trackingPath = path.resolve(journal.manifest.trackingPath)
-        const preferredKey = harnessMcpKey(options.harness)
-        const resolveFieldDigests = (configPath: string, name: string): Record<string, string> | undefined => {
-          const staged = stagedMcpBytes.get(configPath)
-          if (staged !== undefined) return mcpFieldDigestsFromBytes(configPath, staged, name, { preferredKey })
-          return readMcpFieldDigests(configPath, name, { preferredKey })
-        }
-        const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName, desiredMcpValues, resolveFieldDigests)
-        journal = await registerFallbackStage(requireJournalEntry(journal, trackingPath), trackingPath, { bytes: Buffer.from(JSON.stringify(updatedTracking, null, 2) + '\n', 'utf8') })
+    // Render preflight: compute every final MCP byte from the observed
+    // source bytes BEFORE the journal is claimed or any live path changes.
+    // Parse or editor failures here abort with zero mutation. Source
+    // digests are retained and revalidated right before staging/applying so
+    // the drift gates keep working at mutation time.
+    const plannedMcpBytes = new Map<string, { bytes: Buffer; sourceDigest: string | null }>()
+    for (const planEntry of plan.entries) {
+      // A missing config file is a legitimate preflight state (fresh
+      // installs): null revalidates as still-missing at mutation time.
+      const sourceDigest = existsSync(planEntry.configPath) ? await pathDigest(planEntry.configPath) : null
+      const finalBytes = await renderConfigBytes(planEntry, harnessMcpKey(options.harness))
+      if (finalBytes === undefined) continue
+      if (sourceDigest === undefined) {
+        throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} could not be hashed for the transaction`)
       }
+      plannedMcpBytes.set(path.resolve(planEntry.configPath), { bytes: finalBytes, sourceDigest })
+    }
 
-      // ---- APPLY: same-volume swaps, one entry at a time; deletions are
-      // quarantine moves that preserve bytes until an authenticated cleanup.
-      const newNames = new Set(bundle.skills.map((skill) => skill.name))
-      const pathsToReplace = previousSkills
-        .filter((entry) => newNames.has(entry.name))
-        .map((entry) => entry.paths?.[options.harness] ?? entry.path)
-      const pathsToRemove = previousSkills
-        .filter((entry) => !newNames.has(entry.name) && canRemoveOwnedPath(entry, options.harness))
-        .map((entry) => entry.paths?.[options.harness] ?? entry.path)
-      for (const ownedPath of [...pathsToReplace, ...pathsToRemove]) {
-        if (frontierCoveredLinkPaths.has(path.resolve(ownedPath))) continue
-        if (frontierCoveredSkillPaths.has(path.resolve(ownedPath))) continue
-        journal = await applyFallbackEntry(journal, ownedPath)
+    // Preflights complete: claim only the journal reserved by the parent.
+    const expectedDigest = options.manifestDigest ?? manifestDigestOf(options.transaction)
+    const claimed = await claimFallbackJournalMutation(options.transaction, expectedDigest)
+    if (claimed === undefined || claimed === null) {
+      return failure('FALLBACK_JOURNAL_CLAIM_FAILED', 'Fallback mutation journal could not be claimed safely')
+    }
+    journal = claimed
+
+    // Stage containers live as direct siblings of their targets (the
+    // authenticated-container invariant), so every planned target's parent
+    // must exist before staging. Creating a plan-approved root or config
+    // directory here is journaled-transaction work: each target itself
+    // stays untouched until its apply, and every path below is either an
+    // approved destination root or a manifest-planned config location.
+    // A missing shared destination root that the planner derived as a
+    // planned-missing frontier is NOT created here: its publication is the
+    // journaled frontier transaction below. The matching frontier is the
+    // unique one equal to the destination root OR a proper segment ancestor
+    // of it (e.g. ~/.config covering ~/.config/opencode/skills) carrying at
+    // least one required skill leaf where every other leaf is either a
+    // skill leaf or a CONDITIONAL mcp-config leaf (active or not: active
+    // config bytes join the same staged subtree before the single
+    // registration). Link, tracking, and other roles are never claimable
+    // here. Ambiguous roots (zero or several matching candidates) are NOT
+    // claimed: their covered leaves then fail the ordinary per-entry
+    // journal gate instead of ever being double-registered.
+    // ---- PURE FRONTIER CLASSIFICATION (before any live mutation) ----
+    // Every planned-missing frontier carrying at least one ACTIVE leaf must
+    // be claimed by exactly one supported publication route before the
+    // first live directory is created. Active leaves: required leaves are
+    // always active; conditional mcp-config leaves are active exactly when
+    // their exact path has rendered transaction bytes; conditional skill
+    // leaves are active only when the unique destination-root frontier
+    // covers a staged bundle skill at that exact path (the demonstrable
+    // deferred selection); every other conditional leaf is inactive.
+    const frontiers = classifyFallbackFrontiers(
+      journal.manifest.plannedMissingFrontiers, destination, linkDir,
+      new Set(bundle.skills.map((skill) => path.resolve(path.join(destination, skill.name)))),
+      new Set(plannedMcpBytes.keys())
+    )
+    if (frontiers.skills === undefined) await mkdir(destination, { recursive: true })
+    if (linkDir !== undefined && frontiers.links === undefined) await mkdir(linkDir, { recursive: true })
+    // Keep duplicate-MCP validation after the same destination/link mkdir
+    // points. Each config maps to its single grouped publication route.
+    const mcpFrontierByPath = new Map<string, FrontierPublication>()
+    for (const frontierPlan of frontiers.mcp) {
+      for (const leaf of frontierPlan.activeLeaves) {
+        const leafPath = path.resolve(leaf.path)
+        if (mcpFrontierByPath.has(leafPath)) {
+          throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `Multiple fallback frontiers cover the MCP configuration ${leafPath}`)
+        }
+        mcpFrontierByPath.set(leafPath, frontierPlan)
       }
-      // Fresh installs (new skills and shared destinations) come from the
-      // staged tree; already-swapped entries are left untouched.
+    }
+    if (frontiers.skills !== undefined) {
+      for (const leaf of frontiers.skills.activeLeaves) {
+        const leafPath = path.resolve(leaf.path)
+        if (leaf.role === 'mcp-config' && leaf.activation === 'conditional' && !mcpFrontierByPath.has(leafPath)) {
+          mcpFrontierByPath.set(leafPath, frontiers.skills)
+        }
+      }
+    }
+    for (const plannedConfigPath of plannedMcpBytes.keys()) {
+      if (mcpFrontierByPath.has(path.resolve(plannedConfigPath))) continue
+      await mkdir(path.dirname(plannedConfigPath), { recursive: true })
+    }
+
+    // ---- STAGE: skills, links, MCP bytes, and tracking bytes are prepared
+    // completely before any live path is touched. Every staged path is a
+    // parent-planned journal entry: the child never adds unplanned paths.
+    {
+      // The stage container must be a direct sibling of the frontier root
+      // (the authenticated-container invariant). For an ancestor frontier
+      // the staged skills live under the exact sub-path the frontier covers
+      // (path.relative(frontierRoot, destination)), so the registered
+      // payload mirrors the frontier tree; link copySource keeps pointing
+      // at the staged skills directory either way. The mirror directories
+      // are created inside the scratch container only, never live.
+      const skillsStageTarget = frontiers.skills?.root ?? destination
+      const skillsStageContainer = await mkdtemp(path.join(path.dirname(skillsStageTarget), `.${path.basename(skillsStageTarget)}.nsolid-stage-`))
+      stageRoots.skills = skillsStageContainer
+      const relativeSkillsStage = frontiers.skills !== undefined ? path.relative(frontiers.skills.root, path.resolve(destination)) : ''
+      const skillsStage = relativeSkillsStage === '' ? skillsStageContainer : path.join(skillsStageContainer, relativeSkillsStage)
+      if (skillsStage !== skillsStageContainer) await mkdir(skillsStage, { recursive: true })
+      if (frontiers.skills !== undefined) {
+        // The destination-root frontier payload is the whole staged subtree:
+        // materialize only the required bundle skill leaves it covers; the
+        // frontier publication replaces the missing root as one unit.
+        await installSkillsToDirectory(bundle.skills.filter((skill) => frontiers.skills?.paths.has(path.resolve(path.join(destination, skill.name)))), options.skillsSource, skillsStage)
+      } else {
+        await installSkillsToDirectory(bundle.skills, options.skillsSource, skillsStage)
+      }
       for (const skill of bundle.skills) {
         const livePath = path.join(destination, skill.name)
-        if (destinationRootFrontier !== undefined && frontierCoveredSkillPaths.has(path.resolve(livePath))) continue
-        const disk = await reloadFallbackJournal(journal)
-        if (!disk.entries.some((entry) => path.resolve(entry.path) === path.resolve(livePath) && entry.applied)) {
-          journal = await applyFallbackEntry(journal, livePath)
-        }
+        const resolvedLive = path.resolve(livePath)
+        if (frontiers.skills?.paths.has(resolvedLive)) continue
+        // Exact single-skill frontiers register as one publication unit.
+        journal = frontiers.singleSkills.has(resolvedLive)
+          ? await registerFallbackFrontierStage(journal, livePath, path.join(skillsStage, skill.name), { activeConditionalLeafIds: [] })
+          : await registerFallbackStage(requireJournalEntry(journal, livePath), livePath, { directory: path.join(skillsStage, skill.name) })
       }
-
-      // One journaled frontier publication replaces every covered shared
-      // skill leaf: applied exactly once, after the staged shared skills are
-      // ready and before any link frontier publication.
-      if (destinationRootFrontier !== undefined && destinationFrontierRoot !== undefined) {
-        const disk = await reloadFallbackJournal(journal)
-        if (!disk.entries.some((entry) => path.resolve(entry.path) === destinationFrontierRoot && entry.applied)) {
-          journal = await applyFallbackEntry(journal, destinationFrontierRoot)
-        }
-      }
-
-      if (linkDir) {
-        for (const oldEntry of previousSkills) {
-          if (newNames.has(oldEntry.name)) continue
-          const oldLinkPath = path.resolve(path.join(linkDir, oldEntry.name))
-          if (frontierCoveredLinkPaths.has(oldLinkPath)) continue
-          journal = await applyFallbackEntry(journal, oldLinkPath)
-        }
-        for (const skill of bundle.skills) {
-          const linkPath = path.join(linkDir, skill.name)
-          if (frontierCoveredLinkPaths.has(path.resolve(linkPath))) continue
-          const disk = await reloadFallbackJournal(journal)
-          if (!disk.entries.some((entry) => path.resolve(entry.path) === path.resolve(linkPath) && entry.applied)) {
-            journal = await applyFallbackEntry(journal, linkPath)
-          }
-        }
-        // One journaled frontier publication replaces every covered link
-        // leaf: applied exactly once, after the shared skill destinations.
-        if (linkRootFrontier !== undefined && linkFrontierRoot !== undefined) {
-          const disk = await reloadFallbackJournal(journal)
-          if (!disk.entries.some((entry) => path.resolve(entry.path) === linkFrontierRoot && entry.applied)) {
-            journal = await applyFallbackEntry(journal, linkFrontierRoot)
-          }
-        }
-      }
-
+      // The destination-root frontier publication keeps its private stage
+      // container and is registered LATER, after the MCP staging loop, so
+      // later work can add payload to the exact same staged subtree before
+      // the one journaled registration. Only conditional leaves whose bytes
+      // were actually staged may be selected as active: conditional skill
+      // leaves covered by the staged bundle (normally none: required bundle
+      // leaves supersede conditional evidence at the same destination) and
+      // conditional mcp-config leaves whose render planned real bytes.
+      // Link staging/registration runs AFTER the deferred destination-root
+      // skill frontier registration below, so every bundle-skill payload
+      // digest binding is available in the private registry before any
+      // copied link is registered. Apply order still runs skills before
+      // links; only the registration order changed.
+      const stagedMcpBytes = new Map<string, Buffer>()
       for (const planEntry of plan.entries) {
-        if (!planHasByteChanges(planEntry)) continue
-        // The apply gate mirrors the staging gate: an entry whose render
-        // produced no byte change has no staged payload, and applying it
-        // would move the live configuration into quarantine with nothing
-        // to replace it. Skip it — the live bytes already match the plan.
-        if (plannedMcpBytes.get(path.resolve(planEntry.configPath)) === undefined) continue
-        if (mcpFrontierByPath.has(path.resolve(planEntry.configPath))) continue
-        if (destinationFrontierMcpPaths.has(path.resolve(planEntry.configPath))) continue
-        journal = await applyFallbackEntry(journal, planEntry.configPath)
-      }
-      for (const frontierPlan of mcpFrontierPlans) {
-        journal = await applyFallbackEntry(journal, frontierPlan.root)
-      }
-
-      // The staged tracking bytes were built from the staged MCP bytes; the
-      // swap installs exactly those.
-      journal = await applyFallbackEntry(journal, path.resolve(journal.manifest.trackingPath))
-
-      // External child success: the journal belongs to the waiting parent.
-      // This process holds only the mutator role — the recorded owner PID is
-      // the parent that began the journal — so reclaim, prove, and commit are
-      // parent-only operations and must never run here. The applied journal
-      // and its mutator record stay in place: after the confirmed child exit
-      // the parent reclaims owner authority, proves the applied state from
-      // the strictly reloaded journal plus the live filesystem, and commits
-      // with the journal as the single snapshot.
-      if (options.transaction !== undefined) {
-        return { success: true }
-      }
-      // Local completion: reclaim the same-process mutator back to owner (the
-      // sanctioned transaction-less transition), prove the resulting applied
-      // state from the strictly reloaded journal plus the live filesystem, and
-      // only then commit. Commit disposes the journal and snapshot, so a
-      // successful local refresh leaves no live transaction state behind.
-      let ownerHandle: FallbackJournalHandle
-      try {
-        ownerHandle = await reclaimFallbackJournalMutation(journal)
-        journal = ownerHandle
-      } catch {
-        preserveRecoveryArtifacts = true
-        return failure('FALLBACK_STATE_UNPROVEN', 'The fallback refresh completed but its journal could not be reclaimed safely; its state was left untouched for manual recovery', { attempted: false })
-      }
-      if (!await journalProvesAppliedState(await reloadFallbackJournal(ownerHandle))) {
-        const restored = await restoreFallbackJournal(ownerHandle)
-        preserveRecoveryArtifacts = !restored.succeeded
-        preservedArtifacts = restored.preservedArtifacts
-        preservedPaths = restored.preservedPaths
-        return failure(restored.succeeded ? 'FALLBACK_VALIDATION_FAILED' : 'FALLBACK_ROLLBACK_FAILED', restored.succeeded ? 'The fallback refresh completed without proving the planned owned-state mutation' : 'Fallback validation failed and local recovery was incomplete', { attempted: true, succeeded: restored.succeeded }, { preservedArtifacts, preservedPaths })
-      }
-      const commitResult = await commitFallbackJournal(ownerHandle)
-      return {
-        success: true,
-        preservedArtifacts: commitResult.preservedArtifacts.length > 0 ? commitResult.preservedArtifacts : undefined,
-        preservedPaths: commitResult.preservedPaths.length > 0 ? commitResult.preservedPaths : undefined,
-      }
-    } catch (error) {
-      // Child-owned rollback: this process still holds the mutator handle and
-      // its in-memory manifest, so it restores the journaled snapshot itself.
-      // Every backup is authenticated against manifest evidence before any
-      // byte moves; mutable journal fields never authorize a deletion.
-      if (journal !== undefined) {
-        const restored = await restoreFallbackJournal(journal)
-        preserveRecoveryArtifacts = !restored.succeeded
-        preservedArtifacts = restored.preservedArtifacts
-        preservedPaths = restored.preservedPaths
-        if (restored.succeeded && options.transaction === undefined) {
-          // Local flow: this process is also the journal owner, and a
-          // mutator-role restore deliberately leaves the journal file for its
-          // owner. Reclaim (the sanctioned same-process transition) and
-          // dispose it so a rolled-back local refresh leaves no live
-          // transaction behind for the next run to trip over.
-          try {
-            const rollbackOwner = await reclaimFallbackJournalMutation(journal)
-            await rm(rollbackOwner.journalPath, { force: true }).catch(() => {})
-          } catch { /* best-effort disposal; next-run recovery reports residue */ }
+        const planned = plannedMcpBytes.get(path.resolve(planEntry.configPath))
+        if (planned === undefined) continue
+        // The staged bytes were rendered from an earlier observation:
+        // revalidate the source digest so drift between preflight and
+        // staging is rejected before anything is registered.
+        const currentDigest = existsSync(planEntry.configPath) ? await pathDigest(planEntry.configPath) : null
+        if (currentDigest === undefined || currentDigest !== planned.sourceDigest) {
+          throw new FallbackTransactionError('FALLBACK_MCP_DRIFT', `The MCP configuration ${planEntry.configPath} changed after the render preflight`)
         }
-        const preservation = { preservedArtifacts, preservedPaths }
-        if (restored.succeeded) {
-          if (error instanceof FallbackTransactionError) {
-            return failure(error.code, error.message, { attempted: true, succeeded: true }, preservation)
+        stagedMcpBytes.set(planEntry.configPath, planned.bytes)
+        const resolvedConfig = path.resolve(planEntry.configPath)
+        const configFrontier = mcpFrontierByPath.get(resolvedConfig)
+        if (configFrontier !== undefined) {
+          if (configFrontier !== frontiers.skills) continue
+          // Active config shared with the destination-root frontier: the
+          // bytes join the SAME deferred staged subtree at the exact
+          // frontier-relative path. Directories are created inside the
+          // scratch container only; the live parent chain stays missing
+          // until the single journaled frontier publication installs both
+          // roles. No ordinary per-config journal entry is registered, so
+          // the config can never be double-published.
+          const relativeConfig = path.relative(configFrontier.root, resolvedConfig)
+          if (relativeConfig === '' || relativeConfig.startsWith('..') || path.isAbsolute(relativeConfig)) {
+            throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `The MCP configuration ${planEntry.configPath} is not a strict child of its destination frontier ${configFrontier.root}`)
           }
-          return failure('FALLBACK_REFRESH_FAILED', 'Owned fallback refresh failed and was rolled back', { attempted: true, succeeded: true }, preservation)
+          const stagedConfigPath = path.join(skillsStageContainer, relativeConfig)
+          await mkdir(path.dirname(stagedConfigPath), { recursive: true })
+          await writeFile(stagedConfigPath, planned.bytes, { mode: 0o600 })
+          continue
         }
-        if (restored.unproven) {
-          return failure('FALLBACK_STATE_UNPROVEN', 'The fallback transaction could not prove the state of its owned files, so nothing was changed automatically. Its journal, snapshot, and preserved artifacts were left untouched for manual recovery.', { attempted: false }, preservation)
+        journal = await registerFallbackStage(requireJournalEntry(journal, planEntry.configPath), planEntry.configPath, { bytes: planned.bytes })
+      }
+      for (const frontierPlan of frontiers.mcp) {
+        const stageRoot = await mkdtemp(path.join(path.dirname(frontierPlan.root), `.${path.basename(frontierPlan.root)}.nsolid-stage-`))
+        stageRoots.mcp.push(stageRoot)
+        for (const leaf of frontierPlan.activeLeaves) {
+          const planned = plannedMcpBytes.get(path.resolve(leaf.path))
+          if (planned === undefined) throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `The active MCP frontier leaf ${leaf.path} has no planned bytes`)
+          const stagedPath = path.join(stageRoot, path.relative(frontierPlan.root, path.resolve(leaf.path)))
+          await mkdir(path.dirname(stagedPath), { recursive: true })
+          await writeFile(stagedPath, planned.bytes, { mode: 0o600 })
         }
-        return failure('FALLBACK_ROLLBACK_FAILED', 'Owned fallback refresh failed and rollback was incomplete', { attempted: true, succeeded: false }, preservation)
+        journal = await registerFallbackFrontierStage(journal, frontierPlan.root, stageRoot, {
+          activeConditionalLeafIds: frontierPlan.activeConditionalLeafIds,
+        })
       }
-      if (error instanceof FallbackTransactionError) {
-        return failure(error.code, error.message)
+      // The deferred destination-root frontier registration: the exact same
+      // single journaled publication unit as before, performed after the
+      // MCP per-entry staging loop and before the link staging block below
+      // (so copied links can bind to its registered skill payloads) and
+      // before the tracking bytes are built.
+      if (frontiers.skills !== undefined) {
+        journal = await registerFallbackFrontierStage(journal, frontiers.skills.root, skillsStageContainer, { activeConditionalLeafIds: frontiers.skills.activeConditionalLeafIds })
       }
-      return failure('FALLBACK_REFRESH_FAILED', 'Owned fallback refresh failed before its journal was claimed')
+      if (linkDir) {
+        // The stage container is a direct sibling of the frontier root (the
+        // authenticated-container invariant); the frontier root's parent is
+        // the anchor that already exists.
+        const linksStage = await mkdtemp(path.join(path.dirname(frontiers.links?.root ?? linkDir), `.${path.basename(frontiers.links?.root ?? linkDir)}.nsolid-stage-`))
+        stageRoots.links = linksStage
+        const stagedFrontierRoot = frontiers.links?.root
+        for (const skill of bundle.skills) {
+          const linkPath = stagedFrontierRoot !== undefined ? path.resolve(path.join(linkDir, skill.name)) : path.join(linkDir, skill.name)
+          if (stagedFrontierRoot !== undefined && !frontiers.links?.paths.has(linkPath)) continue
+          // Missing link-root frontier (equal to linkDir or a proper
+          // ancestor): stage the active required bundle links as one
+          // complete frontier subtree at their exact paths relative to the
+          // frontier root (e.g. staged/skills/<name> for frontier ~/.claude
+          // with linkDir ~/.claude/skills), then register it as a single
+          // frontier publication unit. Stale conditional link leaves are
+          // intentionally absent from the staged tree.
+          const stagedLink = path.join(linksStage, stagedFrontierRoot !== undefined ? path.relative(stagedFrontierRoot, linkPath) : skill.name)
+          if (stagedFrontierRoot !== undefined) await mkdir(path.dirname(stagedLink), { recursive: true })
+          // Staged links follow the same Windows-safe policy as normal
+          // harness linking: the junction/symlink references the final
+          // live shared skill path, and the copy fallback comes from the
+          // newly prepared staged bytes, never the old live content.
+          await materializeSkillLink({
+            linkSource: path.join(destination, skill.name),
+            copySource: path.join(skillsStage, skill.name),
+            target: stagedLink,
+            alwaysCopy: options.harness === 'pi',
+          })
+          if (stagedFrontierRoot === undefined) {
+            journal = await registerFallbackStage(requireJournalEntry(journal, linkPath), linkPath, { directory: stagedLink })
+          }
+        }
+        if (stagedFrontierRoot !== undefined) {
+          journal = await registerFallbackFrontierStage(journal, stagedFrontierRoot, linksStage, { activeConditionalLeafIds: [] })
+        }
+      }
+      // Field evidence must describe the bytes that will exist after the
+      // swap, not the pre-update files.
+      const trackingPath = path.resolve(journal.manifest.trackingPath)
+      const preferredKey = harnessMcpKey(options.harness)
+      const resolveFieldDigests = (configPath: string, name: string): Record<string, string> | undefined => {
+        const staged = stagedMcpBytes.get(configPath)
+        if (staged !== undefined) return mcpFieldDigestsFromBytes(configPath, staged, name, { preferredKey })
+        return readMcpFieldDigests(configPath, name, { preferredKey })
+      }
+      const updatedTracking = buildTrackingUpdate(tracking, options.harness, destination, bundle, plan, configuredMcpServers, staleByName, desiredMcpValues, resolveFieldDigests)
+      journal = await registerFallbackStage(requireJournalEntry(journal, trackingPath), trackingPath, { bytes: Buffer.from(JSON.stringify(updatedTracking, null, 2) + '\n', 'utf8') })
     }
+
+    // Publish in dependency order: owned skills, new skills, skill frontier,
+    // links, MCP, then tracking. Planning these groups performs no I/O.
+    // Each application still reloads/revalidates at its original mutation point.
+    const newNames = new Set(bundle.skills.map((skill) => skill.name))
+    const pathsToReplace = previousSkills
+      .filter((entry) => newNames.has(entry.name))
+      .map((entry) => entry.paths?.[options.harness] ?? entry.path)
+    const pathsToRemove = previousSkills
+      .filter((entry) => !newNames.has(entry.name) && canRemoveOwnedPath(entry, options.harness))
+      .map((entry) => entry.paths?.[options.harness] ?? entry.path)
+    const outside = (frontier: FrontierPublication | undefined, target: string): boolean => !frontier?.paths.has(path.resolve(target))
+    const publications: Array<{ targets: string[]; skipApplied?: boolean }> = [
+      { targets: [...pathsToReplace, ...pathsToRemove].filter((target) => outside(frontiers.links, target) && outside(frontiers.skills, target)) },
+      { targets: bundle.skills.map((skill) => path.join(destination, skill.name)).filter((target) => outside(frontiers.skills, target)), skipApplied: true },
+      { targets: frontiers.skills === undefined ? [] : [frontiers.skills.root], skipApplied: true },
+      { targets: linkDir ? previousSkills.filter((entry) => !newNames.has(entry.name)).map((entry) => path.resolve(path.join(linkDir, entry.name))).filter((target) => outside(frontiers.links, target)) : [] },
+      { targets: linkDir ? bundle.skills.map((skill) => path.join(linkDir, skill.name)).filter((target) => outside(frontiers.links, target)) : [], skipApplied: true },
+      { targets: linkDir && frontiers.links !== undefined ? [frontiers.links.root] : [], skipApplied: true },
+      // A no-op MCP render has no stage: applying it would incorrectly delete the config.
+      { targets: plan.entries.filter((entry) => planHasByteChanges(entry) && plannedMcpBytes.get(path.resolve(entry.configPath)) !== undefined && !mcpFrontierByPath.has(path.resolve(entry.configPath))).map((entry) => entry.configPath) },
+      { targets: frontiers.mcp.map((frontier) => frontier.root) },
+      { targets: [path.resolve(journal.manifest.trackingPath)] },
+    ]
+    for (const { targets, skipApplied } of publications) {
+      for (const target of targets) {
+        journal = await (skipApplied ? applyFallbackEntryIfNeeded : applyFallbackEntry)(journal, target)
+      }
+    }
+
+    // External child success: the journal belongs to the waiting parent.
+    // This process holds only the mutator role — the recorded owner PID is
+    // the parent that began the journal — so reclaim, prove, and commit are
+    // parent-only operations and must never run here. The applied journal
+    // and its mutator record stay in place: after the confirmed child exit
+    // the parent reclaims owner authority, proves the applied state from
+    // the strictly reloaded journal plus the live filesystem, and commits
+    // with the journal as the single snapshot.
+    return { success: true }
+  } catch (error) {
+    // Child-owned rollback: this process still holds the mutator handle and
+    // its in-memory manifest, so it restores the journaled snapshot itself.
+    // Every backup is authenticated against manifest evidence before any
+    // byte moves; mutable journal fields never authorize a deletion.
+    if (journal !== undefined) {
+      const restored = await restoreFallbackJournal(journal)
+      preserveRecoveryArtifacts = !restored.succeeded
+      const { preservedArtifacts, preservedPaths } = restored
+      const preservation = { preservedArtifacts, preservedPaths }
+      if (restored.succeeded) {
+        if (error instanceof FallbackTransactionError) {
+          return failure(error.code, error.message, { attempted: true, succeeded: true }, preservation)
+        }
+        return failure('FALLBACK_REFRESH_FAILED', 'Owned fallback refresh failed and was rolled back', { attempted: true, succeeded: true }, preservation)
+      }
+      if (restored.unproven) {
+        return failure('FALLBACK_STATE_UNPROVEN', 'The fallback transaction could not prove the state of its owned files, so nothing was changed automatically. Its journal, snapshot, and preserved artifacts were left untouched for manual recovery.', { attempted: false }, preservation)
+      }
+      return failure('FALLBACK_ROLLBACK_FAILED', 'Owned fallback refresh failed and rollback was incomplete', { attempted: true, succeeded: false }, preservation)
+    }
+    if (error instanceof FallbackTransactionError) {
+      return failure(error.code, error.message)
+    }
+    return failure('FALLBACK_REFRESH_FAILED', 'Owned fallback refresh failed before its journal was claimed')
   } finally {
     // Staging containers are transaction-owned scratch. The journal-owned
     // stage copies live beside each target and survive for recovery.
     if (!preserveRecoveryArtifacts) {
-      if (stagedSkillsRoot) await rm(stagedSkillsRoot, { recursive: true, force: true }).catch(() => {})
-      if (linksStageRoot) await rm(linksStageRoot, { recursive: true, force: true }).catch(() => {})
-      for (const stageRoot of mcpStageRoots) await rm(stageRoot, { recursive: true, force: true }).catch(() => {})
+      for (const stageRoot of [stageRoots.skills, stageRoots.links, ...stageRoots.mcp]) {
+        if (stageRoot !== undefined) await rm(stageRoot, { recursive: true, force: true }).catch(() => {})
+      }
     }
   }
+}
+
+interface FrontierPublication {
+  root: string
+  paths: ReadonlySet<string>
+  activeLeaves: readonly FallbackLeafTarget[]
+  activeConditionalLeafIds: readonly string[]
+}
+
+/** Derive publication routes and activation from trusted inputs; never perform I/O or authorize mutation. */
+function classifyFallbackFrontiers (
+  plannedFrontiers: readonly FallbackFrontierEvidence[],
+  destination: string,
+  linkDir: string | undefined,
+  bundleSkillPaths: ReadonlySet<string>,
+  activeMcpPaths: ReadonlySet<string>
+): { skills?: FrontierPublication; links?: FrontierPublication; mcp: FrontierPublication[]; singleSkills: ReadonlySet<string> } {
+  // Only one compatible frontier equal to or above the directory may claim
+  // it. Ambiguous candidates remain unclaimed and fail the audit below.
+  const rootFrontier = (target: string | undefined, accepts: (leaves: readonly FallbackLeafTarget[]) => boolean): FallbackFrontierEvidence | undefined => {
+    if (target === undefined) return undefined
+    const resolved = path.resolve(target)
+    const candidates = plannedFrontiers.filter((frontier) => {
+      const root = path.resolve(frontier.frontierPath)
+      return (root === resolved || resolved.startsWith(root + path.sep)) && frontier.leaves.length > 0 && accepts(frontier.leaves)
+    })
+    return candidates.length === 1 ? candidates[0] : undefined
+  }
+  const destinationFrontier = rootFrontier(destination, (leaves) =>
+    leaves.some((leaf) => leaf.role === 'skill' && leaf.activation === 'required') &&
+    leaves.every((leaf) => leaf.role === 'skill' || (leaf.role === 'mcp-config' && leaf.activation === 'conditional')))
+  const linkFrontier = rootFrontier(linkDir, (leaves) => leaves.every((leaf) => leaf.role === 'link'))
+  const publication = (frontier: FallbackFrontierEvidence, activeLeaves: readonly FallbackLeafTarget[]): FrontierPublication => ({
+    root: path.resolve(frontier.frontierPath),
+    paths: new Set(frontier.leaves.map((leaf) => path.resolve(leaf.path))),
+    activeLeaves,
+    activeConditionalLeafIds: activeLeaves.filter((leaf) => leaf.activation === 'conditional').map((leaf) => leaf.id),
+  })
+  let skills: FrontierPublication | undefined
+  let links: FrontierPublication | undefined
+  const mcp: FrontierPublication[] = []
+  const singleSkills = new Set<string>()
+  for (const frontier of plannedFrontiers) {
+    const activeLeaves = frontier.leaves.filter((leaf) =>
+      leaf.activation === 'required' ||
+      (leaf.role === 'mcp-config' && leaf.activation === 'conditional' && activeMcpPaths.has(path.resolve(leaf.path))) ||
+      (leaf.role === 'skill' && leaf.activation === 'conditional' && frontier === destinationFrontier && bundleSkillPaths.has(path.resolve(leaf.path))))
+    const isMcp = frontier.leaves.length > 0 && frontier.leaves.every((leaf) => leaf.role === 'mcp-config')
+    const isSingleSkill = activeLeaves.length === 1 && activeLeaves[0].role === 'skill' &&
+      activeLeaves[0].activation === 'required' && path.resolve(frontier.frontierPath) === path.resolve(activeLeaves[0].path)
+    // Fail closed before any live mkdir for unsupported active mixes,
+    // ambiguous roots, or broader-than-exact single-skill shapes.
+    if (activeLeaves.length > 0 && frontier !== destinationFrontier && frontier !== linkFrontier && !isMcp && !isSingleSkill) {
+      throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `Fallback frontier ${frontier.frontierPath} carries active leaves that no supported publication route claims; refusing to mutate live paths before the frontier is claimed`)
+    }
+    if (frontier === destinationFrontier) skills = publication(frontier, activeLeaves)
+    if (frontier === linkFrontier) links = publication(frontier, activeLeaves)
+    if (isMcp) {
+      // MCP leaves need staged bytes even when their manifest activation is
+      // required; the audit above still treats required leaves as active.
+      const stagedLeaves = frontier.leaves.filter((leaf) => activeMcpPaths.has(path.resolve(leaf.path)))
+      if (stagedLeaves.length > 0) mcp.push(publication(frontier, stagedLeaves))
+    }
+    if (frontier.leaves.some((leaf) => leaf.role === 'skill' && leaf.activation === 'required' && path.resolve(leaf.path) === path.resolve(frontier.frontierPath))) {
+      singleSkills.add(path.resolve(frontier.frontierPath))
+    }
+  }
+  mcp.sort((left, right) => Buffer.compare(Buffer.from(left.root, 'utf8'), Buffer.from(right.root, 'utf8')))
+  return { skills, links, mcp, singleSkills }
+}
+
+/** Reload at each publication point: an earlier read cannot prove the current applied state. */
+async function applyFallbackEntryIfNeeded (journal: FallbackJournalHandle, target: string): Promise<FallbackJournalHandle> {
+  const disk = await reloadFallbackJournal(journal)
+  if (disk.entries.some((entry) => path.resolve(entry.path) === path.resolve(target) && entry.applied)) return journal
+  return applyFallbackEntry(journal, target)
 }
 
 /** Every mutation target must be a parent-planned journal entry; a missing entry is a manifest/plan divergence and fails closed. */
@@ -749,78 +557,6 @@ function requireJournalEntry (journal: FallbackJournalHandle, target: string): F
     throw new FallbackTransactionError('INVALID_TRANSACTION_MANIFEST', `The fallback journal has no planned entry for ${resolved}`)
   }
   return journal
-}
-
-/**
- * Build the local transaction manifest for a transaction-less refresh. The
- * exact observed tracking, MCP files, existing ownership, and bundle
- * destinations become the planning authority, then the same journal flow
- * (begin → mutate → stage → apply → restore/commit) runs in this process.
- */
-async function buildLocalTransactionManifest (
-  harness: HarnessType,
-  tracking: TrackingData,
-  bundle: BundleDescriptor,
-  destination: string,
-  linkDir: string | undefined,
-  previousSkills: readonly SkillTrackingEntry[],
-  previousMcps: readonly TrackingData['mcpServers'][number][],
-  configPaths: readonly string[]
-): Promise<FallbackTransactionIdentity> {
-  const trackingPath = path.resolve(getTrackingFilePath())
-  const digest = trackingDigest(trackingPath)
-  if (!digest) throw new FallbackTransactionError('FALLBACK_TRACKING_DRIFT', 'The fallback tracking file is absent or cannot be hashed')
-  const skillPaths = previousSkills.map((entry) => path.resolve(entry.paths?.[harness] ?? entry.path))
-  const linkPaths = linkDir !== undefined ? previousSkills.map((entry) => path.join(linkDir, entry.name)) : []
-  const destinationPaths = [...new Set([
-    ...bundle.skills.map((skill) => path.join(destination, skill.name)),
-    ...(linkDir !== undefined ? bundle.skills.map((skill) => path.join(linkDir, skill.name)) : []),
-  ].map((value) => path.resolve(value)))]
-  const capture = async (paths: readonly string[]): Promise<FallbackPathEvidence[]> => await Promise.all(paths.map(async (value) => {
-    const kind = await pathKind(value)
-    const pathDigestValue = kind === 'missing' ? undefined : await pathDigest(value)
-    if (kind !== 'missing' && pathDigestValue === undefined) throw new FallbackTransactionError('FALLBACK_BACKUP_FAILED', `Owned fallback path ${value} could not be hashed`)
-    return { path: value, kind, digest: pathDigestValue }
-  }))
-  const approvedDestinationRoots = [...new Set([
-    path.resolve(destination),
-    ...(linkDir !== undefined ? [path.resolve(linkDir)] : []),
-  ])]
-  const ownedSkills = await capture(skillPaths)
-  const ownedLinks = await capture(linkPaths)
-  const ownedMcpConfigPaths = await capture([...new Set(configPaths.map((value) => path.resolve(value)))])
-  // Shared derivation (binding decision, option A): the local planner feeds
-  // the exact same leaf-builder and plan API as the external strategy
-  // planner, so an identical planned state can never produce a divergent
-  // graph and the child cannot widen it. Derivation is read-only.
-  const frontierPlan = await deriveFallbackFrontierPlan(deriveFallbackFrontierLeafTargets({
-    ownedSkills,
-    ownedLinks,
-    ownedMcpConfigPaths,
-    trackingPath,
-    destination: path.resolve(destination),
-    linkDir: linkDir === undefined ? undefined : path.resolve(linkDir),
-    bundleSkillNames: bundle.skills.map((skill) => skill.name),
-  }), fallbackLinkMaterialization(harness))
-  return {
-    installationId: `${harness}:fallback`,
-    harness,
-    trackingPath,
-    trackingDigest: digest,
-    protocolVersion: FALLBACK_PROTOCOL_VERSION,
-    digestAlgorithm: 'fallback-path-v2',
-    nonce: randomUUID(),
-    ownedSkills,
-    ownedLinks,
-    ownedMcpFields: previousMcps.flatMap((entry) => Object.entries(entry.fields ?? {}).map(([field, expectedDigest]) => ({ configPath: path.resolve(entry.configPath), server: entry.name, field, expectedDigest }))),
-    ownedMcpConfigPaths,
-    bundleDestinations: await capture(destinationPaths),
-    approvedDestinationRoots,
-    // Exact deterministic frontier evidence from the shared planner; present
-    // even when empty so the planned state stays canonical for the manifest
-    // digest. Publication/rollback consume this in later stages.
-    plannedMissingFrontiers: frontierPlan.frontiers,
-  }
 }
 
 function harnessServerValue (harness: HarnessType, server: BundleDescriptor['mcpServers'][number], credentials: Credentials): Record<string, unknown> {
@@ -977,9 +713,7 @@ async function validateTransactionIdentity (identity: FallbackTransactionIdentit
   if (approvedRoots.length === 0 || approvedRoots.some((value) => !isCanonicalPath(value))) {
     return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'Fallback transaction contains an unsafe destination root' }
   }
-  const destination = identity.harness === 'opencode'
-    ? path.resolve(process.env.NSOLID_OPENCODE_SKILLS_DIR ?? resolveHome('~/.config/opencode/skills'))
-    : getSkillsDir()
+  const { destination } = resolveFallbackDestinations(identity.harness)
   if (!approvedRoots.includes(path.resolve(destination))) {
     return { code: 'INVALID_TRANSACTION_MANIFEST', message: 'The harness skill destination is outside the approved destination roots' }
   }
@@ -1115,37 +849,6 @@ function buildTrackingUpdate (
   tracking.bundleVersion = bundle.version
   tracking.bundleVersions = { ...(tracking.bundleVersions ?? {}), [harness]: bundle.version }
   return tracking
-}
-
-/**
- * Prove the applied state from the strictly reloaded journal and the live
- * filesystem — the same validation the external parent runs after reclaim
- * (strategies/fallback.ts): applied staged entries must carry exactly their
- * registered stage digest, applied deletions must be gone, and entries this
- * transaction never staged must still be byte-identical to the journaled
- * original. The mutable fields here are success-validation evidence only;
- * they never authorize a restore or commit.
- */
-async function journalProvesAppliedState (journal: Awaited<ReturnType<typeof reloadFallbackJournal>>): Promise<boolean> {
-  for (const entry of journal.entries) {
-    const target = path.resolve(entry.path)
-    if (entry.stageDigest !== undefined) {
-      if (entry.applied !== true) return false
-      if (await pathDigest(target) !== entry.stageDigest) return false
-      continue
-    }
-    if (entry.applied === true) {
-      if (await pathKind(target) !== 'missing') return false
-      continue
-    }
-    const kind = await pathKind(target)
-    if (entry.existed === true) {
-      if (kind === 'missing' || entry.digest === undefined || await pathDigest(target) !== entry.digest) return false
-    } else if (kind !== 'missing') {
-      return false
-    }
-  }
-  return true
 }
 
 function failure (code: string, message: string, rollback?: { attempted: boolean; succeeded?: boolean }, preservation?: { preservedArtifacts?: readonly string[]; preservedPaths?: readonly string[] }): FallbackRefreshResult {

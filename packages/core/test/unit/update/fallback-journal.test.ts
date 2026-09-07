@@ -6,8 +6,8 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
-import { applyFallbackEntry, beginFallbackJournal, canonicalJsonString, claimFallbackJournalMutation, clearFallbackFrontierPublicationStateForTests, commitFallbackJournal, fallbackJournalPath, inspectFallbackJournal, manifestDigestOf, markFallbackJournalMutating, pathDigest, pathKind, publishedFallbackFrontiers, reclaimFallbackJournalMutation, recoverFallbackJournal, registerFallbackFrontierStage, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, setFallbackArtifactSwapSeamForTests, setFallbackFrontierPublicationSeamForTests, setFallbackFrontierRollbackSeamForTests, trackingDigest, type FallbackJournalHandle } from '../../../src/update/fallback-journal.js'
-import { assertFallbackFrontierEvidenceList, FallbackFrontierError } from '../../../src/update/fallback-frontier.js'
+import { applyFallbackEntry, beginFallbackJournal, canonicalJsonString, claimFallbackJournalMutation, clearFallbackFrontierPublicationStateForTests, commitFallbackJournal, fallbackJournalPath, inspectFallbackJournal, manifestDigestOf, markFallbackJournalMutating, pathDigest, pathKind, publishedFallbackFrontiers, reclaimFallbackJournalMutation, recoverFallbackJournal, recoverFallbackJournalMutation, registerFallbackFrontierStage, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, setFallbackArtifactSwapSeamForTests, setFallbackFrontierPublicationSeamForTests, setFallbackFrontierRollbackSeamForTests, trackingDigest, type FallbackJournalHandle } from '../../../src/update/fallback-journal.js'
+import { assertFallbackFrontierEvidenceList, compareUtf8, FallbackFrontierError } from '../../../src/update/fallback-frontier.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getSkillsDir, getTrackingFilePath } from '../../../src/utils/path.js'
 import { FALLBACK_PROTOCOL_VERSION, type FallbackAnchorIdentity, type FallbackFrontierEvidence, type FallbackTransactionIdentity } from '../../../src/update/types.js'
@@ -119,6 +119,87 @@ describe('fallback journal ownership validation', () => {
     assert.equal(existsSync(fallbackJournalPath(manifest.trackingPath)), false)
     const trackingDir = path.dirname(manifest.trackingPath)
     assert.deepEqual(readdirSync(trackingDir).filter((name) => name.startsWith('.nsolid-plugin-update-')), [])
+  })
+
+  it('validates equal, malformed, and unexpected nested frontier evidence before reserving a journal', async () => {
+    const fixture = await setupFrontierFixture()
+    const malformed = { ...fixture.manifest, plannedMissingFrontiers: [{ nope: true }] } as unknown as FallbackTransactionIdentity
+    const nestedExtra = JSON.parse(JSON.stringify(fixture.manifest)) as FallbackTransactionIdentity
+    ;(nestedExtra.plannedMissingFrontiers[0].leaves[0] as unknown as Record<string, unknown>).unexpected = true
+
+    await assert.rejects(beginFallbackJournal(malformed), /FALLBACK_FRONTIER_EVIDENCE_INVALID/)
+    await assert.rejects(beginFallbackJournal(nestedExtra), /FALLBACK_FRONTIER_EVIDENCE_INVALID/)
+    assert.equal(existsSync(fallbackJournalPath(fixture.trackingPath)), false)
+
+    // The unchanged graph follows the real journal path and is accepted.
+    const begun = await beginFallbackJournal(fixture.manifest)
+    assert.ok(begun.handle)
+    const restored = await restoreFallbackJournal(begun.handle)
+    assert.equal(restored.succeeded, true)
+  })
+
+  it('compares shape-valid frontier roles and destination lists with the trusted journal manifest', async () => {
+    const fixture = await setupFrontierFixture()
+    const begun = await beginFallbackJournal(fixture.manifest)
+    const mutating = await markFallbackJournalMutating(begun.handle)
+    const trustedDigest = manifestDigestOf(fixture.manifest)
+    const tamperedManifests: FallbackTransactionIdentity[] = []
+
+    const roleTampered = JSON.parse(JSON.stringify(fixture.manifest)) as FallbackTransactionIdentity
+    roleTampered.plannedMissingFrontiers[0].leaves[0].role = 'link'
+    tamperedManifests.push(roleTampered)
+
+    const destinationRemoved = JSON.parse(JSON.stringify(fixture.manifest)) as FallbackTransactionIdentity
+    destinationRemoved.plannedMissingFrontiers[0].leaves = destinationRemoved.plannedMissingFrontiers[0].leaves.slice(0, 1)
+    tamperedManifests.push(destinationRemoved)
+
+    const destinationAdded = JSON.parse(JSON.stringify(fixture.manifest)) as FallbackTransactionIdentity
+    const addedLeaf = {
+      id: 'skill:gamma',
+      role: 'skill' as const,
+      activation: 'conditional' as const,
+      path: path.join(fixture.frontierPath, 'gamma'),
+    }
+    destinationAdded.plannedMissingFrontiers[0].leaves = [...destinationAdded.plannedMissingFrontiers[0].leaves, addedLeaf]
+      .sort((left, right) => compareUtf8(left.path, right.path))
+    tamperedManifests.push(destinationAdded)
+
+    const frontierRemoved = JSON.parse(JSON.stringify(fixture.manifest)) as FallbackTransactionIdentity
+    frontierRemoved.plannedMissingFrontiers = []
+    tamperedManifests.push(frontierRemoved)
+
+    const secondAnchorPath = path.join(home, 'second-frontier-anchor')
+    mkdirSync(secondAnchorPath)
+    const frontierAdded = JSON.parse(JSON.stringify(fixture.manifest)) as FallbackTransactionIdentity
+    frontierAdded.plannedMissingFrontiers = [...frontierAdded.plannedMissingFrontiers, {
+      frontierPath: path.join(secondAnchorPath, 'new-root'),
+      activation: 'required',
+      anchor: await frontierAnchorIdentity(secondAnchorPath),
+      leaves: [{ id: 'skill:gamma', role: 'skill', activation: 'required', path: path.join(secondAnchorPath, 'new-root', 'gamma') }],
+    }]
+    frontierAdded.plannedMissingFrontiers = [...frontierAdded.plannedMissingFrontiers]
+      .sort((left, right) => compareUtf8(left.frontierPath, right.frontierPath))
+    tamperedManifests.push(frontierAdded)
+
+    // Every tamper above is strict-parser-valid and self-consistent for live
+    // revalidation. Only the journal's trusted manifest comparison rejects it.
+    for (const tampered of tamperedManifests) {
+      assert.equal(await claimFallbackJournalMutation(tampered, trustedDigest), null)
+    }
+
+    const owner = await reclaimFallbackJournalMutation(mutating)
+    const restored = await restoreFallbackJournal(owner)
+    assert.equal(restored.succeeded, true)
+  })
+
+  it('rejects a changed frontier anchor inode through the real journal preflight', async () => {
+    const fixture = await setupFrontierFixture()
+    const replacement = path.join(home, 'frontier-anchor-replacement')
+    mkdirSync(replacement)
+    renameSync(replacement, fixture.anchorPath)
+
+    await assert.rejects(beginFallbackJournal(fixture.manifest), /FALLBACK_FRONTIER_DRIFT/)
+    assert.equal(existsSync(fallbackJournalPath(fixture.trackingPath)), false)
   })
 
   it('serializes two concurrent begins in the same process: exactly one succeeds', async () => {
@@ -344,13 +425,30 @@ describe('fallback journal ownership validation', () => {
     assert.equal(existsSync(bFixture.frontierPath), false)
   })
 
+  it('reclaims authority and restores a failed parent transaction as one journal operation', async () => {
+    const { skillPath, manifest } = await setupValidFixture()
+    const begun = await beginFallbackJournal(manifest)
+    const mutating = await markFallbackJournalMutating(begun.handle)
+    writeFileSync(path.join(skillPath, 'SKILL.md'), '# mutated\n')
+
+    const result = await recoverFallbackJournalMutation(mutating, begun.journal.snapshotDirectory)
+    assert.equal(result.succeeded, true)
+    assert.equal(readFileSync(path.join(skillPath, 'SKILL.md'), 'utf8'), '# tracked\n')
+    assert.equal(existsSync(mutating.journalPath), false)
+    assert.equal(begun.journal.snapshotDirectory !== undefined && existsSync(begun.journal.snapshotDirectory), false)
+  })
+
   it('restores the snapshotted bytes of owned state after a mutation and disposes the journal as owner', async () => {
     const { trackingPath, skillPath, linkPath, manifest, trackingJson } = await setupValidFixture()
     const { handle } = await beginFallbackJournal(manifest)
+    await markFallbackJournalMutating(handle)
+    const claimed = await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest))
+    assert.ok(claimed)
+    const staged = await registerFallbackStage(claimed, trackingPath, { bytes: Buffer.from(JSON.stringify({ ...JSON.parse(trackingJson), installedAt: 'mutated' })) })
+    await applyFallbackEntry(staged, trackingPath)
+    const owner = await reclaimFallbackJournalMutation(handle)
     writeFileSync(path.join(skillPath, 'SKILL.md'), '# mutated\n')
     writeFileSync(linkPath, 'mutated\n')
-    writeFileSync(trackingPath, JSON.stringify({ ...JSON.parse(trackingJson), installedAt: 'mutated' }))
-    const owner = await markFallbackJournalMutating(handle)
 
     const result = await restoreFallbackJournal(owner)
     assert.equal(result.succeeded, true)
@@ -376,6 +474,62 @@ describe('fallback journal ownership validation', () => {
     assert.equal(readFileSync(path.join(skillPath, 'SKILL.md'), 'utf8'), '# tracked\n')
     assert.equal(existsSync(path.join(skillPath, 'user-edit.txt')), false)
     assert.equal(existsSync(owner.journalPath), false)
+  })
+
+  it('preserves tracking added by another harness after the snapshot and defers restore', async () => {
+    const { manifest, trackingPath, skillPath } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    const owner = await markFallbackJournalMutating(handle)
+    const tracking = JSON.parse(readFileSync(trackingPath, 'utf8'))
+    const foreignPath = path.join(home, '.config', 'opencode', 'skills', 'foreign')
+    mkdirSync(foreignPath, { recursive: true })
+    writeFileSync(path.join(foreignPath, 'SKILL.md'), 'KEEP')
+    tracking.skills.push({ name: 'foreign', path: foreignPath, paths: { opencode: foreignPath }, installedAt: new Date().toISOString(), harnesses: ['opencode'] })
+    const concurrentBytes = JSON.stringify(tracking, null, 2) + '\r\n'
+    writeFileSync(trackingPath, concurrentBytes)
+    writeFileSync(path.join(skillPath, 'SKILL.md'), 'child mutation')
+
+    const result = await restoreFallbackJournal(owner)
+
+    assert.equal(readFileSync(trackingPath, 'utf8'), concurrentBytes)
+    assert.equal(readFileSync(path.join(foreignPath, 'SKILL.md'), 'utf8'), 'KEEP')
+    assert.equal(readFileSync(path.join(skillPath, 'SKILL.md'), 'utf8'), 'child mutation', 'drift is detected before any restore')
+    assert.equal(result.succeeded, false)
+    assert.equal(result.unproven, true)
+    assert.ok(result.preservedPaths.includes(trackingPath))
+    assert.equal(existsSync(owner.journalPath), true)
+    const inspection = await inspectFallbackJournal(trackingPath)
+    assert.equal(inspection.recovered, false)
+    assert.ok(inspection.preservedPaths.includes(trackingPath))
+    const recovery = await recoverFallbackJournal(trackingPath)
+    assert.equal(recovery.pending, true)
+    assert.equal(recovery.recovered, false)
+    assert.ok(recovery.preservedPaths.includes(trackingPath))
+    assert.equal(readFileSync(trackingPath, 'utf8'), concurrentBytes, 'next-run recovery must preserve the concurrent records too')
+  })
+
+  it('does not promote forged applied tracking digests to restore authority', async () => {
+    const { manifest, trackingPath, trackingJson } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    await markFallbackJournalMutating(handle)
+    const claimed = await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest))
+    assert.ok(claimed)
+    const staged = await registerFallbackStage(claimed, trackingPath, { bytes: Buffer.from(JSON.stringify({ ...JSON.parse(trackingJson), installedAt: 'published' })) })
+    await applyFallbackEntry(staged, trackingPath)
+    const owner = await reclaimFallbackJournalMutation(handle)
+    const concurrentBytes = JSON.stringify({ ...JSON.parse(trackingJson), installedAt: 'concurrent' })
+    writeFileSync(trackingPath, concurrentBytes)
+    const disk = JSON.parse(readFileSync(owner.journalPath, 'utf8'))
+    const entry = disk.entries.find((entry: { path: string }) => entry.path === trackingPath)
+    entry.applied = true
+    entry.stageDigest = await pathDigest(trackingPath)
+    writeFileSync(owner.journalPath, JSON.stringify(disk))
+
+    const result = await restoreFallbackJournal(owner)
+    assert.equal(result.succeeded, false)
+    assert.equal(result.unproven, true)
+    assert.equal(readFileSync(trackingPath, 'utf8'), concurrentBytes)
+    assert.equal(existsSync(owner.journalPath), true)
   })
 
   it('reports FALLBACK_STATE_UNPROVEN and preserves everything when a backup was tampered with', async () => {
@@ -1527,28 +1681,37 @@ async function registerFrontierStageWithBeta (handle: FallbackJournalHandle, fro
   return registerFallbackFrontierStage(handle, frontierPath, staged, { activeConditionalLeafIds: ['skill:beta'] })
 }
 
+type FrontierFixture = Awaited<ReturnType<typeof setupFrontierFixture>>
+
+async function buildStagedFrontier (options: { alphaContent?: string; betaContent?: string } = {}): Promise<string> {
+  const staged = path.join(home, `staged-frontier-${randomUUID().slice(0, 8)}`)
+  mkdirSync(path.join(staged, 'alpha'), { recursive: true })
+  writeFileSync(path.join(staged, 'alpha', 'SKILL.md'), options.alphaContent ?? '# alpha staged\n')
+  mkdirSync(path.join(staged, 'beta'), { recursive: true })
+  writeFileSync(path.join(staged, 'beta', 'SKILL.md'), options.betaContent ?? '# beta staged\n')
+  return staged
+}
+
+async function beginMutatingFrontier (fixture: FrontierFixture): Promise<FallbackJournalHandle> {
+  const { handle } = await beginFallbackJournal(fixture.manifest)
+  await markFallbackJournalMutating(handle)
+  // The local transaction lifecycle: the same process self-claims the
+  // mutator role from the manifest it just planned.
+  const claimed = await claimFallbackJournalMutation(fixture.manifest, manifestDigestOf(fixture.manifest))
+  if (!claimed) throw new Error('mutation claim failed')
+  return claimed
+}
+
+async function setupPublishedFrontier (): Promise<{ fixture: FrontierFixture; applied: FallbackJournalHandle }> {
+  const fixture = await setupFrontierFixture()
+  const owner = await beginMutatingFrontier(fixture)
+  const staged = await buildStagedFrontier()
+  const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
+  const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+  return { fixture, applied }
+}
+
 describe('fallback journal frontier publication', () => {
-  type FrontierFixture = Awaited<ReturnType<typeof setupFrontierFixture>>
-
-  async function buildStagedFrontier (options: { alphaContent?: string; betaContent?: string } = {}): Promise<string> {
-    const staged = path.join(home, `staged-frontier-${randomUUID().slice(0, 8)}`)
-    mkdirSync(path.join(staged, 'alpha'), { recursive: true })
-    writeFileSync(path.join(staged, 'alpha', 'SKILL.md'), options.alphaContent ?? '# alpha staged\n')
-    mkdirSync(path.join(staged, 'beta'), { recursive: true })
-    writeFileSync(path.join(staged, 'beta', 'SKILL.md'), options.betaContent ?? '# beta staged\n')
-    return staged
-  }
-
-  async function beginMutatingFrontier (fixture: FrontierFixture): Promise<FallbackJournalHandle> {
-    const { handle } = await beginFallbackJournal(fixture.manifest)
-    await markFallbackJournalMutating(handle)
-    // The local transaction lifecycle: the same process self-claims the
-    // mutator role from the manifest it just planned.
-    const claimed = await claimFallbackJournalMutation(fixture.manifest, manifestDigestOf(fixture.manifest))
-    if (!claimed) throw new Error('mutation claim failed')
-    return claimed
-  }
-
   const stageContainers = (fixture: FrontierFixture): string[] =>
     readdirSync(fixture.anchorPath).filter((name) => name.includes('.nsolid-stage-'))
 
@@ -2213,11 +2376,7 @@ describe('fallback journal frontier publication', () => {
   it('returns frozen copies whose mutation cannot alter later publishedFallbackFrontiers reads', async () => {
     // A genuine publication through the integration-style frontier APIs: the
     // process-local record is created only by a real applyFallbackEntry call.
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     const authentic = {
       frontierPath: path.resolve(fixture.frontierPath),
       dev: lstatSync(fixture.frontierPath).dev,
@@ -2262,34 +2421,13 @@ describe('fallback journal frontier rollback authority', () => {
   const quarantineContainers = (anchorPath: string): string[] =>
     readdirSync(anchorPath).filter((name) => name.includes('.nsolid-quarantine-'))
 
-  async function buildStagedFrontier (): Promise<string> {
-    const staged = path.join(home, `staged-frontier-${randomUUID().slice(0, 8)}`)
-    mkdirSync(path.join(staged, 'alpha'), { recursive: true })
-    writeFileSync(path.join(staged, 'alpha', 'SKILL.md'), '# alpha staged\n')
-    mkdirSync(path.join(staged, 'beta'), { recursive: true })
-    writeFileSync(path.join(staged, 'beta', 'SKILL.md'), '# beta staged\n')
-    return staged
-  }
-
-  async function beginMutatingFrontier (fixture: Awaited<ReturnType<typeof setupFrontierFixture>>): Promise<FallbackJournalHandle> {
-    const { handle } = await beginFallbackJournal(fixture.manifest)
-    await markFallbackJournalMutating(handle)
-    const claimed = await claimFallbackJournalMutation(fixture.manifest, manifestDigestOf(fixture.manifest))
-    if (!claimed) throw new Error('mutation claim failed')
-    return claimed
-  }
-
   afterEach(() => {
     setFallbackFrontierRollbackSeamForTests()
     setFallbackFrontierPublicationSeamForTests()
   })
 
   it('rolls a genuine same-process publication back to missing and preserves the exact tree in quarantine', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     assert.equal(publishedFallbackFrontiers(applied).length, 1)
     const inoBefore = lstatSync(fixture.frontierPath).ino
     const restore = await restoreFallbackJournal(applied)
@@ -2327,11 +2465,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('fail-closes when the process-local capability is cleared (simulated restart)', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     clearFallbackFrontierPublicationStateForTests()
     const before = lstatSync(fixture.frontierPath)
     const restore = await restoreFallbackJournal(applied)
@@ -2345,11 +2479,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('never lets forged disk fields grant rollback authority', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     clearFallbackFrontierPublicationStateForTests()
     // Forge the full disk authorization surface: applied, stage digest, and a
     // fabricated quarantine identity. None of it may move the live root.
@@ -2401,11 +2531,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('preserves a frontier whose root identity was replaced after publication', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     // Swap the published root for a byte-identical but different-inode copy.
     const stashed = path.join(home, 'stashed-root')
     renameSync(fixture.frontierPath, stashed)
@@ -2447,11 +2573,7 @@ describe('fallback journal frontier rollback authority', () => {
     // Simulated by clearing the registry after a genuine publication in this
     // same process, since the suite cannot spawn a real second process: the
     // semantic under test is the absence of capability, not the process id.
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     clearFallbackFrontierPublicationStateForTests()
     const restore = await restoreFallbackJournal(applied)
     assert.equal(restore.succeeded, false)
@@ -2474,11 +2596,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('consumes capabilities and rejects a genuine handle retargeted in place to another live transaction', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     const first = await restoreFallbackJournal(applied)
     assert.equal(first.succeeded, true)
     assert.equal(existsSync(fixture.frontierPath), false)
@@ -2581,11 +2699,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('reports a structured incomplete when an unplanned child appears at the moved seam', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     let quarantineContainer: string | undefined
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'moved') {
@@ -2613,11 +2727,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('reports the exact quarantine after an ordinary post-allocation seam error', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     let quarantineContainer: string | undefined
     setFallbackFrontierRollbackSeamForTests(async (event) => {
       if (event.phase === 'quarantine-ready') {
@@ -2644,11 +2754,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('preserves everything when the authenticated quarantine container is replaced by a symlink at the quarantine-ready seam', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     // Foreign test-owned target the substituted symlink points at. It lives
     // inside the temp home so afterEach cleanup never touches anything
     // outside the test's own artifacts.
@@ -2699,11 +2805,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('rejects the move and preserves the collision when an empty directory appears at the quarantine payload destination', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     let collisionContainer: string | undefined
     let collisionPath: string | undefined
     setFallbackFrontierRollbackSeamForTests(async (event) => {
@@ -2742,11 +2844,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('keeps a reclaimed-owner retry after an ambiguous move incomplete with exact artifact and pending state', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     let quarantineContainer: string | undefined
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'moved') {
@@ -2780,11 +2878,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('refuses commit while a durable rollback-pending state exists', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'moved') {
         writeFileSync(path.join(event.quarantinePath!, 'alpha', 'SKILL.md'), 'TAMPERED\n')
@@ -2803,11 +2897,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('moves nothing when the durable rollback-pending CAS fails before the rename', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'proof-complete') {
         // Corrupt the revision so the durable pending-state CAS fails during
@@ -2838,11 +2928,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('rejects same-revision transaction identity tampering before the pending-state CAS', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'proof-complete') {
         // Schema-valid tamper at the SAME revision: swap the transaction
@@ -2876,11 +2962,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('rejects same-revision insertion of durable pending ambiguity before the move', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'proof-complete') {
         // Schema-valid same-revision injection of the durable pending
@@ -2915,11 +2997,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('preserves everything when a collision occupies the quarantine container child before the move', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     const foreign = path.join(home, 'foreign-child')
     mkdirSync(foreign)
     writeFileSync(path.join(foreign, 'foreign.txt'), 'FOREIGN\n')
@@ -2957,11 +3035,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('preserves the quarantine when a replacement appears at the frontier path after the move', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'moved') {
         // A racing writer creates a replacement at the vacated path inside
@@ -2985,11 +3059,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('stops the restore and reports succeeded:false when the bookkeeping CAS fails after the move', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     // A modified authenticated preexisting entry the restore has not reached
     // yet: it must be reported in preservedPaths because the restore stops
     // at the untrustworthy handle revision.
@@ -3022,11 +3092,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('refuses a role-substituted handle copy with zero mutation', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     // A forged owner handle: same fields, different object identity, never
     // registered by begin/claim/reclaim, and the journal still records a
     // live same-process mutator.
@@ -3068,11 +3134,7 @@ describe('fallback journal frontier rollback authority', () => {
   })
 
   it('treats a tampered quarantined tree at the moved seam as a whole-operation incomplete', async () => {
-    const fixture = await setupFrontierFixture()
-    const owner = await beginMutatingFrontier(fixture)
-    const staged = await buildStagedFrontier()
-    const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
-    const applied = await applyFallbackEntry(registered, fixture.frontierPath)
+    const { fixture, applied } = await setupPublishedFrontier()
     let quarantineContainer: string | undefined
     setFallbackFrontierRollbackSeamForTests((event) => {
       if (event.phase === 'moved') {
@@ -3494,6 +3556,17 @@ describe('fallback journal partial recovery reporting', () => {
     writeFileSync(path.join(entry.backup, 'tampered.txt'), 'tampered backup bytes')
   }
 
+  async function assertReadOnlyInspection (trackingPath: string, preservedPaths: string[]): Promise<void> {
+    const before = await pathDigest(home)
+    assert.ok(before, 'the fixture tree must be digestible')
+    const inspection = await inspectFallbackJournal(trackingPath)
+    assert.equal(inspection.pending, true)
+    assert.equal(inspection.recovered, preservedPaths.length === 0)
+    assert.deepEqual(inspection.restoredPaths, [])
+    assert.deepEqual(inspection.preservedPaths.sort(), preservedPaths.map((value) => path.resolve(value)).sort())
+    assert.equal(await pathDigest(home), before, 'inspection must preserve live, journal and backup bytes')
+  }
+
   it('reports both owned paths as restored when full recovery rewrites every entry', async () => {
     const fixture = await setupTwoSkillRecoveryFixture()
     const { handle } = await beginFallbackJournal(fixture.manifest)
@@ -3501,6 +3574,7 @@ describe('fallback journal partial recovery reporting', () => {
     writeFileSync(path.join(fixture.skillAPath, 'SKILL.md'), '# alpha drifted\n')
     writeFileSync(path.join(fixture.skillBPath, 'SKILL.md'), '# beta drifted\n')
 
+    await assertReadOnlyInspection(fixture.manifest.trackingPath, [fixture.skillAPath, fixture.skillBPath])
     const recovery = await recoverFallbackJournal(fixture.manifest.trackingPath)
     assert.equal(recovery.pending, true)
     assert.equal(recovery.recovered, true)
@@ -3518,6 +3592,7 @@ describe('fallback journal partial recovery reporting', () => {
     writeFileSync(path.join(fixture.skillBPath, 'SKILL.md'), '# beta drifted\n')
     tamperBackupOf(handle.journalPath, fixture.skillBPath)
 
+    await assertReadOnlyInspection(fixture.manifest.trackingPath, [fixture.skillAPath, fixture.skillBPath])
     const recovery = await recoverFallbackJournal(fixture.manifest.trackingPath)
     assert.equal(recovery.pending, true)
     assert.equal(recovery.recovered, false, 'a tampered backup leaves the journal unproven')
@@ -3534,6 +3609,7 @@ describe('fallback journal partial recovery reporting', () => {
     const { handle } = await beginFallbackJournal(fixture.manifest)
     await markFallbackJournalMutating(handle)
 
+    await assertReadOnlyInspection(fixture.manifest.trackingPath, [])
     const recovery = await recoverFallbackJournal(fixture.manifest.trackingPath)
     assert.equal(recovery.pending, true)
     assert.equal(recovery.recovered, true)
@@ -3550,6 +3626,7 @@ describe('fallback journal partial recovery reporting', () => {
     writeFileSync(path.join(fixture.skillAPath, 'SKILL.md'), '# alpha drifted\n')
     tamperBackupOf(handle.journalPath, fixture.skillAPath)
 
+    await assertReadOnlyInspection(fixture.manifest.trackingPath, [fixture.skillAPath])
     const recovery = await recoverFallbackJournal(fixture.manifest.trackingPath)
     assert.equal(recovery.pending, true)
     assert.equal(recovery.recovered, false)

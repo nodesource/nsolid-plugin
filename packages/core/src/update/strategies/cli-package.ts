@@ -1,6 +1,6 @@
 import type { UpdateContext, UpdateInstallation, UpdatePlanItem, UpdateResult, UpdateStrategy } from '../types.js'
 import { buildGlobalUpdateCommand, formatRollbackCommand, managerArgsForIdentity, verifyGlobalPackage, verifyLocalArtifact } from '../package-manager.js'
-import { isCommandSuccessful } from '../command-runner.js'
+import { isTreeTerminationUnconfirmed, isCommandSuccessful } from '../command-runner.js'
 import { commandFailure, failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
 import { cleanupNpmArtifact } from '../version-source.js'
 import { cliExactVersionManualCommands } from '../cli-guidance.js'
@@ -77,8 +77,8 @@ export const cliPackageStrategy: UpdateStrategy = {
     }
     const result = await context.commandRunner.run(commandStep.command)
     if (!isCommandSuccessful(result)) {
-      if (result.timedOut && result.treeTerminated !== true) {
-        return failedResult(item, { code: 'CLI_TREE_TERMINATION_UNCONFIRMED', message: 'CLI update timed out and descendant termination could not be confirmed; the package artifact was preserved' })
+      if (isTreeTerminationUnconfirmed(result)) {
+        return failedResult(item, { code: 'CLI_TREE_TERMINATION_UNCONFIRMED', message: 'CLI update command ended and descendant termination could not be confirmed; the package artifact was preserved' })
       }
       await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
       return failedResult(item, commandFailure(commandStep.command.executable, result.timedOut, result.spawnErrorCode))

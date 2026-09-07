@@ -7,8 +7,9 @@ import { writeTomlFileSync } from '../../../src/utils/config.js'
 import { restoreCodexUserOwnedFields } from '../../../src/update/codex-config.js'
 import { executeCodexTransaction, readCodexPayloadVersion } from '../../../src/update/codex-transaction.js'
 import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
+import { runCommand } from '../../../src/update/command-runner.js'
 import { nativePayloadTreeDigest, type PayloadNormalizationProfile } from '../../../src/update/native-payload.js'
-import type { UpdatePlanItem } from '../../../src/update/types.js'
+import type { CommandResult, UpdatePlanItem } from '../../../src/update/types.js'
 
 let home: string
 let previousHome: string | undefined
@@ -238,7 +239,7 @@ describe('Codex update transaction', () => {
     const result = await executeCodexTransaction(item(cachePath), {
       run: async (command) => {
         if (command.args.includes('add')) writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.1', skills: [] }))
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -277,7 +278,7 @@ describe('Codex update transaction', () => {
           mkdirSync(newPayload, { recursive: true })
           writeFileSync(path.join(newPayload, 'bundle.json'), newBundle)
         }
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -323,7 +324,7 @@ describe('Codex update transaction', () => {
             }
             writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
           }
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -360,7 +361,7 @@ describe('Codex update transaction', () => {
       const result = await executeCodexTransaction(candidate, {
         run: async (command) => {
           if (command.args.includes('add')) writeFileSync(path.join(cachePath, 'bundle.json'), plannedBundle)
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -414,7 +415,7 @@ describe('Codex update transaction', () => {
             writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
             writeFileSync(path.join(cachePath, 'skills/example/SKILL.md'), '# substituted\n')
           }
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -451,7 +452,7 @@ describe('Codex update transaction', () => {
             // A crafted symlink must not hide behind the normalization profile.
             linkCreated = makeFileLink(t, '../../shared/meta.json', path.join(cachePath, '.codex-marketplace-install.json'))
           }
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
       if (!linkCreated) return
@@ -492,7 +493,7 @@ describe('Codex update transaction', () => {
             mkdirSync(path.join(cachePath, '.codex-marketplace-install.json'))
             writeFileSync(path.join(cachePath, '.codex-marketplace-install.json', 'nested.txt'), 'payload-ish\n')
           }
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -530,7 +531,7 @@ describe('Codex update transaction', () => {
       const result = await executeCodexTransaction(candidate, {
         run: async (command) => {
           if (command.args.includes('add')) writeInstalledPayload(cachePath)
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -569,7 +570,7 @@ describe('Codex update transaction', () => {
             writeInstalledPayload(cachePath)
             writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace"}\n')
           }
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -613,7 +614,7 @@ describe('Codex update transaction', () => {
             writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '0.9.0', skills: [] }))
             writeFileSync(path.join(cachePath, '.codex-marketplace-install.json'), '{"source":"marketplace","rewritten":true}\n')
           }
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -644,7 +645,7 @@ describe('Codex update transaction', () => {
           writeFileSync(path.join(selectedCache, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '0.9.0', skills: [] }))
           writeFileSync(path.join(unrelatedCache, 'bundle.json'), JSON.stringify({ name: 'other-plugin', version: '9.9.9', skills: [] }))
         }
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -667,7 +668,7 @@ describe('Codex update transaction', () => {
           writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.1', skills: [] }))
           writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: {} })
         }
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -690,7 +691,7 @@ describe('Codex update transaction', () => {
     writeFileSync(path.join(latestPayload, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.1', skills: [] }))
 
     const result = await executeCodexTransaction(item(cachePath), {
-      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }),
     })
 
     assert.equal(result.success, false)
@@ -713,7 +714,7 @@ describe('Codex update transaction', () => {
     const result = await executeCodexTransaction(item(cachePath), {
       run: async (command) => {
         if (command.args.includes('add')) writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.1', skills: [] }))
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -763,7 +764,7 @@ describe('Codex update transaction', () => {
             '',
           ].join('\n'))
         }
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -797,7 +798,7 @@ describe('Codex update transaction', () => {
             '',
           ].join('\n'))
         }
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -810,7 +811,7 @@ describe('Codex update transaction', () => {
     // absent, which used to escape as a rejected ENOENT promise.
     const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
     const result = await executeCodexTransaction(item(cachePath), {
-      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }),
     })
 
     assert.equal(result.success, false)
@@ -833,7 +834,7 @@ describe('Codex update transaction', () => {
     const result = await executeCodexTransaction(candidate, {
       run: async () => {
         writeFileSync(path.join(cachePath, 'partial.txt'), 'partial')
-        return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     })
 
@@ -846,25 +847,83 @@ describe('Codex update transaction', () => {
     assert.equal(readdirSync(path.dirname(cachePath)).filter((name) => name.includes('.nsolid-cache-backup-')).length, 0)
   })
 
-  it('reports the preserved backup locations in the tree-termination timeout error', async () => {
+  for (const exitCode of [null, 0, 1]) {
+    it(`preserves backups on unconfirmed tree termination (exit: ${exitCode})`, async () => {
+      const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+      mkdirSync(cachePath, { recursive: true })
+      mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
+      writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+      writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
+
+      const result = await executeCodexTransaction(item(cachePath), {
+        run: async () => ({ exitCode, stdout: '', stderr: '', timedOut: exitCode === null, treeTerminated: false }),
+      })
+
+      assert.equal(result.success, false)
+      assert.equal(result.rollbackAttempted, false)
+      assert.equal(result.error?.code, 'CODEX_TREE_TERMINATION_UNCONFIRMED')
+      // The randomly named sibling backup directories must be discoverable from
+      // the error so the user can locate or remove the preserved evidence.
+      assert.match(result.error?.message ?? '', /config-backup/)
+      assert.match(result.error?.message ?? '', /cache-backup/)
+      assert.equal(result.error?.message?.includes(path.dirname(cachePath)), true)
+    })
+  }
+
+  it('preserves backups when the injected runner omits termination evidence', async () => {
     const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
     mkdirSync(cachePath, { recursive: true })
-    mkdirSync(path.dirname(path.join(home, '.codex', 'config.toml')), { recursive: true })
-    writeTomlFileSync(path.join(home, '.codex', 'config.toml'), { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    const configPath = path.join(home, '.codex', 'config.toml')
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    writeTomlFileSync(configPath, { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
     writeFileSync(path.join(cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] }))
 
     const result = await executeCodexTransaction(item(cachePath), {
-      run: async () => ({ exitCode: null, stdout: '', stderr: '', timedOut: true, treeTerminated: false }),
+      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false } as unknown as CommandResult),
     })
 
     assert.equal(result.success, false)
     assert.equal(result.rollbackAttempted, false)
     assert.equal(result.error?.code, 'CODEX_TREE_TERMINATION_UNCONFIRMED')
-    // The randomly named sibling backup directories must be discoverable from
-    // the error so the user can locate or remove the preserved evidence.
-    assert.match(result.error?.message ?? '', /config-backup/)
-    assert.match(result.error?.message ?? '', /cache-backup/)
-    assert.equal(result.error?.message?.includes(path.dirname(cachePath)), true)
+    assert.equal(readdirSync(path.dirname(configPath)).filter((name) => name.includes('.nsolid-config-backup-')).length, 1)
+    assert.equal(readdirSync(path.dirname(cachePath)).filter((name) => name.includes('.nsolid-cache-backup-')).length, 1)
+  })
+
+  it('prevents detached writes after rollback when the command exits before timeout', { skip: process.platform !== 'linux' }, async () => {
+    const cachePath = path.join(home, '.codex', 'plugins', 'cache', 'nsolid-plugin')
+    mkdirSync(cachePath, { recursive: true })
+    const configPath = path.join(home, '.codex', 'config.toml')
+    writeTomlFileSync(configPath, { plugins: { 'nsolid-plugin@nodesource': { enabled: true } } })
+    const bundle = path.join(cachePath, 'bundle.json')
+    const original = JSON.stringify({ name: 'nsolid-plugin', version: '1.0.0', skills: [] })
+    writeFileSync(bundle, original)
+    const pidFile = path.join(home, 'descendant.pid')
+    const trigger = path.join(home, 'write-now')
+    const worker = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{if(fs.existsSync(${JSON.stringify(trigger)}))fs.writeFileSync(${JSON.stringify(bundle)},${JSON.stringify(original.replace('1.0.0', '9.9.9'))})},10)`
+    const parent = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(bundle)},${JSON.stringify(original.replace('1.0.0', '1.0.1'))});require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(worker)}],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{if(fs.existsSync(${JSON.stringify(pidFile)}))process.exit(1)},10)`
+    let pid: number | undefined
+    try {
+      const result = await executeCodexTransaction(item(cachePath), {
+        run: () => runCommand({ executable: process.execPath, args: ['-e', parent], timeoutMs: 10_000 }),
+      })
+      pid = Number(readFileSync(pidFile, 'utf8'))
+      if (result.rollbackAttempted) {
+        assert.equal(result.rollbackSucceeded, true)
+        assert.equal(readFileSync(bundle, 'utf8'), original)
+      } else {
+        // Concurrent unrelated process activity can make ancestry ambiguous.
+        // Deferral is safe only when explicit and both backups survive.
+        assert.equal(result.error?.code, 'CODEX_TREE_TERMINATION_UNCONFIRMED')
+        assert.ok(readdirSync(path.dirname(cachePath)).some((name) => name.includes('.nsolid-cache-backup-')))
+        assert.ok(readdirSync(path.dirname(configPath)).some((name) => name.includes('.nsolid-config-backup-')))
+      }
+      const beforeTrigger = readFileSync(bundle, 'utf8')
+      writeFileSync(trigger, 'go')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      assert.equal(readFileSync(bundle, 'utf8'), beforeTrigger, 'the accounted descendant must be gone before returning')
+    } finally {
+      if (pid !== undefined) { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } }
+    }
   })
 
   describe('rollback gating and verified restore', () => {
@@ -911,7 +970,7 @@ describe('Codex update transaction', () => {
           // Simulate the partially mutated state the failed command leaves.
           writeFileSync(path.join(fixture.cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '9.9.9', skills: [] }))
           assert.equal(command.args.includes('remove'), false)
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -931,7 +990,7 @@ describe('Codex update transaction', () => {
           const mutatedConfig = fixture.originalConfig.replace('enabled = true', 'enabled = false')
           writeFileSync(fixture.configPath, mutatedConfig)
           tamperConfigBackup(fixture.configPath, fixture.configMarker, '# tampered bytes')
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -952,7 +1011,7 @@ describe('Codex update transaction', () => {
       const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
         run: async () => {
           rmSync(fixture.configPath)
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       }, {
         // Recreate the file only after the transaction has authorized the
@@ -980,7 +1039,7 @@ describe('Codex update transaction', () => {
         run: async () => {
           writeFileSync(path.join(fixture.cachePath, 'bundle.json'), JSON.stringify({ name: 'nsolid-plugin', version: '9.9.9', skills: [] }))
           writeFileSync(path.join(fixture.cachePath, 'stray.json'), '{}')
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 
@@ -997,7 +1056,7 @@ describe('Codex update transaction', () => {
       const result = await executeCodexTransaction(failedUpgradeItem(fixture.cachePath), {
         run: async () => {
           writeFileSync(fixture.configPath, 'codex rewrote the empty config\n')
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 

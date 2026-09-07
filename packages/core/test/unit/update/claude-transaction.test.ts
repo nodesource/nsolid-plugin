@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import os from 'node:os'
 import path from 'node:path'
 import type { CommandResult, CommandRunner, CommandSpec, ResolvedArtifactIdentity } from '../../../src/update/types.js'
-import { executeClaudeTransaction, foreignRegistrationDigest, installedClaudePayloadRoot, restoreClaudeNativeState } from '../../../src/update/claude-transaction.js'
+import { executeClaudeTransaction, foreignRegistrationDigest, resolveClaudePayloadRoot, restoreClaudeNativeState } from '../../../src/update/claude-transaction.js'
 import type { OwnedPathKind } from '../../../src/update/owned-fs.js'
 import { nativePayloadDigest } from '../../../src/update/native-evidence.js'
 
@@ -47,8 +47,8 @@ function sha256 (value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-const okResult: CommandResult = { exitCode: 0, stdout: '', stderr: '', timedOut: false }
-const failedResult: CommandResult = { exitCode: 1, stdout: '', stderr: 'boom', timedOut: false }
+const okResult: CommandResult = { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
+const failedResult: CommandResult = { exitCode: 1, stdout: '', stderr: 'boom', timedOut: false, treeTerminated: true }
 
 function runner (behavior: (spec: CommandSpec, index: number) => Promise<CommandResult> | CommandResult): CommandRunner & { commands: CommandSpec[] } {
   const commands: CommandSpec[] = []
@@ -295,40 +295,6 @@ describe('Claude native replacement transaction', () => {
     }
   })
 
-  it('defers rollback when a timeout leaves descendant termination unconfirmed', async () => {
-    const fixture = setupInstallation()
-    try {
-      // First command installs a new version; the second times out without
-      // confirmed tree termination. Restoring now would race live writers.
-      const runnerStub = runner((_spec, index) => {
-        if (index === 0) {
-          writeFileSync(path.join(fixture.payloadRoot, 'skills/example/SKILL.md'), '# mid-flight\n')
-          return okResult
-        }
-        return { exitCode: null, stdout: '', stderr: '', timedOut: true, treeTerminated: false }
-      })
-
-      const result = await executeClaudeTransaction({
-        commands: [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }, { executable: 'claude', args: ['update'], timeoutMs: 1_000 }],
-        registrationPaths: [fixture.registryPath, fixture.marketplacesPath],
-        configPath: fixture.registryPath,
-        pluginId: 'nsolid-plugin@nodesource',
-        scope: 'user',
-        expectedVersion: '1.0.1',
-      }, runnerStub)
-
-      assert.equal(result.success, false)
-      assert.equal(result.error?.code, 'CLAUDE_TREE_TERMINATION_UNCONFIRMED')
-      assert.equal(result.rollbackAttempted, false)
-      // The live bytes were left alone and the backup remains recoverable.
-      assert.equal(readFileSync(path.join(fixture.payloadRoot, 'skills/example/SKILL.md'), 'utf8'), '# mid-flight\n')
-      const siblings = readdirSync(path.dirname(fixture.payloadRoot)).filter((name) => name.includes('.nsolid-payload-backup-'))
-      assert.equal(siblings.length, 1)
-    } finally {
-      rmSync(fixture.home, { recursive: true, force: true })
-    }
-  })
-
   it('refuses to restore when the payload backup changed after its initial verification', async () => {
     const fixture = setupInstallation()
     try {
@@ -493,63 +459,67 @@ describe('Claude native replacement transaction', () => {
     }
   })
 
-  it('preserves a complete recovery bundle when tree termination stays unconfirmed', async () => {
-    const fixture = setupInstallation()
-    const { recoveryRoot, deps } = recoveryDeps(fixture)
-    try {
-      const marketplacesBytes = readFileSync(fixture.marketplacesPath)
-      const runnerStub = runner((_spec, index) => {
-        if (index === 0) {
-          writeFileSync(path.join(fixture.payloadRoot, 'skills/example/SKILL.md'), '# mid-flight\n')
-          return okResult
+  for (const customWorkspace of [false, true]) {
+    it(`defers rollback and preserves a complete recovery bundle (custom workspace: ${customWorkspace})`, async () => {
+      const fixture = setupInstallation()
+      const { recoveryRoot, deps } = recoveryDeps(fixture)
+      try {
+        const marketplacesBytes = readFileSync(fixture.marketplacesPath)
+        const runnerStub = runner((_spec, index) => {
+          if (index === 0) {
+            writeFileSync(path.join(fixture.payloadRoot, 'skills/example/SKILL.md'), '# mid-flight\n')
+            return okResult
+          }
+          return { exitCode: null, stdout: '', stderr: '', timedOut: true, treeTerminated: false }
+        })
+
+        const result = await executeClaudeTransaction({
+          commands: [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }, { executable: 'claude', args: ['update'], timeoutMs: 1_000 }],
+          registrationPaths: [fixture.registryPath, fixture.marketplacesPath],
+          configPath: fixture.registryPath,
+          pluginId: 'nsolid-plugin@nodesource',
+          scope: 'user',
+          expectedVersion: '1.0.1',
+        }, runnerStub, customWorkspace ? deps : undefined)
+
+        assert.equal(result.success, false)
+        assert.equal(result.error?.code, 'CLAUDE_TREE_TERMINATION_UNCONFIRMED')
+        assert.equal(result.rollbackAttempted, false)
+        assert.equal(readFileSync(path.join(fixture.payloadRoot, 'skills/example/SKILL.md'), 'utf8'), '# mid-flight\n')
+        if (customWorkspace) assert.equal(result.recoveryPath, recoveryRoot)
+        assert.ok(result.recoveryPath)
+        const manifestFile = path.join(result.recoveryPath, 'recovery.json')
+        assert.equal(existsSync(manifestFile), true)
+        const manifest = JSON.parse(readFileSync(manifestFile, 'utf8')) as {
+          version: number,
+          complete: boolean,
+          createdAt: string,
+          registration: Array<{ path: string, existed: boolean, digest?: string, backup?: string }>,
+          payload?: { backupPath?: string },
         }
-        return { exitCode: null, stdout: '', stderr: '', timedOut: true, treeTerminated: false }
-      })
-
-      const result = await executeClaudeTransaction({
-        commands: [{ executable: 'claude', args: ['update'], timeoutMs: 1_000 }, { executable: 'claude', args: ['update'], timeoutMs: 1_000 }],
-        registrationPaths: [fixture.registryPath, fixture.marketplacesPath],
-        configPath: fixture.registryPath,
-        pluginId: 'nsolid-plugin@nodesource',
-        scope: 'user',
-        expectedVersion: '1.0.1',
-      }, runnerStub, deps)
-
-      assert.equal(result.success, false)
-      assert.equal(result.error?.code, 'CLAUDE_TREE_TERMINATION_UNCONFIRMED')
-      assert.equal(result.rollbackAttempted, false)
-      assert.equal(result.recoveryPath, recoveryRoot)
-      const manifestFile = path.join(recoveryRoot, 'recovery.json')
-      assert.equal(existsSync(manifestFile), true)
-      const manifest = JSON.parse(readFileSync(manifestFile, 'utf8')) as {
-        version: number,
-        complete: boolean,
-        createdAt: string,
-        registration: Array<{ path: string, existed: boolean, digest?: string, backup?: string }>,
-        payload?: { backupPath?: string },
+        assert.equal(manifest.complete, true)
+        assert.equal(typeof manifest.createdAt, 'string')
+        assert.equal(manifest.registration.length, 2)
+        assert.equal(manifest.registration[0].path, fixture.registryPath)
+        assert.equal(manifest.registration[0].existed, true)
+        assert.equal(manifest.registration[0].digest, sha256(fixture.registryBytes))
+        assert.equal(manifest.registration[0].backup, path.join('registration', '0000.bin'))
+        const backup0 = path.join(result.recoveryPath, 'registration', '0000.bin')
+        const backup1 = path.join(result.recoveryPath, 'registration', '0001.bin')
+        assert.equal(existsSync(backup0), true)
+        assert.equal(existsSync(backup1), true)
+        assert.equal(statSync(backup0).mode & 0o777, privateFileMode)
+        assert.equal(readFileSync(backup0).equals(Buffer.from(fixture.registryBytes)), true)
+        assert.equal(readFileSync(backup1).equals(marketplacesBytes), true)
+        // The manifest references the separately allocated same-volume payload backup.
+        const payloadSiblings = readdirSync(path.dirname(fixture.payloadRoot)).filter((name) => name.includes('.nsolid-payload-backup-'))
+        assert.equal(payloadSiblings.length, 1)
+        assert.equal(manifest.payload?.backupPath, path.join(path.dirname(fixture.payloadRoot), payloadSiblings[0], path.basename(fixture.payloadRoot)))
+      } finally {
+        rmSync(fixture.home, { recursive: true, force: true })
       }
-      assert.equal(manifest.complete, true)
-      assert.equal(typeof manifest.createdAt, 'string')
-      assert.equal(manifest.registration.length, 2)
-      assert.equal(manifest.registration[0].path, fixture.registryPath)
-      assert.equal(manifest.registration[0].existed, true)
-      assert.equal(manifest.registration[0].digest, sha256(fixture.registryBytes))
-      assert.equal(manifest.registration[0].backup, path.join('registration', '0000.bin'))
-      const backup0 = path.join(recoveryRoot, 'registration', '0000.bin')
-      const backup1 = path.join(recoveryRoot, 'registration', '0001.bin')
-      assert.equal(existsSync(backup0), true)
-      assert.equal(existsSync(backup1), true)
-      assert.equal(statSync(backup0).mode & 0o777, privateFileMode)
-      assert.equal(readFileSync(backup0).equals(Buffer.from(fixture.registryBytes)), true)
-      assert.equal(readFileSync(backup1).equals(marketplacesBytes), true)
-      // The manifest references the separately allocated same-volume payload backup.
-      const payloadSiblings = readdirSync(path.dirname(fixture.payloadRoot)).filter((name) => name.includes('.nsolid-payload-backup-'))
-      assert.equal(payloadSiblings.length, 1)
-      assert.equal(manifest.payload?.backupPath, path.join(path.dirname(fixture.payloadRoot), payloadSiblings[0], path.basename(fixture.payloadRoot)))
-    } finally {
-      rmSync(fixture.home, { recursive: true, force: true })
-    }
-  })
+    })
+  }
 
   it('keeps the recovery bundle when the drift gate rejects the rollback', async () => {
     const fixture = setupInstallation()
@@ -723,10 +693,10 @@ describe('Claude native replacement transaction', () => {
   it('resolves the single installed payload root for a scoped plugin', async () => {
     const fixture = setupInstallation()
     try {
-      assert.equal(installedClaudePayloadRoot(fixture.registryPath, 'nsolid-plugin@nodesource', 'user'), fixture.payloadRoot)
-      assert.equal(installedClaudePayloadRoot(fixture.registryPath, 'nsolid-plugin@nodesource', 'project'), undefined)
-      assert.equal(installedClaudePayloadRoot(fixture.registryPath, 'other-plugin@x', 'user'), undefined)
-      assert.equal(installedClaudePayloadRoot(undefined, 'nsolid-plugin@nodesource', 'user'), undefined)
+      assert.deepEqual(resolveClaudePayloadRoot(fixture.registryPath, 'nsolid-plugin@nodesource', 'user'), { status: 'ok', root: fixture.payloadRoot })
+      assert.deepEqual(resolveClaudePayloadRoot(fixture.registryPath, 'nsolid-plugin@nodesource', 'project'), { status: 'absent' })
+      assert.deepEqual(resolveClaudePayloadRoot(fixture.registryPath, 'other-plugin@x', 'user'), { status: 'absent' })
+      assert.deepEqual(resolveClaudePayloadRoot(undefined, 'nsolid-plugin@nodesource', 'user'), { status: 'absent' })
     } finally {
       rmSync(fixture.home, { recursive: true, force: true })
     }

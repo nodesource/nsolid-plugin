@@ -13,7 +13,7 @@ describe('CLI package update strategy', () => {
       version: { current: '1.0.0', latest: '1.2.3', status: 'update-available' },
     }, {
       options: {},
-      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) },
+      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) },
     })
 
     assert.deepEqual(item.manualCommands, [
@@ -26,7 +26,7 @@ describe('CLI package update strategy', () => {
   it('uses the shared complete guidance for Volta and never emits placeholders', async () => {
     const context = {
       options: {},
-      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) },
+      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) },
     }
     const volta = await cliPackageStrategy.plan({
       installationId: 'cli:global',

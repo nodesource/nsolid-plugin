@@ -1,3 +1,4 @@
+import { tarEntry } from '../../helpers/tar.js'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
@@ -8,9 +9,10 @@ import path from 'node:path'
 import { checkUpdates, executeUpdatePlan, planUpdates, update, withPinnedMarketplaceCommit } from '../../../src/update/coordinator.js'
 import { beginFallbackJournal, fallbackJournalPath, pathDigest, pathKind, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { cliPackageStrategy } from '../../../src/update/strategies/cli-package.js'
+import { fallbackStrategy } from '../../../src/update/strategies/fallback.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getTrackingFilePath } from '../../../src/utils/path.js'
-import type { CommandSpec, ResolvedArtifactIdentity, UpdatePlanItem, UpdateSource } from '../../../src/update/types.js'
+import type { CommandSpec, FallbackTransactionIdentity, ResolvedArtifactIdentity, UpdatePlanItem, UpdateResult, UpdateSource } from '../../../src/update/types.js'
 import { FALLBACK_PROTOCOL_VERSION } from '../../../src/update/types.js'
 
 let home: string
@@ -44,6 +46,42 @@ function writeInvalidJournal (): void {
  * past its snapshotted state — the exact state in which next-run restore-only
  * recovery succeeds (recovered: true) and mutates tracked paths.
  */
+async function writeFallbackExecutionFixture (): Promise<{ identity: FallbackTransactionIdentity; skillPath: string; trackingPath: string }> {
+  const skillsDir = path.join(home, '.config', 'opencode', 'skills')
+  const skillPath = path.join(skillsDir, 'tracked')
+  mkdirSync(skillPath, { recursive: true })
+  writeFileSync(path.join(skillPath, 'SKILL.md'), 'old tracked')
+  const trackingPath = getTrackingFilePath()
+  mkdirSync(path.dirname(trackingPath), { recursive: true })
+  writeFileSync(trackingPath, `${JSON.stringify({
+    version: '1.0.0',
+    installedAt: new Date().toISOString(),
+    harness: 'opencode',
+    skills: [{ name: 'tracked', path: skillPath, paths: { opencode: skillPath }, installedAt: new Date().toISOString(), harnesses: ['opencode'] }],
+    mcpServers: [],
+  }, null, 2)}\n`)
+  const evidence = async (target: string) => {
+    const kind = await pathKind(target)
+    return { path: path.resolve(target), kind, digest: kind === 'missing' ? undefined : await pathDigest(target) }
+  }
+  const identity: FallbackTransactionIdentity = {
+    installationId: 'opencode:fallback',
+    harness: 'opencode',
+    trackingPath,
+    trackingDigest: trackingDigest(trackingPath)!,
+    protocolVersion: FALLBACK_PROTOCOL_VERSION,
+    nonce: randomUUID(),
+    plannedMissingFrontiers: [],
+    ownedSkills: [await evidence(skillPath)],
+    ownedLinks: [],
+    ownedMcpFields: [],
+    ownedMcpConfigPaths: [await evidence(path.join(home, '.config', 'opencode', 'opencode.jsonc'))],
+    bundleDestinations: [await evidence(skillPath)],
+    approvedDestinationRoots: [skillsDir],
+  }
+  return { identity, skillPath, trackingPath }
+}
+
 async function writeRestorableJournal (): Promise<{ skillPath: string; journalPath: string; snapshotDirectory: string }> {
   const skillsDir = path.join(home, '.config', 'opencode', 'skills')
   const skillPath = path.join(skillsDir, 'tracked')
@@ -158,7 +196,7 @@ describe('update coordinator recovery gate', () => {
       commandRunner: {
         run: async () => {
           runnerCalls++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -183,7 +221,7 @@ describe('update coordinator recovery gate', () => {
       commandRunner: {
         run: async () => {
           runnerCalls++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -258,7 +296,7 @@ describe('update coordinator recovery gate', () => {
       commandRunner: {
         run: async () => {
           runnerCalls++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -295,7 +333,7 @@ describe('update coordinator recovery gate', () => {
       commandRunner: {
         run: async () => {
           runnerCalls++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -321,7 +359,7 @@ describe('update coordinator recovery gate', () => {
       commandRunner: {
         run: async () => {
           runnerCalls++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
       fetchImpl: async () => {
@@ -368,7 +406,7 @@ describe('update coordinator recovery gate', () => {
       commandRunner: {
         run: async () => {
           runnerCalls++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -385,12 +423,17 @@ describe('update coordinator recovery gate', () => {
     assert.equal(summary.results[1]?.preservedPaths, undefined)
   })
 
-  it('preserves fallback artifacts and transaction state when tree termination is unconfirmed', async () => {
+  it('preserves planning-owned state when the public seam rejects an incomplete fallback plan', async () => {
+    const fixture = await writeFallbackExecutionFixture()
     const transactionDirectory = mkdtempSync(path.join(home, 'transaction-'))
     const manifestPath = path.join(transactionDirectory, 'transaction.json')
-    writeFileSync(manifestPath, '{}')
+    writeFileSync(manifestPath, 'planned manifest\n')
     const plannedArtifact = artifact()
-    let workspace = ''
+    const artifactBefore = readFileSync(plannedArtifact.tarballPath)
+    const transactionBefore = snapshotTree(transactionDirectory)
+    const skillBefore = snapshotTree(fixture.skillPath)
+    const trackingBefore = readFileSync(fixture.trackingPath)
+    let runnerCalls = 0
     const item: UpdatePlanItem = {
       installationId: 'opencode:fallback',
       target: 'opencode',
@@ -412,8 +455,59 @@ describe('update coordinator recovery gate', () => {
     const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
       yes: true,
       commandRunner: {
+        run: async () => {
+          runnerCalls++
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
+        },
+      },
+    })
+
+    assert.equal(summary.results[0]?.status, 'failed')
+    assert.equal(summary.results[0]?.error?.code, 'INVALID_PLAN')
+    assert.equal(runnerCalls, 0)
+    assert.equal(existsSync(plannedArtifact.tempDirectory), true)
+    assert.deepEqual(readFileSync(plannedArtifact.tarballPath), artifactBefore)
+    assert.equal(existsSync(transactionDirectory), true)
+    assert.deepEqual(snapshotTree(transactionDirectory), transactionBefore)
+    assert.deepEqual(snapshotTree(fixture.skillPath), skillBefore)
+    assert.deepEqual(readFileSync(fixture.trackingPath), trackingBefore)
+  })
+
+  it('preserves fallback artifacts and transaction state when tree termination is unconfirmed', async () => {
+    const fixture = await writeFallbackExecutionFixture()
+    const transactionDirectory = mkdtempSync(path.join(home, 'transaction-'))
+    const manifestPath = path.join(transactionDirectory, 'transaction.json')
+    writeFileSync(manifestPath, '{}')
+    const plannedArtifact = artifact()
+    let workspace = ''
+    let resultDirectory = ''
+    const item: UpdatePlanItem = {
+      installationId: 'opencode:fallback',
+      target: 'opencode',
+      ownership: 'fallback',
+      installed: true,
+      source: { kind: 'fallback', executor: 'npm-exec' },
+      version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+      artifact: plannedArtifact,
+      fallbackTransaction: fixture.identity,
+      steps: [{
+        kind: 'command',
+        description: 'refresh',
+        command: { executable: process.execPath, args: ['--transaction', manifestPath], timeoutMs: 1000 },
+      }],
+      rollbackSteps: [],
+      requiresConfirmation: true,
+      temporaryDirectories: [transactionDirectory],
+    }
+
+    const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
+      yes: true,
+      commandRunner: {
         run: async (command) => {
           workspace = command.cwd ?? ''
+          const resultIndex = command.args?.indexOf('--result') ?? -1
+          const resultPath = resultIndex >= 0 ? command.args?.[resultIndex + 1] : undefined
+          resultDirectory = resultPath === undefined ? '' : path.dirname(resultPath)
           return { exitCode: null, stdout: '', stderr: '', timedOut: true, treeTerminated: false }
         },
       },
@@ -423,12 +517,342 @@ describe('update coordinator recovery gate', () => {
     assert.equal(existsSync(plannedArtifact.tempDirectory), true)
     assert.equal(existsSync(manifestPath), true)
     assert.equal(existsSync(workspace), true)
+    assert.equal(existsSync(resultDirectory), true)
     rmSync(plannedArtifact.tempDirectory, { recursive: true, force: true })
     rmSync(transactionDirectory, { recursive: true, force: true })
     rmSync(workspace, { recursive: true, force: true })
+    rmSync(resultDirectory, { recursive: true, force: true })
+  })
+
+  it('releases planning temporaries when update confirmation is cancelled', async () => {
+    const transactionDirectory = mkdtempSync(path.join(home, 'cancelled-transaction-'))
+    writeFileSync(path.join(transactionDirectory, 'transaction.json'), 'planned manifest\n')
+    const plannedArtifact = artifact()
+    const item: UpdatePlanItem = {
+      installationId: 'opencode:fallback',
+      target: 'opencode',
+      ownership: 'fallback',
+      installed: true,
+      source: { kind: 'fallback', executor: 'npm-exec' },
+      version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+      artifact: plannedArtifact,
+      steps: [{ kind: 'command', description: 'refresh', command: { executable: process.execPath, args: [], timeoutMs: 1000 } }],
+      rollbackSteps: [],
+      requiresConfirmation: true,
+      temporaryDirectories: [transactionDirectory],
+    }
+
+    const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
+      confirm: async () => false,
+      commandRunner: { run: async () => { throw new Error('cancelled updates must not execute') } },
+    })
+
+    assert.equal(summary.results[0]?.status, 'skipped')
+    assert.equal(existsSync(plannedArtifact.tempDirectory), false)
+    assert.equal(existsSync(transactionDirectory), false)
+  })
+
+  it('preserves all fallback resources when execution raises before a completion verdict', async () => {
+    const fixture = await writeFallbackExecutionFixture()
+    const transactionDirectory = mkdtempSync(path.join(home, 'exception-transaction-'))
+    const manifestPath = path.join(transactionDirectory, 'transaction.json')
+    writeFileSync(manifestPath, '{}')
+    const plannedArtifact = artifact()
+    const journalPath = fallbackJournalPath(fixture.trackingPath)
+    let workspace = ''
+    let resultDirectory = ''
+    let snapshotDirectory = ''
+    const item: UpdatePlanItem = {
+      installationId: 'opencode:fallback',
+      target: 'opencode',
+      ownership: 'fallback',
+      installed: true,
+      source: { kind: 'fallback', executor: 'npm-exec' },
+      version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+      artifact: plannedArtifact,
+      fallbackTransaction: fixture.identity,
+      steps: [{ kind: 'command', description: 'refresh', command: { executable: process.execPath, args: ['--transaction', manifestPath], timeoutMs: 1000 } }],
+      rollbackSteps: [],
+      requiresConfirmation: true,
+      temporaryDirectories: [transactionDirectory],
+    }
+
+    try {
+      const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
+        yes: true,
+        commandRunner: {
+          run: async (command) => {
+            workspace = command.cwd ?? ''
+            const resultIndex = command.args?.indexOf('--result') ?? -1
+            const resultPath = resultIndex >= 0 ? command.args?.[resultIndex + 1] : undefined
+            resultDirectory = resultPath === undefined ? '' : path.dirname(resultPath)
+            throw new Error('runner failed before completion evidence')
+          },
+        },
+      })
+
+      assert.equal(summary.results[0]?.error?.code, 'UPDATE_EXECUTION_FAILED')
+      assert.equal(existsSync(plannedArtifact.tempDirectory), true)
+      assert.equal(existsSync(transactionDirectory), true)
+      assert.equal(existsSync(workspace), true)
+      assert.notEqual(resultDirectory, '')
+      assert.equal(existsSync(resultDirectory), true)
+      assert.equal(existsSync(journalPath), true)
+      snapshotDirectory = (JSON.parse(readFileSync(journalPath, 'utf8')) as { snapshotDirectory: string }).snapshotDirectory
+      assert.equal(existsSync(snapshotDirectory), true)
+    } finally {
+      rmSync(plannedArtifact.tempDirectory, { recursive: true, force: true })
+      rmSync(transactionDirectory, { recursive: true, force: true })
+      if (workspace !== '') rmSync(workspace, { recursive: true, force: true })
+      if (resultDirectory !== '') rmSync(resultDirectory, { recursive: true, force: true })
+      if (snapshotDirectory !== '') rmSync(snapshotDirectory, { recursive: true, force: true })
+      rmSync(journalPath, { force: true })
+    }
+  })
+
+  it('keeps plan cleanup independent from public child error presentation', async () => {
+    const fixture = await writeFallbackExecutionFixture()
+    const transactionDirectory = mkdtempSync(path.join(home, 'presentation-transaction-'))
+    const manifestPath = path.join(transactionDirectory, 'transaction.json')
+    writeFileSync(manifestPath, '{}')
+    const plannedArtifact = artifact()
+    const journalPath = fallbackJournalPath(fixture.trackingPath)
+    let workspace = ''
+    let resultDirectory = ''
+    let snapshotDirectory = ''
+    const item: UpdatePlanItem = {
+      installationId: 'opencode:fallback',
+      target: 'opencode',
+      ownership: 'fallback',
+      installed: true,
+      source: { kind: 'fallback', executor: 'npm-exec' },
+      version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+      artifact: plannedArtifact,
+      fallbackTransaction: fixture.identity,
+      steps: [{ kind: 'command', description: 'refresh', command: { executable: process.execPath, args: ['--transaction', manifestPath], timeoutMs: 1000 } }],
+      rollbackSteps: [],
+      requiresConfirmation: true,
+      temporaryDirectories: [transactionDirectory],
+    }
+    const originalExecuteWithOutcome = fallbackStrategy.executeWithOutcome
+    let returnedResult: UpdateResult | undefined
+    fallbackStrategy.executeWithOutcome = async (planItem, context) => {
+      const outcome = await originalExecuteWithOutcome(planItem, context)
+      assert.equal(outcome.result.error?.code, 'FALLBACK_TREE_TERMINATION_UNCONFIRMED')
+      // Return a distinct public result object. Cleanup must follow the
+      // explicit disposition, never an identity lookup on the result.
+      const result = { ...outcome.result, error: { code: 'FALLBACK_COMMAND_FAILED', message: 'public presentation changed' } }
+      returnedResult = result
+      assert.equal(JSON.stringify(result).includes('planResources'), false)
+      return { result, planResources: outcome.planResources }
+    }
+
+    try {
+      const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
+        yes: true,
+        commandRunner: {
+          run: async (command) => {
+            workspace = command.cwd ?? ''
+            const resultIndex = command.args?.indexOf('--result') ?? -1
+            const resultPath = resultIndex >= 0 ? command.args?.[resultIndex + 1] : undefined
+            resultDirectory = resultPath === undefined ? '' : path.dirname(resultPath)
+            return { exitCode: null, stdout: '', stderr: '', timedOut: true, treeTerminated: false }
+          },
+        },
+      })
+
+      assert.equal(summary.results[0], returnedResult, 'the coordinator must consume the same result object whose public error was changed')
+      assert.equal(summary.results[0]?.error?.code, 'FALLBACK_COMMAND_FAILED')
+      assert.equal(existsSync(plannedArtifact.tempDirectory), true)
+      assert.equal(existsSync(transactionDirectory), true)
+      assert.equal(existsSync(workspace), true)
+      assert.notEqual(resultDirectory, '')
+      assert.equal(existsSync(resultDirectory), true)
+      assert.equal(existsSync(journalPath), true)
+      snapshotDirectory = (JSON.parse(readFileSync(journalPath, 'utf8')) as { snapshotDirectory: string }).snapshotDirectory
+      assert.equal(existsSync(snapshotDirectory), true)
+    } finally {
+      fallbackStrategy.executeWithOutcome = originalExecuteWithOutcome
+      rmSync(plannedArtifact.tempDirectory, { recursive: true, force: true })
+      rmSync(transactionDirectory, { recursive: true, force: true })
+      if (workspace !== '') rmSync(workspace, { recursive: true, force: true })
+      if (resultDirectory !== '') rmSync(resultDirectory, { recursive: true, force: true })
+      if (snapshotDirectory !== '') rmSync(snapshotDirectory, { recursive: true, force: true })
+      rmSync(journalPath, { force: true })
+    }
+  })
+
+  it('releases resources for a cloned confirmed outcome despite preservation-looking public error', async () => {
+    const fixture = await writeFallbackExecutionFixture()
+    const transactionDirectory = mkdtempSync(path.join(home, 'cloned-release-transaction-'))
+    const manifestPath = path.join(transactionDirectory, 'transaction.json')
+    writeFileSync(manifestPath, '{}')
+    const plannedArtifact = artifact()
+    const item: UpdatePlanItem = {
+      installationId: 'opencode:fallback',
+      target: 'opencode',
+      ownership: 'fallback',
+      installed: true,
+      source: { kind: 'fallback', executor: 'npm-exec' },
+      version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+      artifact: plannedArtifact,
+      fallbackTransaction: fixture.identity,
+      steps: [{ kind: 'command', description: 'refresh', command: { executable: process.execPath, args: ['--transaction', manifestPath], timeoutMs: 1000 } }],
+      rollbackSteps: [],
+      requiresConfirmation: true,
+      temporaryDirectories: [transactionDirectory],
+    }
+    const originalExecuteWithOutcome = fallbackStrategy.executeWithOutcome
+    let originalResult: UpdateResult | undefined
+    let returnedResult: UpdateResult | undefined
+    fallbackStrategy.executeWithOutcome = async (planItem, context) => {
+      const outcome = await originalExecuteWithOutcome(planItem, context)
+      assert.equal(outcome.planResources, 'release')
+      originalResult = outcome.result
+      // Clone the public result while retaining the internal release decision.
+      // A presentation that resembles preservation must not override it.
+      const result = { ...outcome.result, error: { code: 'CLI_TREE_TERMINATION_UNCONFIRMED', message: 'public preservation presentation' } }
+      assert.notEqual(result, outcome.result)
+      assert.equal(JSON.stringify(result).includes('planResources'), false)
+      returnedResult = result
+      return { result, planResources: outcome.planResources }
+    }
+
+    try {
+      const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
+        yes: true,
+        commandRunner: { run: async () => ({ exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) },
+      })
+
+      assert.equal(summary.results[0], returnedResult)
+      assert.notEqual(summary.results[0], originalResult)
+      assert.equal(summary.results[0]?.error?.code, 'CLI_TREE_TERMINATION_UNCONFIRMED')
+      assert.equal(existsSync(plannedArtifact.tempDirectory), false)
+      assert.equal(existsSync(transactionDirectory), false)
+      assert.equal(JSON.stringify(summary).includes('planResources'), false)
+    } finally {
+      fallbackStrategy.executeWithOutcome = originalExecuteWithOutcome
+      rmSync(plannedArtifact.tempDirectory, { recursive: true, force: true })
+      rmSync(transactionDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves plan resources when a fallback outcome lacks its internal disposition', async () => {
+    const fixture = await writeFallbackExecutionFixture()
+    const transactionDirectory = mkdtempSync(path.join(home, 'missing-disposition-transaction-'))
+    const manifestPath = path.join(transactionDirectory, 'transaction.json')
+    writeFileSync(manifestPath, '{}')
+    const plannedArtifact = artifact()
+    const item: UpdatePlanItem = {
+      installationId: 'opencode:fallback',
+      target: 'opencode',
+      ownership: 'fallback',
+      installed: true,
+      source: { kind: 'fallback', executor: 'npm-exec' },
+      version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+      artifact: plannedArtifact,
+      fallbackTransaction: fixture.identity,
+      steps: [{ kind: 'command', description: 'refresh', command: { executable: process.execPath, args: ['--transaction', manifestPath], timeoutMs: 1000 } }],
+      rollbackSteps: [],
+      requiresConfirmation: true,
+      temporaryDirectories: [transactionDirectory],
+    }
+    const resultWithoutDisposition: UpdateResult = {
+      installationId: item.installationId,
+      target: item.target,
+      ownership: item.ownership,
+      status: 'failed',
+      changed: false,
+      error: { code: 'FALLBACK_COMMAND_FAILED', message: 'untrusted result' },
+    }
+    const originalExecuteWithOutcome = fallbackStrategy.executeWithOutcome
+    fallbackStrategy.executeWithOutcome = async () => ({ result: resultWithoutDisposition } as unknown as Awaited<ReturnType<typeof fallbackStrategy.executeWithOutcome>>)
+
+    try {
+      const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
+        yes: true,
+        commandRunner: { run: async () => { throw new Error('a missing-disposition result must not execute the command') } },
+      })
+
+      assert.equal(summary.results[0], resultWithoutDisposition)
+      assert.equal(JSON.stringify(summary).includes('planResources'), false)
+      assert.equal(existsSync(plannedArtifact.tempDirectory), true)
+      assert.equal(existsSync(transactionDirectory), true)
+    } finally {
+      fallbackStrategy.executeWithOutcome = originalExecuteWithOutcome
+      rmSync(plannedArtifact.tempDirectory, { recursive: true, force: true })
+      rmSync(transactionDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves plan resources and returns a failed result for malformed fallback result enums', async () => {
+    const malformedFields: Array<['status' | 'target' | 'ownership', string]> = [
+      ['status', 'invalid'],
+      ['target', 'invalid'],
+      ['ownership', 'invalid'],
+    ]
+    const originalExecuteWithOutcome = fallbackStrategy.executeWithOutcome
+
+    for (const [field, value] of malformedFields) {
+      const fixture = await writeFallbackExecutionFixture()
+      const transactionDirectory = mkdtempSync(path.join(home, `malformed-${field}-transaction-`))
+      const manifestPath = path.join(transactionDirectory, 'transaction.json')
+      writeFileSync(manifestPath, '{}')
+      const plannedArtifact = artifact()
+      const item: UpdatePlanItem = {
+        installationId: 'opencode:fallback',
+        target: 'opencode',
+        ownership: 'fallback',
+        installed: true,
+        source: { kind: 'fallback', executor: 'npm-exec' },
+        version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
+        artifact: plannedArtifact,
+        fallbackTransaction: fixture.identity,
+        steps: [{ kind: 'command', description: 'refresh', command: { executable: process.execPath, args: ['--transaction', manifestPath], timeoutMs: 1000 } }],
+        rollbackSteps: [],
+        requiresConfirmation: true,
+        temporaryDirectories: [transactionDirectory],
+      }
+      const malformedResult: Record<string, unknown> = {
+        installationId: item.installationId,
+        target: item.target,
+        ownership: item.ownership,
+        status: 'failed',
+        changed: false,
+      }
+      malformedResult[field] = value
+      fallbackStrategy.executeWithOutcome = async () => ({
+        result: malformedResult as unknown as UpdateResult,
+        planResources: 'release',
+      })
+
+      try {
+        const summary = await executeUpdatePlan({ checkOnly: false, items: [item] }, {
+          yes: true,
+          commandRunner: { run: async () => { throw new Error('malformed outcomes must not execute the command') } },
+        })
+
+        const result = summary.results[0]
+        assert.equal(result?.status, 'failed')
+        assert.equal(result?.error?.code, 'UPDATE_EXECUTION_FAILED')
+        assert.equal(result?.installationId, item.installationId)
+        assert.equal(result?.target, item.target)
+        assert.equal(result?.ownership, item.ownership)
+        assert.equal(result?.changed, false)
+        assert.equal(summary.counts.failed, 1)
+        assert.equal(Object.prototype.hasOwnProperty.call(summary.counts, 'invalid'), false)
+        assert.equal(existsSync(plannedArtifact.tempDirectory), true)
+        assert.equal(existsSync(transactionDirectory), true)
+      } finally {
+        fallbackStrategy.executeWithOutcome = originalExecuteWithOutcome
+        rmSync(plannedArtifact.tempDirectory, { recursive: true, force: true })
+        rmSync(transactionDirectory, { recursive: true, force: true })
+      }
+    }
   })
 
   it('cleans fallback artifacts and transaction state after a confirmed failure', async () => {
+    const fixture = await writeFallbackExecutionFixture()
     const transactionDirectory = mkdtempSync(path.join(home, 'transaction-'))
     const manifestPath = path.join(transactionDirectory, 'transaction.json')
     writeFileSync(manifestPath, '{}')
@@ -441,6 +865,7 @@ describe('update coordinator recovery gate', () => {
       source: { kind: 'fallback', executor: 'npm-exec' },
       version: { current: '1.0.0', latest: '1.0.1', status: 'update-available' },
       artifact: plannedArtifact,
+      fallbackTransaction: fixture.identity,
       steps: [{ kind: 'command', description: 'refresh', command: { executable: process.execPath, args: ['--transaction', manifestPath], timeoutMs: 1000 } }],
       rollbackSteps: [],
       requiresConfirmation: true,
@@ -556,19 +981,6 @@ describe('withPinnedMarketplaceCommit', () => {
 describe('planUpdates pins the resolved marketplace commit into the planned source', () => {
   const resolvedCommit = 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c'
 
-  function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
-    const header = Buffer.alloc(512)
-    header.write(name, 0, 'utf8')
-    const size = body ? body.length : 0
-    header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
-    header[156] = type.charCodeAt(0)
-    header.write('ustar', 257, 'ascii')
-    header.write('00', 263, 'ascii')
-    const blocks = Math.ceil(size / 512)
-    const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
-    return Buffer.concat([header, padded])
-  }
-
   function marketplaceArchive (): Buffer {
     const root = `nsolid-plugin-${resolvedCommit}`
     const dir = tarEntry(`${root}/`, undefined, '5')
@@ -626,7 +1038,7 @@ describe('planUpdates pins the resolved marketplace commit into the planned sour
           }
           throw new Error(`unexpected fetch ${text}`)
         },
-        commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) },
+        commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) },
       })
 
       const item = plan.items.find((candidate) => candidate.target === 'claude')
@@ -730,7 +1142,7 @@ describe('unsupported CLI provenance', () => {
       version: { latest: '90.0.2', status: 'unknown' },
     }, {
       options: {},
-      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) },
+      commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) },
     })
     assert.deepEqual(cli.manualCommands, strategyItem.manualCommands, 'check and mutation planning must use the identical shared guidance')
     assert.deepEqual(cli.manualCommands, [...exactVersionGuidance('90.0.2'), 'volta install nsolid-plugin@90.0.2'])
@@ -770,7 +1182,7 @@ describe('unsupported CLI provenance', () => {
       commandRunner: {
         run: async (spec: CommandSpec) => {
           commands.push([spec.executable, ...spec.args].join(' '))
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -788,19 +1200,6 @@ describe('unsupported CLI provenance', () => {
 })
 
 describe('read-only check stays off the filesystem', () => {
-  function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
-    const header = Buffer.alloc(512)
-    header.write(name, 0, 'utf8')
-    const size = body ? body.length : 0
-    header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
-    header[156] = type.charCodeAt(0)
-    header.write('ustar', 257, 'ascii')
-    header.write('00', 263, 'ascii')
-    const blocks = Math.ceil(size / 512)
-    const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
-    return Buffer.concat([header, padded])
-  }
-
   it('summarizes fallback changes in memory without requiring a writable temporary directory', { skip: process.platform === 'win32' }, async () => {
     // A tracked opencode fallback installation with one tracked skill.
     const destination = path.join(home, '.config', 'opencode', 'skills')
@@ -899,7 +1298,7 @@ describe('update coordinator recovery message branches', () => {
     check: true,
     fetchImpl: async () => new Response('{}', { status: 200 }),
     commandRunner: {
-      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }),
     },
   })
 

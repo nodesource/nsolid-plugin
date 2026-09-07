@@ -172,13 +172,55 @@ export async function runCommand (spec: CommandSpec): Promise<CommandResult> {
     })
     child.once('exit', (code, signal) => {
       if (timedOut && timeoutTermination) return
-      finish(code, signal ?? undefined)
+      // The root exiting closes neither its process tree nor the mutation
+      // window. Cancel the execution timer, but keep the result pending until
+      // reparented descendants have been accounted for independently.
+      clearTimeout(timer)
+      if (lineageTimer !== undefined) clearInterval(lineageTimer)
+      treeTerminated = false
+      confirmExitedTree(lineage).then((terminated) => {
+        treeTerminated = terminated
+        finish(code, signal ?? undefined, terminated ? undefined : 'TREE_TERMINATION_UNCONFIRMED')
+      }).catch(() => finish(code, signal ?? undefined, 'TREE_TERMINATION_UNCONFIRMED'))
     })
   })
 }
 
 export function isCommandSuccessful (result: CommandResult): boolean {
-  return !result.timedOut && result.exitCode === 0
+  return !result.timedOut && result.exitCode === 0 && !result.spawnErrorCode && !isTreeTerminationUnconfirmed(result)
+}
+
+export function isTreeTerminationUnconfirmed (result: CommandResult): boolean {
+  return result.treeTerminated !== true
+}
+
+/**
+ * After root exit, PPID and process-group IDs alone can be stale/reused. Only
+ * signal descendants with our inherited token and a revalidated start identity;
+ * never signal the dead root PID or an unattributed process. The pre-spawn
+ * snapshot also detects survivors which stripped the token and reparented.
+ * Without that evidence (including other platforms) defer recovery: absence
+ * from a post-exit process listing is not proof of whole-tree termination.
+ */
+async function confirmExitedTree (lineage: PosixLineage | undefined): Promise<boolean> {
+  if (process.platform !== 'linux' || lineage === undefined) return false
+  const started = Date.now()
+  const deadline = started + 1_500
+  do {
+    const snapshot = enumerateProcStatTable()
+    if (!snapshot.complete) return false
+    let marked = false
+    for (const [pid, fields] of snapshot.table) {
+      if (fields.state === 'Z' || fields.state === 'X') continue
+      if (processHasTreeToken(pid, lineage.treeToken) !== true) continue
+      marked = true
+      if (readProcStatFields(pid)?.starttime !== fields.starttime || processHasTreeToken(pid, lineage.treeToken) !== true) continue
+      try { process.kill(pid, Date.now() - started < 500 ? 'SIGTERM' : 'SIGKILL') } catch { /* rechecked by the next snapshot */ }
+    }
+    if (!marked && terminationVerdict(lineage.startSnapshot, snapshot, lineage.childPid, lineage.childStarttime, lineage)) return true
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  } while (Date.now() < deadline)
+  return false
 }
 
 /**

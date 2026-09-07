@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tarEntry } from '../../helpers/tar.js'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -15,7 +16,20 @@ import { readTrackingFile, writeTrackingFile } from '../../../src/skills/skill-t
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getSkillsDir, resolveHome } from '../../../src/utils/path.js'
 import { FALLBACK_CHILD_RESULT_SCHEMA, recordContainmentDirectoryIdentity } from '../../../src/update/fallback-result-protocol.js'
-import { FALLBACK_PROTOCOL_VERSION, type FallbackTransactionIdentity, type UpdateInstallation, type UpdatePlanItem, type UpdateResult } from '../../../src/update/types.js'
+import { FALLBACK_PROTOCOL_VERSION, type CommandResult, type FallbackTransactionIdentity, type UpdateInstallation, type UpdatePlanItem, type UpdateResult } from '../../../src/update/types.js'
+
+function isolateHome (home: string): () => void {
+  const previousHome = process.env.HOME
+  const previousUserProfile = process.env.USERPROFILE
+  process.env.HOME = home
+  process.env.USERPROFILE = home
+  return () => {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousUserProfile
+  }
+}
 
 function item (): UpdatePlanItem {
   return {
@@ -38,51 +52,22 @@ async function pathEvidence (target: string) {
 }
 
 describe('fallback update strategy', () => {
-  it('uses a private temporary cwd and propagates the child rollback result', async () => {
-    let observedCwd = ''
+  it('rejects a mutable fallback plan without a transaction before creating a workspace or running a command', async () => {
+    let commandRan = false
     const result = await fallbackStrategy.execute(item(), {
       options: {},
       commandRunner: {
-        run: async (command) => {
-          observedCwd = command.cwd ?? ''
-          assert.notEqual(observedCwd, tmpdir())
-          // POSIX exposes the restrictive mode bits that the implementation
-          // applies. Windows filesystems do not expose chmod(0700) through
-          // stat(), so verify the private temp location there instead.
-          if (process.platform !== 'win32') {
-            assert.equal(statSync(observedCwd).mode & 0o777, 0o700)
-          } else {
-            assert.equal(path.dirname(observedCwd), path.resolve(tmpdir()))
-          }
-          return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false }
+        run: async () => {
+          commandRan = true
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
 
     assert.equal(result.status, 'failed')
-    assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
-    assert.equal(existsSync(path.resolve(observedCwd)), false)
-  })
-
-  it('removes only the recorded manifest directory, never a path derived from command args', async () => {
-    const recorded = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-recorded-'))
-    const foreign = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-foreign-'))
-    // The command references a foreign directory that this process did not
-    // create; only the recorded temporary directory may be removed.
-    const candidate = {
-      ...item(),
-      steps: [{ kind: 'command' as const, description: 'refresh', command: { executable: 'npm', args: ['--transaction', path.join(foreign, 'transaction.json')], cwd: tmpdir(), timeoutMs: 1000 } }],
-      temporaryDirectories: [recorded],
-    }
-
-    const result = await fallbackStrategy.execute(candidate, {
-      options: {},
-      commandRunner: { run: async () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }) },
-    })
-
-    assert.equal(result.status, 'failed')
-    assert.equal(existsSync(recorded), false)
-    assert.equal(existsSync(foreign), true, 'a directory not created by this process must never be deleted')
+    assert.equal(result.error?.code, 'INVALID_PLAN')
+    assert.equal(commandRan, false)
+    assert.equal(result.rollback, undefined)
   })
 
   it('reports a missing package executor as unsupported instead of failed planning', async () => {
@@ -108,7 +93,7 @@ describe('fallback update strategy', () => {
         ...item(),
         source: { kind: 'fallback', bundleVersion: '1.0.0' },
         metadata: { trackedSkills: [{ name: 'tracked', path: skillPath }] },
-      }, { options: {}, commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) } })
+      }, { options: {}, commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) } })
       assert.equal(planned.planningError, undefined)
       assert.equal(planned.source.kind, 'unsupported')
       assert.equal(planned.manualCommands?.length, 2)
@@ -127,22 +112,15 @@ describe('fallback update strategy', () => {
 
 describe('fallback strategy parent gate', () => {
   let home: string
-  let previousHome: string | undefined
-  let previousUserProfile: string | undefined
+  let restoreHome: () => void
 
   beforeEach(() => {
     home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-fallback-strategy-'))
-    previousHome = process.env.HOME
-    previousUserProfile = process.env.USERPROFILE
-    process.env.HOME = home
-    process.env.USERPROFILE = home
+    restoreHome = isolateHome(home)
   })
 
   afterEach(() => {
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
-    if (previousUserProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = previousUserProfile
+    restoreHome()
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -246,7 +224,7 @@ describe('fallback strategy parent gate', () => {
 
     const result = await fallbackStrategy.execute(fixture.item, {
       options: {},
-      commandRunner: { run: async () => ({ exitCode: 0, stdout: 'refresh done\n', stderr: '', timedOut: false }) },
+      commandRunner: { run: async () => ({ exitCode: 0, stdout: 'refresh done\n', stderr: '', timedOut: false, treeTerminated: true }) },
     })
 
     assert.equal(result.status, 'failed')
@@ -272,7 +250,7 @@ describe('fallback strategy parent gate', () => {
           // But the skill swap is only claimed: the journal records new bytes
           // while the live path still carries the old ones.
           await childClaimsSwapWithoutApplying(fixture, fixture.skillPath, Buffer.from('new tracked'))
-          return { exitCode: 0, stdout: 'refresh done\n', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: 'refresh done\n', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -302,7 +280,7 @@ describe('fallback strategy parent gate', () => {
         run: async () => {
           await childStagesAndApplies(fixture, fixture.trackedConfigPath!, Buffer.from(tamperedConfig))
           await childStagesAndApplies(fixture, fixture.trackingPath, Buffer.from(JSON.stringify(newTracking, null, 2) + '\n'))
-          return { exitCode: 0, stdout: 'refresh done\n', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: 'refresh done\n', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -318,22 +296,15 @@ describe('fallback strategy parent gate', () => {
 
 describe('fallback strategy structured child result', () => {
   let home: string
-  let previousHome: string | undefined
-  let previousUserProfile: string | undefined
+  let restoreHome: () => void
 
   beforeEach(() => {
     home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-fallback-result-'))
-    previousHome = process.env.HOME
-    previousUserProfile = process.env.USERPROFILE
-    process.env.HOME = home
-    process.env.USERPROFILE = home
+    restoreHome = isolateHome(home)
   })
 
   afterEach(() => {
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
-    if (previousUserProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = previousUserProfile
+    restoreHome()
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -378,7 +349,7 @@ describe('fallback strategy structured child result', () => {
       bundleDestinations: [],
       approvedDestinationRoots: [getSkillsDir(), getHarnessSkillsPath('claude')].map((value) => path.resolve(value)),
     }
-    const manifestDir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-manifest-'))
+    const manifestDir = mkdtempSync(path.join(home, 'nsolid-plugin-manifest-'))
     if (process.platform !== 'win32') chmodSync(manifestDir, 0o700)
     const manifestPath = path.join(manifestDir, 'transaction.json')
     writeFileSync(manifestPath, JSON.stringify(identity, null, 2) + '\n', { mode: 0o600 })
@@ -412,20 +383,21 @@ describe('fallback strategy structured child result', () => {
   interface ChildContext {
     resultPath?: string
     manifestPath?: string
+    workspace?: string
   }
 
   /** Simulate the real child: it reads the nonce from its own manifest and publishes the structured envelope. */
-  function childWritesEnvelope (build: (nonce: string) => Record<string, unknown>): (child: ChildContext) => { exitCode: number; stdout: string; stderr: string; timedOut: boolean } {
+  function childWritesEnvelope (build: (nonce: string) => Record<string, unknown>): (child: ChildContext) => CommandResult {
     return (child) => {
       if (child.resultPath && child.manifestPath) {
         const nonce = (JSON.parse(readFileSync(child.manifestPath, 'utf8')) as { nonce: string }).nonce
         writeFileSync(child.resultPath, JSON.stringify(build(nonce)), { mode: 0o600 })
       }
-      return { exitCode: 1, stdout: '', stderr: 'Fallback refresh failed\nrollback: not-attempted\n', timedOut: false }
+      return { exitCode: 1, stdout: '', stderr: 'Fallback refresh failed\nrollback: not-attempted\n', timedOut: false, treeTerminated: true }
     }
   }
 
-  async function execute (fixture: ResultFixture, runner: (child: ChildContext) => { exitCode: number; stdout: string; stderr: string; timedOut: boolean } & Record<string, unknown>) {
+  async function execute (fixture: ResultFixture, runner: (child: ChildContext) => CommandResult) {
     return fallbackStrategy.execute(fixture.item, {
       options: {},
       commandRunner: {
@@ -435,20 +407,147 @@ describe('fallback strategy structured child result', () => {
             const index = args.indexOf(flag)
             return index >= 0 ? args[index + 1] : undefined
           }
-          return runner({ resultPath: at('--result'), manifestPath: at('--transaction') }) as { exitCode: number; stdout: string; stderr: string; timedOut: boolean }
+          return runner({ resultPath: at('--result'), manifestPath: at('--transaction'), workspace: command.cwd })
         }
       },
     })
   }
 
+  interface RecoveryScenario {
+    name: string
+    expectedCode: string
+    expectedRollback: UpdateResult['rollback']
+    run: (fixture: ResultFixture) => Promise<UpdateResult>
+  }
+
+  const recoveryScenarios: RecoveryScenario[] = [
+    {
+      name: 'unconfirmed termination',
+      expectedCode: 'FALLBACK_TREE_TERMINATION_UNCONFIRMED',
+      expectedRollback: { attempted: false },
+      run: (fixture) => execute(fixture, (child) => {
+        const envelope = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+        return { ...envelope, timedOut: true, treeTerminated: false }
+      }),
+    },
+    {
+      name: 'missing executable',
+      expectedCode: 'MISSING_EXECUTABLE',
+      expectedRollback: { attempted: true, succeeded: true },
+      run: (fixture) => execute(fixture, (child) => {
+        const envelope = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+        return { ...envelope, spawnErrorCode: 'ENOENT', treeTerminated: true }
+      }),
+    },
+    {
+      name: 'confirmed timeout',
+      expectedCode: 'FALLBACK_COMMAND_TIMEOUT',
+      expectedRollback: { attempted: true, succeeded: true },
+      run: (fixture) => execute(fixture, (child) => {
+        const envelope = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+        return { ...envelope, timedOut: true, treeTerminated: true }
+      }),
+    },
+    {
+      name: 'unproven state',
+      expectedCode: 'FALLBACK_STATE_UNPROVEN',
+      expectedRollback: { attempted: true, succeeded: false },
+      run: (fixture) => execute(fixture, (child) => {
+        const journal = JSON.parse(readFileSync(fallbackJournalPath(fixture.identity.trackingPath), 'utf8')) as { entries: Array<{ backup?: string }> }
+        const backup = journal.entries.find((entry) => entry.backup)?.backup
+        assert.ok(backup, 'the scenario journal must hold at least one backup')
+        if (statSync(backup).isDirectory()) writeFileSync(path.join(backup, '__tampered__'), 'tampered')
+        else writeFileSync(backup, 'tampered')
+        return childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+      }),
+    },
+    {
+      name: 'incomplete rollback',
+      expectedCode: 'FALLBACK_ROLLBACK_FAILED',
+      expectedRollback: { attempted: true, succeeded: false },
+      run: (fixture) => execute(fixture, (child) => {
+        // Replacing only the skill parent leaves the tracking file available;
+        // the authenticated restore cannot traverse this foreign file and
+        // therefore returns an incomplete (not unproven) outcome.
+        const skillParent = path.dirname(fixture.skillPath)
+        rmSync(skillParent, { recursive: true, force: true })
+        writeFileSync(skillParent, 'foreign parent')
+        assert.equal(statSync(skillParent).isFile(), true)
+        return childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
+      }),
+    },
+    {
+      name: 'validated child error',
+      expectedCode: 'MCP_RECONCILIATION_REQUIRED',
+      expectedRollback: { attempted: true, succeeded: true },
+      run: (fixture) => execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))),
+    },
+  ]
+
+  for (const scenario of recoveryScenarios) {
+    it(`projects the ${scenario.name} recovery outcome with the required precedence`, async () => {
+      const fixture = await setupResultFixture()
+      try {
+        const result = await scenario.run(fixture)
+        assert.equal(result.error?.code, scenario.expectedCode)
+        assert.deepEqual(result.rollback, scenario.expectedRollback)
+      } finally {
+        rmSync(fixture.manifestDir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  it('uses a private temporary cwd and parent rollback with a real transaction', async () => {
+    const fixture = await setupResultFixture()
+    let observedCwd = ''
+    const result = await fallbackStrategy.execute(fixture.item, {
+      options: {},
+      commandRunner: {
+        run: async (command) => {
+          observedCwd = command.cwd ?? ''
+          assert.notEqual(observedCwd, tmpdir())
+          if (process.platform !== 'win32') {
+            assert.equal(statSync(observedCwd).mode & 0o777, 0o700)
+          } else {
+            assert.equal(path.dirname(observedCwd), path.resolve(tmpdir()))
+          }
+          return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false, treeTerminated: true }
+        },
+      },
+    })
+
+    assert.equal(result.status, 'failed')
+    assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
+    assert.equal(existsSync(path.resolve(observedCwd)), false)
+  })
+
+  it('never removes a path derived from command args during strategy execution', async () => {
+    const fixture = await setupResultFixture()
+    const foreign = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-foreign-'))
+    const commandStep = fixture.item.steps.find((entry) => entry.kind === 'command')
+    assert.ok(commandStep !== undefined && commandStep.kind === 'command')
+    fixture.item.steps = [{
+      ...commandStep,
+      command: { ...commandStep.command, args: ['--transaction', path.join(foreign, 'transaction.json')] },
+    }]
+
+    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }))
+
+    assert.equal(result.status, 'failed')
+    assert.equal(existsSync(fixture.manifestDir), true, 'the strategy must not release planning temporaries owned by the coordinator')
+    assert.equal(existsSync(foreign), true, 'a directory not created by this process must never be deleted')
+    rmSync(foreign, { recursive: true, force: true })
+  })
+
   it('surfaces the child MCP_RECONCILIATION_REQUIRED code instead of the generic fallback failure', async () => {
     const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({
+    const writeEnvelope = childWritesEnvelope((nonce) => ({
       schema: FALLBACK_CHILD_RESULT_SCHEMA,
       nonce,
       code: 'MCP_RECONCILIATION_REQUIRED',
       rollback: { attempted: false },
-    })))
+    }))
+    const result = await execute(fixture, (child) => ({ ...writeEnvelope(child), treeTerminated: true }))
 
     assert.equal(result.status, 'failed')
     assert.equal(result.error?.code, 'MCP_RECONCILIATION_REQUIRED')
@@ -458,11 +557,40 @@ describe('fallback strategy structured child result', () => {
     assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
     assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked', 'the reconciliation failure must not mutate owned state')
     assert.equal(existsSync(fixture.resultPath), false, 'the structured result must be removed during normal workspace cleanup')
-    assert.equal(existsSync(fixture.manifestDir), false)
+    assert.equal(existsSync(fixture.manifestDir), true, 'planning temporaries remain for coordinator-owned cleanup')
     const serialized = JSON.stringify(result)
     const parsed = JSON.parse(serialized) as UpdateResult
     assert.deepEqual(JSON.parse(JSON.stringify(parsed)), parsed, 'the parent result must remain exactly one stable JSON document')
   })
+
+  for (const exitCode of [0, 1]) {
+    it(`prioritizes unconfirmed termination over a valid child envelope without timeout (exit: ${exitCode})`, async () => {
+      const fixture = await setupResultFixture()
+      const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+      let journalBefore = ''
+      const result = await execute(fixture, (child) => {
+        journalBefore = readFileSync(journalPath, 'utf8')
+        writeFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'child mutation must remain')
+        const envelope = childWritesEnvelope((nonce) => ({
+          schema: FALLBACK_CHILD_RESULT_SCHEMA,
+          nonce,
+          code: 'MCP_RECONCILIATION_REQUIRED',
+          rollback: { attempted: true, succeeded: true },
+        }))(child)
+        return { ...envelope, exitCode, treeTerminated: false, stdout: 'RAW-CHILD-SECRET', stderr: 'RAW-CHILD-SECRET\nrollback: succeeded\n' }
+      })
+
+      assert.equal(result.status, 'failed')
+      assert.equal(result.error?.code, 'FALLBACK_TREE_TERMINATION_UNCONFIRMED')
+      assert.deepEqual(result.rollback, { attempted: false })
+      assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'child mutation must remain')
+      assert.equal(readFileSync(journalPath, 'utf8'), journalBefore, 'deferral must not reclaim, restore or dispose the journal')
+      const journal = JSON.parse(journalBefore) as { snapshotDirectory: string }
+      assert.equal(existsSync(journal.snapshotDirectory), true)
+      assert.equal(existsSync(fixture.manifestDir), true)
+      assert.ok(!JSON.stringify(result).includes('RAW-CHILD-SECRET'))
+    })
+  }
 
   it('never publishes child-controlled text carried inside the envelope', async () => {
     const fixture = await setupResultFixture()
@@ -499,7 +627,7 @@ describe('fallback strategy structured child result', () => {
 
   it('fails safe when the child publishes no result file at all', async () => {
     const fixture = await setupResultFixture()
-    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }))
+    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
     assert.equal(result.error?.message, 'Fallback refresh command failed')
   })
@@ -508,46 +636,25 @@ describe('fallback strategy structured child result', () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, (child) => {
       if (child.resultPath) writeFileSync(child.resultPath, 'not json', { mode: 0o600 })
-      return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }
+      return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }
     })
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
   })
 
-  it('fails safe when the result file exceeds the bounded size', async () => {
-    const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED', pad: 'x'.repeat(8192) })))
-    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-  })
-
-  it('fails safe on a stale result bound to a different transaction nonce', async () => {
-    const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope(() => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: randomUUID(), code: 'MCP_RECONCILIATION_REQUIRED' })))
-    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-  })
-
-  it('fails safe on an unknown child code', async () => {
-    const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'TOTALLY_UNKNOWN_CODE' })))
-    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-  })
-
-  it('fails safe on an unsafe child code shape', async () => {
-    const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'bad code' })))
-    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-  })
-
-  it('fails safe on a schema-version skew', async () => {
-    const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: 99, nonce, code: 'MCP_RECONCILIATION_REQUIRED' })))
-    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-  })
-
-  it('fails safe on a malformed rollback shape', async () => {
-    const fixture = await setupResultFixture()
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: 1 } })))
-    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-  })
+  for (const [name, invalidFields] of [
+    ['oversized result', { pad: 'x'.repeat(8192) }],
+    ['different transaction nonce', { nonce: 'stale-transaction-nonce' }],
+    ['unknown child code', { code: 'TOTALLY_UNKNOWN_CODE' }],
+    ['unsafe child code shape', { code: 'bad code' }],
+    ['schema-version skew', { schema: 99 }],
+    ['malformed rollback shape', { rollback: { attempted: 1 } }],
+  ] as const) {
+    it(`fails safe on ${name}`, async () => {
+      const fixture = await setupResultFixture()
+      const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED', ...invalidFields })))
+      assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
+    })
+  }
 
   it('fails safe when the result path is a symlink', async () => {
     const fixture = await setupResultFixture()
@@ -557,7 +664,7 @@ describe('fallback strategy structured child result', () => {
     writeFileSync(realTarget, JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }), { mode: 0o600 })
     rmSync(fixture.resultPath, { force: true })
     symlinkSync(realTarget, fixture.resultPath)
-    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }))
+    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
     rmSync(realDir, { recursive: true, force: true })
   })
@@ -571,7 +678,7 @@ describe('fallback strategy structured child result', () => {
       let ran = false
       const result = await execute(fixture, () => {
         ran = true
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       })
       assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED', 'a swapped transaction workspace must fail closed')
       assert.equal(ran, false, 'the child command must never run against a swapped workspace')
@@ -590,7 +697,7 @@ describe('fallback strategy structured child result', () => {
     const first = await execute(fixture, (child) => {
       if (child.resultPath !== undefined) observedResultPaths.push(child.resultPath)
       const quiet = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
-      return { ...quiet, timedOut: true }
+      return { ...quiet, timedOut: true, treeTerminated: false }
     })
     assert.equal(first.error?.code, 'FALLBACK_TREE_TERMINATION_UNCONFIRMED')
     // Second execution of the SAME item: the preserved journal is a pending
@@ -599,13 +706,13 @@ describe('fallback strategy structured child result', () => {
     const second = await execute(fixture, (child) => {
       blockedCommandRan = true
       if (child.resultPath !== undefined) observedResultPaths.push(child.resultPath)
-      return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }
+      return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }
     })
     assert.equal(second.error?.code, 'FALLBACK_RECOVERY_PENDING', 'a preserved journal must block the next run as pending')
     assert.equal(blockedCommandRan, false, 'the pending-blocked run must never execute the child command')
-    // The blocked run cleans the planning-owned manifest workspace on its way
-    // out, so the preserved first-run envelope also disappears with it.
-    assert.equal(existsSync(fixture.manifestDir), false, 'the blocked run must not preserve the previous planning workspace')
+    // Direct strategy execution leaves planning-owned state for the
+    // coordinator; a coordinator run releases it after this result.
+    assert.equal(existsSync(fixture.manifestDir), true, 'direct strategy execution must not own planning cleanup')
     // The user applies the prescribed manual remedy (remove the pending
     // journal and its snapshot). A retry then RE-PLANS: a fresh fixture means
     // a fresh manifest, fresh nonce, and fresh per-execution result location,
@@ -618,7 +725,7 @@ describe('fallback strategy structured child result', () => {
     const rePlannedFixture = await setupResultFixture()
     const third = await execute(rePlannedFixture, (child) => {
       if (child.resultPath !== undefined) observedResultPaths.push(child.resultPath)
-      return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }
+      return { exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }
     })
     assert.equal(third.error?.code, 'FALLBACK_COMMAND_FAILED', 'the post-remedy execution must not replay the first envelope')
     assert.equal(observedResultPaths.length, 2, 'both executed runs must receive an explicit result path')
@@ -641,7 +748,7 @@ describe('fallback strategy structured child result', () => {
         timeoutMs: 1000,
       },
     }]
-    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }))
+    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED', 'a result outside the parent-owned workspace must never be trusted')
     // The parent must also never DELETE a file it did not create: the stale-
     // result cleanup is bound to the recorded containment identity.
@@ -649,11 +756,26 @@ describe('fallback strategy structured child result', () => {
     rmSync(foreignDir, { recursive: true, force: true })
   })
 
-  it('fails safe when the plan item carries no transaction to bind the nonce', async () => {
+  it('rejects a mutable fallback plan without a transaction before invoking the child', async () => {
     const fixture = await setupResultFixture()
-    delete (fixture.item as { fallbackTransaction?: unknown }).fallbackTransaction
-    const result = await execute(fixture, childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' })))
-    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
+    try {
+      delete (fixture.item as { fallbackTransaction?: unknown }).fallbackTransaction
+      let commandRan = false
+      const result = await fallbackStrategy.execute(fixture.item, {
+        options: {},
+        commandRunner: {
+          run: async () => {
+            commandRan = true
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
+          },
+        },
+      })
+      assert.equal(result.error?.code, 'INVALID_PLAN')
+      assert.equal(commandRan, false)
+      assert.equal(existsSync(fixture.manifestDir), true, 'an invalid plan must not clean up planning-owned state')
+    } finally {
+      rmSync(fixture.manifestDir, { recursive: true, force: true })
+    }
   })
 
   it('lets parent journal recovery stay authoritative over the child rollback claim', async () => {
@@ -706,7 +828,7 @@ describe('fallback strategy structured child result', () => {
     // parent now points each execution at a FRESH result location, so the
     // stale file is never read regardless of its nonce.
     writeFileSync(fixture.resultPath, JSON.stringify({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce: fixture.identity.nonce, code: 'MCP_RECONCILIATION_REQUIRED', rollback: { attempted: false } }), { mode: 0o600 })
-    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false }))
+    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\n', timedOut: false, treeTerminated: true }))
     assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED', 'the stale envelope must not surface its structured code')
     // (The planned-path file may still be removed as part of the parent-owned
     // manifest workspace cleanup; the fresh-path design means it was never
@@ -717,7 +839,7 @@ describe('fallback strategy structured child result', () => {
     const fixture = await setupResultFixture()
     const result = await execute(fixture, (child) => {
       const quiet = childWritesEnvelope((nonce) => ({ schema: FALLBACK_CHILD_RESULT_SCHEMA, nonce, code: 'MCP_RECONCILIATION_REQUIRED' }))(child)
-      return { ...quiet, timedOut: true }
+      return { ...quiet, timedOut: true, treeTerminated: false }
     })
     assert.equal(result.error?.code, 'FALLBACK_TREE_TERMINATION_UNCONFIRMED')
     assert.equal(existsSync(fixture.manifestDir), true, 'recovery artifacts must be preserved for the unconfirmed case')
@@ -733,7 +855,7 @@ describe('fallback strategy structured child result', () => {
     assert.equal(result.error?.code, 'MISSING_EXECUTABLE')
   })
 
-  it('maps a validated FALLBACK_PROTOCOL_UNSUPPORTED pre-mutation rejection to a no-rollback failure and disposes its own untouched journal', async () => {
+  it('maps a validated FALLBACK_PROTOCOL_UNSUPPORTED pre-mutation rejection to a no-rollback failure and preserves its verified journal state', async () => {
     const fixture = await setupResultFixture()
     const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
     const result = await execute(fixture, childWritesEnvelope((nonce) => ({
@@ -749,16 +871,80 @@ describe('fallback strategy structured child result', () => {
     assert.deepEqual(result.rollback, { attempted: false }, 'a pre-mutation child rejection must never report a parent rollback')
     assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked', 'a pre-mutation rejection must not mutate owned state')
     // The parent proved, from its own in-memory manifest, that nothing was
-    // mutated: its pre-mutation journal and snapshot are pure residue and are
-    // disposed so the prescribed manual update + retry is not blocked.
-    assert.equal(existsSync(journalPath), false, 'the proven pre-mutation journal must be disposed')
-    assert.deepEqual(
-      readdirSync(path.dirname(fixture.identity.trackingPath)).filter((name) => name.startsWith('.nsolid-plugin-update-')),
-      [],
-      'the proven pre-mutation snapshot must be disposed'
-    )
-    assert.equal(result.preservedArtifacts, undefined)
+    // mutated. A disposal-only journal operation does not exist yet, so the
+    // journal and snapshot remain preserved for deliberate manual resolution.
+    assert.equal(existsSync(journalPath), true, 'the verified pre-mutation journal must be preserved')
+    const snapshotDirectory = (JSON.parse(readFileSync(journalPath, 'utf8')) as { snapshotDirectory: string }).snapshotDirectory
+    assert.equal(existsSync(snapshotDirectory), true, 'the verified pre-mutation snapshot must be preserved')
+    assert.deepEqual(result.preservedArtifacts, [journalPath, snapshotDirectory].sort())
     assert.equal(result.preservedPaths, undefined)
+  })
+
+  it('preserves an owned skill changed concurrently after original-state verification', async () => {
+    const fixture = await setupResultFixture()
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const originalTrackingDigest = fixture.identity.trackingDigest
+    let trackingDigestRead = false
+    let concurrentChangeApplied = false
+    let workspace = ''
+    let resultDirectory = ''
+    let snapshotDirectory = ''
+
+    try {
+      const result = await execute(fixture, (child) => {
+        workspace = child.workspace ?? ''
+        resultDirectory = child.resultPath === undefined ? '' : path.dirname(child.resultPath)
+        // Install the seam only after beginFallbackJournal has completed. The
+        // final tracking-digest read in liveStateMatchesPlannedEvidence queues
+        // a separate writer after that async verifier resolves true but before
+        // its caller can start any disposal operation. This is deterministic
+        // event-loop concurrency, not a pre-verification drift.
+        Object.defineProperty(fixture.identity, 'trackingDigest', {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            if (!trackingDigestRead) {
+              trackingDigestRead = true
+              queueMicrotask(() => {
+                concurrentChangeApplied = true
+                writeFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'concurrent owned edit')
+              })
+            }
+            return originalTrackingDigest
+          },
+        })
+        return childWritesEnvelope((nonce) => ({
+          schema: FALLBACK_CHILD_RESULT_SCHEMA,
+          nonce,
+          code: 'FALLBACK_PROTOCOL_UNSUPPORTED',
+          rollback: { attempted: false },
+        }))(child)
+      })
+
+      assert.equal(concurrentChangeApplied, true)
+      assert.equal(result.error?.code, 'FALLBACK_PROTOCOL_UNSUPPORTED')
+      assert.deepEqual(result.rollback, { attempted: false })
+      assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'concurrent owned edit', 'a concurrent edit after verification must never be restored over')
+      assert.equal(existsSync(journalPath), true, 'the journal must remain for manual recovery')
+      snapshotDirectory = (JSON.parse(readFileSync(journalPath, 'utf8')) as { snapshotDirectory: string }).snapshotDirectory
+      assert.equal(existsSync(snapshotDirectory), true, 'the snapshot must remain for manual recovery')
+      assert.ok((result.preservedArtifacts ?? []).includes(journalPath))
+      assert.ok((result.preservedArtifacts ?? []).includes(snapshotDirectory))
+      assert.equal(existsSync(workspace), true, 'execution resources must remain paired with preserved recovery state')
+      assert.equal(existsSync(resultDirectory), true, 'result resources must remain paired with preserved recovery state')
+    } finally {
+      Object.defineProperty(fixture.identity, 'trackingDigest', {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: originalTrackingDigest,
+      })
+      if (workspace !== '') rmSync(workspace, { recursive: true, force: true })
+      if (resultDirectory !== '') rmSync(resultDirectory, { recursive: true, force: true })
+      if (snapshotDirectory !== '') rmSync(snapshotDirectory, { recursive: true, force: true })
+      rmSync(journalPath, { force: true })
+      rmSync(fixture.manifestDir, { recursive: true, force: true })
+    }
   })
 
   it('preserves its pre-mutation journal when a protocol rejection cannot be proven pre-mutation', async () => {
@@ -821,7 +1007,7 @@ describe('fallback strategy structured child result', () => {
       snapshotDirectory = (JSON.parse(readFileSync(journalPath, 'utf8')) as { snapshotDirectory: string }).snapshotDirectory
       writeFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'mutated by child')
       rmSync(journalPath, { force: true })
-      return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false }
+      return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false, treeTerminated: true }
     })
 
     assert.equal(result.status, 'failed')
@@ -873,7 +1059,7 @@ describe('fallback strategy structured child result', () => {
           const mutated = { ...(await readTrackingFile())!, bundleVersions: { claude: '9.9.9' } }
           const staged = await registerFallbackStage(claimed, fixture.identity.trackingPath, { bytes: Buffer.from(JSON.stringify(mutated, null, 2) + '\n') })
           await applyFallbackEntry(staged, fixture.identity.trackingPath)
-          return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -916,20 +1102,14 @@ describe('fallback strategy structured child result', () => {
     assert.equal(existsSync(journalPath), true, 'an unproven restore must preserve the journal')
   })
 
-  it('stays compatible with older children that publish no structured result', async () => {
-    {
-      const fixture = await setupResultFixture()
-      const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'Fallback MCP state changed but valid credentials are unavailable\nrollback: not-attempted\n', timedOut: false }))
-      assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-      assert.equal(result.error?.message, 'Fallback refresh command failed')
-    }
-    // legacy stdout/stderr rollback parsing still works
-    {
-      const fixture = await setupResultFixture()
-      const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: succeeded\n', timedOut: false }))
-      assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
-      assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
-    }
+  it('fails safely when an older child publishes no structured result', async () => {
+    const fixture = await setupResultFixture()
+    const result = await execute(fixture, () => ({ exitCode: 1, stdout: '', stderr: 'Fallback MCP state changed but valid credentials are unavailable\nrollback: succeeded\n', timedOut: false, treeTerminated: true }))
+    assert.equal(result.error?.code, 'FALLBACK_COMMAND_FAILED')
+    assert.equal(result.error?.message, 'Fallback refresh command failed')
+    // The verified parent journal, not child stdout, supplies the rollback
+    // outcome when the command has completed and parent recovery succeeds.
+    assert.deepEqual(result.rollback, { attempted: true, succeeded: true })
   })
 
   it('keeps the public seam to exactly one JSON document and never leaks raw child output', { timeout: 120_000 }, async () => {
@@ -965,11 +1145,30 @@ describe('fallback strategy structured child result', () => {
     // succeed and consume it entirely (a second document would throw).
     const trimmed = stdout.trim()
     const parsed = JSON.parse(trimmed) as UpdateResult
+    const completion = JSON.parse(readFileSync(path.join(home, 'command-completion.json'), 'utf8')) as Pick<CommandResult, 'exitCode' | 'timedOut' | 'treeTerminated' | 'spawnErrorCode'> & { childCode: string; childNonce: string }
     assert.equal(parsed.status, 'failed')
-    // The structured child code and the parent-owned safe message are public
-    // state (rendered by --json, the human summary, and verbose diagnostics).
-    assert.equal(parsed.error?.code, 'MCP_RECONCILIATION_REQUIRED')
-    assert.ok(parsed.error?.message.includes('nsolid-plugin setup --harness claude'), 'the approved recovery guidance must name the planned harness')
+    assert.equal(completion.exitCode, 1)
+    assert.equal(completion.timedOut, false)
+    assert.equal(completion.childCode, 'MCP_RECONCILIATION_REQUIRED', 'the real child must reach the intended fixture failure')
+    assert.equal(completion.childNonce, fixture.identity.nonce)
+    assert.equal(typeof completion.treeTerminated, 'boolean', 'the real runner must provide explicit completion evidence')
+    // The public document must reflect the REAL completion verdict. Parallel
+    // process activity (or a platform without proof) can require deferral;
+    // the child envelope must never override that safety decision.
+    if (completion.treeTerminated) {
+      assert.equal(completion.spawnErrorCode, undefined)
+      assert.equal(parsed.error?.code, 'MCP_RECONCILIATION_REQUIRED')
+      assert.ok(parsed.error?.message.includes('nsolid-plugin setup --harness claude'), 'the approved recovery guidance must name the planned harness')
+    } else {
+      assert.equal(completion.spawnErrorCode, 'TREE_TERMINATION_UNCONFIRMED')
+      assert.equal(parsed.error?.code, 'FALLBACK_TREE_TERMINATION_UNCONFIRMED')
+      assert.deepEqual(parsed.rollback, { attempted: false })
+      const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+      assert.equal(existsSync(journalPath), true)
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as { snapshotDirectory: string }
+      assert.equal(existsSync(journal.snapshotDirectory), true)
+      assert.equal(existsSync(fixture.manifestDir), true)
+    }
     // The child's own raw stderr text is child-controlled data and must not
     // appear anywhere in the public result or on the public stdout. (The
     // phrase 'valid credentials are unavailable' also appears in the approved
@@ -984,25 +1183,18 @@ describe('fallback strategy structured child result', () => {
 
 describe('fallback strategy frontier planning', () => {
   let home: string
-  let previousHome: string | undefined
-  let previousUserProfile: string | undefined
+  let restoreHome: () => void
   let previousOpenCodeSkillsDir: string | undefined
   const createdManifestDirectories: string[] = []
 
   beforeEach(() => {
     home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-frontier-'))
-    previousHome = process.env.HOME
-    previousUserProfile = process.env.USERPROFILE
     previousOpenCodeSkillsDir = process.env.NSOLID_OPENCODE_SKILLS_DIR
-    process.env.HOME = home
-    process.env.USERPROFILE = home
+    restoreHome = isolateHome(home)
   })
 
   afterEach(() => {
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
-    if (previousUserProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = previousUserProfile
+    restoreHome()
     if (previousOpenCodeSkillsDir === undefined) delete process.env.NSOLID_OPENCODE_SKILLS_DIR
     else process.env.NSOLID_OPENCODE_SKILLS_DIR = previousOpenCodeSkillsDir
     while (createdManifestDirectories.length > 0) {
@@ -1010,20 +1202,6 @@ describe('fallback strategy frontier planning', () => {
     }
     rmSync(home, { recursive: true, force: true })
   })
-
-  /** Minimal ustar builder so fixture bundles never depend on a system tar. */
-  function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
-    const header = Buffer.alloc(512)
-    header.write(name, 0, 'utf8')
-    const size = body ? body.length : 0
-    header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
-    header[156] = type.charCodeAt(0)
-    header.write('ustar', 257, 'ascii')
-    header.write('00', 263, 'ascii')
-    const blocks = Math.ceil(size / 512)
-    const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
-    return Buffer.concat([header, padded])
-  }
 
   function writeBundleTarball (bundle: object): string {
     const tarball = path.join(home, 'artifact.tgz')
@@ -1091,7 +1269,7 @@ describe('fallback strategy frontier planning', () => {
   }
 
   async function planFixture (installation: UpdateInstallation): Promise<UpdatePlanItem> {
-    const planned = await fallbackStrategy.plan(installation, { options: {}, commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) } })
+    const planned = await fallbackStrategy.plan(installation, { options: {}, commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) } })
     for (const directory of planned.temporaryDirectories ?? []) createdManifestDirectories.push(directory)
     return planned
   }
@@ -1422,20 +1600,6 @@ describe('fallback strategy frontier planning', () => {
 })
 
 describe('fallback change summary', () => {
-  /** Minimal ustar builder so fixture creation never depends on a system tar. */
-  function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
-    const header = Buffer.alloc(512)
-    header.write(name, 0, 'utf8')
-    const size = body ? body.length : 0
-    header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
-    header[156] = type.charCodeAt(0)
-    header.write('ustar', 257, 'ascii')
-    header.write('00', 263, 'ascii')
-    const blocks = Math.ceil(size / 512)
-    const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
-    return Buffer.concat([header, padded])
-  }
-
   function sampleBundle (): object {
     return {
       name: 'nsolid-plugin',
@@ -1489,65 +1653,40 @@ describe('fallback change summary', () => {
     }
   })
 
-  it('never executes a PATH-resolved tar: a hostile PATH cannot change the summary', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-changes-'))
-    const previousPath = process.env.PATH
-    try {
-      const hostileBin = path.join(dir, 'hostile-bin')
-      mkdirSync(hostileBin)
-      const fakeTar = path.join(hostileBin, 'tar')
-      writeFileSync(fakeTar, '#!/bin/sh\nprintf "TAMPERED"\n')
-      chmodSync(fakeTar, 0o755)
-      const tarball = writeTarball(dir, 'artifact.tgz', gzipSync(Buffer.concat([
-        tarEntry('package/bundle.json', Buffer.from(JSON.stringify(sampleBundle())), '0'),
-        Buffer.alloc(1024),
-      ])))
-      process.env.PATH = hostileBin
-      const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
-      const summary = await summarizeFallbackChanges(
-        { metadata: { trackedSkills: [], trackedMcpNames: [] } } as never,
-        tarball
-      )
-      assert.deepEqual(summary, {
-        skillsAdded: ['kept', 'brand-new'],
-        skillsRemoved: [],
-        skillsUpdated: 0,
-        mcpAdded: ['nsolid-console', 'brand-new-mcp'],
-        mcpRemoved: [],
-        mcpUpdated: 0,
-      }, 'the summary must come from the archive bytes, never from a PATH lookup')
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH
-      else process.env.PATH = previousPath
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('summarizes without any tar on PATH', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-changes-'))
-    const previousPath = process.env.PATH
-    try {
-      const tarball = writeTarball(dir, 'artifact.tgz', gzipSync(Buffer.concat([
-        tarEntry('package/bundle.json', Buffer.from(JSON.stringify(sampleBundle())), '0'),
-        Buffer.alloc(1024),
-      ])))
-      process.env.PATH = ''
-      const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
-      const summary = await summarizeFallbackChanges({ metadata: { trackedSkills: [], trackedMcpNames: [] } } as never, tarball)
-      assert.deepEqual(summary, {
-        skillsAdded: ['kept', 'brand-new'],
-        skillsRemoved: [],
-        skillsUpdated: 0,
-        mcpAdded: ['nsolid-console', 'brand-new-mcp'],
-        mcpRemoved: [],
-        mcpUpdated: 0,
-      })
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH
-      else process.env.PATH = previousPath
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
+  for (const hostile of [true, false]) {
+    it(hostile ? 'never executes a PATH-resolved tar' : 'summarizes without any tar on PATH', async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-changes-'))
+      const previousPath = process.env.PATH
+      try {
+        const hostileBin = path.join(dir, 'hostile-bin')
+        if (hostile) {
+          mkdirSync(hostileBin)
+          const fakeTar = path.join(hostileBin, 'tar')
+          writeFileSync(fakeTar, '#!/bin/sh\nprintf "TAMPERED"\n')
+          chmodSync(fakeTar, 0o755)
+        }
+        const tarball = writeTarball(dir, 'artifact.tgz', gzipSync(Buffer.concat([
+          tarEntry('package/bundle.json', Buffer.from(JSON.stringify(sampleBundle())), '0'),
+          Buffer.alloc(1024),
+        ])))
+        process.env.PATH = hostile ? hostileBin : ''
+        const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')
+        const summary = await summarizeFallbackChanges({ metadata: { trackedSkills: [], trackedMcpNames: [] } } as never, tarball)
+        assert.deepEqual(summary, {
+          skillsAdded: ['kept', 'brand-new'],
+          skillsRemoved: [],
+          skillsUpdated: 0,
+          mcpAdded: ['nsolid-console', 'brand-new-mcp'],
+          mcpRemoved: [],
+          mcpUpdated: 0,
+        }, 'the summary must come from the archive bytes, never from a PATH lookup')
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH
+        else process.env.PATH = previousPath
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
 
   it('never blocks planning when the tarball cannot be read', async () => {
     const { summarizeFallbackChanges } = await import('../../../src/update/strategies/fallback.js')

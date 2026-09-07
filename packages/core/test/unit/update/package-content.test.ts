@@ -1,3 +1,4 @@
+import { tarEntry } from '../../helpers/tar.js'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -5,20 +6,6 @@ import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { installedPackageMatchesTarball } from '../../../src/update/package-content.js'
-
-/** Minimal ustar builder: one header (512 bytes) plus body padded to 512. */
-function tarEntry (name: string, body: Buffer | undefined, type: string): Buffer {
-  const header = Buffer.alloc(512)
-  header.write(name, 0, 'utf8')
-  const size = body ? body.length : 0
-  header.write(size.toString(8).padStart(11, '0') + ' ', 124, 'ascii')
-  header[156] = type.charCodeAt(0)
-  header.write('ustar', 257, 'ascii')
-  header.write('00', 263, 'ascii')
-  const blocks = Math.ceil(size / 512)
-  const padded = Buffer.concat([body ?? Buffer.alloc(0), Buffer.alloc(blocks * 512 - size)])
-  return Buffer.concat([header, padded])
-}
 
 describe('installedPackageMatchesTarball', () => {
   let directory: string

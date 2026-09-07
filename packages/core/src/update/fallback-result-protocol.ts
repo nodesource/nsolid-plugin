@@ -121,15 +121,6 @@ export function childResultArgs (resultPath: string): string[] {
   return ['--result', resultPath]
 }
 
-/** Extract the result path the parent planned into its own command args, or undefined. */
-export function plannedChildResultPath (args: readonly string[] | undefined): string | undefined {
-  if (!args) return undefined
-  const index = args.indexOf('--result')
-  if (index < 0) return undefined
-  const value = args[index + 1]
-  return typeof value === 'string' && value.length > 0 ? value : undefined
-}
-
 /** Structured codes must be safe identifier shapes; anything else is never published or accepted. */
 export function isValidChildResultCode (code: unknown): code is string {
   return typeof code === 'string' && code.length > 0 && code.length <= 64 && /^[A-Z][A-Z0-9_]*$/.test(code)

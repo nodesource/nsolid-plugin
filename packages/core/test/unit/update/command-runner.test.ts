@@ -3,13 +3,57 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { deriveShimEntrypoint, resolveExecutableIdentity, runCommand, windowsTaskkillPath } from '../../../src/update/command-runner.js'
+import { deriveShimEntrypoint, isCommandSuccessful, isTreeTerminationUnconfirmed, resolveExecutableIdentity, runCommand, windowsTaskkillPath } from '../../../src/update/command-runner.js'
+import type { CommandResult } from '../../../src/update/types.js'
 
 describe('update command runner', () => {
+  for (const [exitCode, stripToken] of [[0, false], [0, true], [1, false], [1, true]] as const) {
+    it(`accounts for reparented descendants after early exit (code: ${exitCode}, strip token: ${stripToken})`, { skip: process.platform !== 'linux' }, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-early-exit-'))
+      const pidFile = path.join(root, 'descendant.pid')
+      const trigger = path.join(root, 'write-now')
+      const output = path.join(root, 'late.txt')
+      const worker = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{if(fs.existsSync(${JSON.stringify(trigger)}))fs.writeFileSync(${JSON.stringify(output)},'late')},10)`
+      // The parent waits for the final descendant's readiness, then exits.
+      // No timeout or fixed startup delay is needed to produce reparenting.
+      const parent = `const fs=require('node:fs');const env={...process.env};${stripToken ? 'delete env.NSOLID_COMMAND_TREE_TOKEN;' : ''}require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(worker)}],{detached:true,stdio:'ignore',env}).unref();const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(pidFile)})){clearInterval(timer);process.exit(${exitCode})}},10)`
+      let pid: number | undefined
+      try {
+        const result = await runCommand({ executable: process.execPath, args: ['-e', parent], timeoutMs: 10_000 })
+        pid = Number(readFileSync(pidFile, 'utf8'))
+        assert.equal(result.timedOut, false)
+        assert.equal(result.exitCode, exitCode)
+        if (stripToken) {
+          assert.equal(result.treeTerminated, false)
+          assert.equal(result.spawnErrorCode, 'TREE_TERMINATION_UNCONFIRMED')
+          assert.doesNotThrow(() => process.kill(pid!, 0), 'unattributed processes must not be killed')
+        } else {
+          assert.equal(result.treeTerminated, true)
+          writeFileSync(trigger, 'go')
+          await new Promise((resolve) => setTimeout(resolve, 100))
+          assert.equal(existsSync(output), false, 'no descendant may write after termination was confirmed')
+        }
+      } finally {
+        if (pid !== undefined) { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } }
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+
   it('resolves taskkill from an absolute local System32 path', () => {
     assert.equal(windowsTaskkillPath('D:\\Windows'), 'D:\\Windows\\System32\\taskkill.exe')
     assert.equal(windowsTaskkillPath('\\\\attacker\\share'), 'C:\\Windows\\System32\\taskkill.exe')
     assert.equal(path.win32.isAbsolute(windowsTaskkillPath()), true)
+  })
+
+  it('requires explicit tree termination evidence at runtime', () => {
+    for (const exitCode of [0, 1]) {
+      // Deliberately bypass the required TypeScript field to model a legacy
+      // injected runner returning an incomplete result at runtime.
+      const result = { exitCode, stdout: '', stderr: '', timedOut: false } as unknown as CommandResult
+      assert.equal(isTreeTerminationUnconfirmed(result), true, `exit ${exitCode} must remain unconfirmed`)
+      assert.equal(isCommandSuccessful(result), false, `exit ${exitCode} must not authorize success`)
+    }
   })
 
   it('preserves ENOENT as a structured missing-executable error', async () => {
@@ -55,21 +99,32 @@ describe('update command runner', () => {
   it('terminates a detached descendant that was reparented before timeout', { skip: process.platform !== 'linux' }, async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-reparented-descendant-'))
     const pidFile = path.join(root, 'descendant.pid')
+    const intermediateExit = path.join(root, 'intermediate-exit.json')
     const lateWrite = path.join(root, 'late-write.txt')
-    const descendantCode = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setTimeout(()=>fs.writeFileSync(${JSON.stringify(lateWrite)},'late'),500);setInterval(()=>{},10000)`
+    const timeoutMs = 1000
+    const descendantCode = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setTimeout(()=>fs.writeFileSync(${JSON.stringify(lateWrite)},'late'),2000);setInterval(()=>{},10000)`
     const intermediateCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(descendantCode)}],{detached:true,stdio:'ignore'}).unref()`
-    const parentCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(intermediateCode)}],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},10000)`
+    // Only the final descendant escapes the group. Detaching the short-lived
+    // intermediate too introduces a separate /proc evidence-loss scenario
+    // during its startup/exit; the token-stripped escape test covers refusal.
+    const parentCode = `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(intermediateCode)}],{stdio:'ignore'});child.once('exit',(code,signal)=>require('node:fs').writeFileSync(${JSON.stringify(intermediateExit)},JSON.stringify({code,signal,at:Date.now()})));child.unref();setInterval(()=>{},10000)`
     let descendantPid: number | undefined
     try {
-      const result = await runCommand({ executable: process.execPath, args: ['-e', parentCode], timeoutMs: 200 })
+      const startedAt = Date.now()
+      const result = await runCommand({ executable: process.execPath, args: ['-e', parentCode], timeoutMs })
       await new Promise((resolve) => setTimeout(resolve, 700))
       descendantPid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : undefined
 
+      assert.ok(descendantPid !== undefined, 'the descendant must have started; a missing fixture cannot prove termination')
+      const intermediate = JSON.parse(readFileSync(intermediateExit, 'utf8')) as { code: number | null; signal: string | null; at: number }
+      assert.equal(intermediate.code, 0)
+      assert.equal(intermediate.signal, null)
+      assert.ok(intermediate.at < startedAt + timeoutMs, 'the intermediate must exit naturally and reparent its descendant before timeout')
       assert.equal(result.timedOut, true)
       assert.equal(result.treeTerminated, true)
       assert.equal(existsSync(lateWrite), false)
       const terminatedPid = descendantPid
-      if (terminatedPid !== undefined) assert.throws(() => process.kill(terminatedPid, 0))
+      assert.throws(() => process.kill(terminatedPid, 0), 'the descendant must be gone, so it cannot write later')
     } finally {
       if (descendantPid !== undefined) {
         try { process.kill(descendantPid, 'SIGKILL') } catch { /* already terminated */ }

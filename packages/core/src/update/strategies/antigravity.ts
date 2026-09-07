@@ -1,7 +1,7 @@
 import path from 'node:path'
 import type { UpdateContext, UpdateInstallation, UpdatePlanItem, UpdateResult, UpdateStrategy } from '../types.js'
-import { DEFAULT_COMMAND_TIMEOUT_MS, resolveExecutableIdentity } from '../command-runner.js'
-import { managerArgsForIdentity } from '../package-manager.js'
+import { resolveExecutableIdentity } from '../command-runner.js'
+import { transactionCommand } from '../transaction-commands.js'
 import { executeAntigravityTransaction } from '../antigravity-transaction.js'
 import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
 
@@ -16,29 +16,28 @@ export const antigravityStrategy: UpdateStrategy = {
     const pinnedSource = installation.artifact?.kind === 'git' && installation.artifact.commit
       ? `${source.url}#${installation.artifact.commit}`
       : source.url
+    const manualCommands = ['agy plugin uninstall nsolid-plugin', `agy plugin install ${pinnedSource}`]
     const identity = resolveExecutableIdentity('agy')
     if (identity.kind === 'unsupported') {
       return {
         ...planItem(installation, [], [], undefined, { code: 'UNSAFE_HARNESS_LAUNCHER', message: 'Antigravity launcher cannot be verified as a safe executable identity' }),
-        manualCommands: ['agy plugin uninstall nsolid-plugin', `agy plugin install ${pinnedSource}`],
+        manualCommands,
       }
     }
-    const uninstall = managerArgsForIdentity(identity, ['plugin', 'uninstall', 'nsolid-plugin'])
-    const install = managerArgsForIdentity(identity, ['plugin', 'install', pinnedSource])
     return {
       ...planItem(
         installation,
         [
           { kind: 'filesystem', description: 'Back up the staged plugin and matching import manifest', operation: 'backup', paths },
-          { kind: 'command', description: 'Uninstall the existing Antigravity N|Solid plugin', command: { executable: uninstall.executable, executableIdentity: identity, args: uninstall.args, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS } },
-          { kind: 'command', description: 'Install the fixed NodeSource GitHub plugin root at the planned commit', command: { executable: install.executable, executableIdentity: identity, args: install.args, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS } },
+          transactionCommand(identity, ['plugin', 'uninstall', 'nsolid-plugin'], 'Uninstall the existing Antigravity N|Solid plugin'),
+          transactionCommand(identity, ['plugin', 'install', pinnedSource], 'Install the fixed NodeSource GitHub plugin root at the planned commit'),
           { kind: 'validation', description: 'Validate the staged plugin and matching import manifest', checks: ['plugin.json', 'bundle.json', 'canonical skills', 'nsolid-plugin import entry'] },
           { kind: 'filesystem', description: 'Remove the successful Antigravity backup', operation: 'cleanup', paths },
         ],
         [{ kind: 'filesystem', description: 'Restore the staged plugin and matching import manifest', operation: 'restore', paths }],
         'Restart Antigravity to load the updated plugin'
       ),
-      manualCommands: ['agy plugin uninstall nsolid-plugin', `agy plugin install ${pinnedSource}`],
+      manualCommands,
     }
   },
 

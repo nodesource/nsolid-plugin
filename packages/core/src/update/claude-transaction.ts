@@ -3,8 +3,9 @@ import { readFile, rm } from 'node:fs/promises'
 import { closeSync, existsSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, statSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { isSameOrContained } from '../utils/path.js'
 import type { CommandRunner, CommandSpec, ResolvedArtifactIdentity, UpdateError } from './types.js'
-import { isCommandSuccessful } from './command-runner.js'
+import { isTreeTerminationUnconfirmed, isCommandSuccessful } from './command-runner.js'
 import { readClaudePluginScope } from './claude-record.js'
 import { nativePayloadDigest } from './native-evidence.js'
 import { copyOwnedPath, createSiblingBackupPath, ownedFileDigest, ownedPathKind, ownedTreeDigest, removeOwnedPath, type OwnedPathKind, type SiblingBackupPath } from './owned-fs.js'
@@ -198,7 +199,7 @@ export async function executeClaudeTransaction (
         // Never restore while descendants may still be writing the same bytes:
         // defer rollback and keep the backup recoverable, as the Codex and
         // Antigravity transactions do.
-        if (result.timedOut && result.treeTerminated !== true) {
+        if (isTreeTerminationUnconfirmed(result)) {
           keepBackup()
           return {
             success: false,
@@ -206,7 +207,7 @@ export async function executeClaudeTransaction (
             recoveryPath: recoveryRoot,
             error: {
               code: 'CLAUDE_TREE_TERMINATION_UNCONFIRMED',
-              message: `Claude timed out and descendant termination could not be confirmed; the pre-update recovery bundle was preserved at ${recoveryRoot}`,
+              message: `Claude command ended and descendant termination could not be confirmed; the pre-update recovery bundle was preserved at ${recoveryRoot}`,
             },
           }
         }
@@ -432,10 +433,6 @@ type ClaudePayloadRootResolution =
   | { readonly status: 'rejected', readonly reason: string }
 
 /** Lexical containment mirroring codex-transaction.ts; callers add the kind and ancestor proofs. */
-function isSameOrContained (candidate: string, parent: string): boolean {
-  const relative = path.relative(path.resolve(parent), path.resolve(candidate))
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
-}
 
 /** Every ancestor from the root's parent up to (not including) the cache root must be a real non-link directory. */
 function claudeAncestorChainOwned (root: string, approvedCacheRoot: string): boolean {
@@ -505,7 +502,7 @@ function claudeApprovedPayloadRoot (root: string, approvedCacheRoot: string, plu
   return undefined
 }
 
-function resolveClaudePayloadRoot (
+export function resolveClaudePayloadRoot (
   configPath: string | undefined,
   pluginId: string,
   scope: string,
@@ -559,17 +556,6 @@ async function claudeRemovalRootAuthorized (root: string, approvedCacheRoot: str
   const kind = await ownedPathKind(resolved)
   if (kind !== 'missing' && kind !== 'directory') return false
   return claudeAncestorChainOwned(resolved, cacheResolved)
-}
-
-/** Resolve the single installed payload directory for a scoped Claude plugin. */
-export function installedClaudePayloadRoot (
-  configPath: string | undefined,
-  pluginId: string,
-  scope: string,
-  expectedVersion?: string
-): string | undefined {
-  const resolution = resolveClaudePayloadRoot(configPath, pluginId, scope, expectedVersion)
-  return resolution.status === 'ok' ? resolution.root : undefined
 }
 
 /** @internal Exported for unit tests only. */

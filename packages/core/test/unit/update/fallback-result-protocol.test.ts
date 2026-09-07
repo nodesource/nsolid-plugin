@@ -10,7 +10,6 @@ import {
   childResultArgs,
   fallbackChildResultMessage,
   isValidChildResultCode,
-  plannedChildResultPath,
   readValidatedFallbackChildResult,
   writeFallbackChildResult,
   type ContainmentDirectoryIdentity,
@@ -47,13 +46,6 @@ describe('fallback child result protocol', () => {
     assert.deepEqual(childResultArgs(resultPath()), ['--result', resultPath()])
   })
 
-  it('extracts the planned result path from parent command args', () => {
-    const args = ['exec', '--yes', '--package=x.tgz', '--', 'nsolid-plugin-refresh-owned', '--transaction', '/tmp/t.json', ...childResultArgs(resultPath())]
-    assert.equal(plannedChildResultPath(args), resultPath())
-    assert.equal(plannedChildResultPath(['exec']), undefined)
-    assert.equal(plannedChildResultPath(['--result']), undefined)
-  })
-
   it('accepts only safe structured error code shapes', () => {
     assert.equal(isValidChildResultCode('MCP_RECONCILIATION_REQUIRED'), true)
     assert.equal(isValidChildResultCode('FALLBACK_MCP_DRIFT'), true)
@@ -65,7 +57,7 @@ describe('fallback child result protocol', () => {
     assert.equal(isValidChildResultCode(42), false)
   })
 
-  it('writes the envelope atomically with mode 0600 and no leftovers', async () => {
+  it('round-trips the envelope with atomic publication, mode 0600, and no leftovers', async () => {
     const target = resultPath()
     await writeFallbackChildResult(target, 'nonce-1', 'MCP_RECONCILIATION_REQUIRED', { attempted: false })
     const stat = statSync(target)
@@ -77,21 +69,16 @@ describe('fallback child result protocol', () => {
     assert.deepEqual(envelope.rollback, { attempted: false })
     const leftovers = readdirSync(directory).filter((name) => name !== 'result.json')
     assert.deepEqual(leftovers, [], 'a temporary sibling must never survive the atomic write')
+    const validated = await readValidatedFallbackChildResult(target, 'nonce-1', { containmentDirectories: [containment()] })
+    assert.ok(validated)
+    assert.equal(validated.code, 'MCP_RECONCILIATION_REQUIRED')
+    assert.deepEqual(validated.rollback, { attempted: false })
   })
 
   it('refuses to publish a code that is not a safe structured identifier', async () => {
     const target = resultPath()
     await writeFallbackChildResult(target, 'nonce-1', 'arbitrary text with secrets', { attempted: false })
     assert.throws(() => statSync(target), 'no envelope may be written for an unsafe code')
-  })
-
-  it('round-trips a valid envelope through the parent-side validator', async () => {
-    const target = resultPath()
-    await writeFallbackChildResult(target, 'nonce-1', 'MCP_RECONCILIATION_REQUIRED', { attempted: false })
-    const envelope = await readValidatedFallbackChildResult(target, 'nonce-1', { containmentDirectories: [containment()] })
-    assert.ok(envelope)
-    assert.equal(envelope.code, 'MCP_RECONCILIATION_REQUIRED')
-    assert.deepEqual(envelope.rollback, { attempted: false })
   })
 
   it('publishes an envelope exactly at the byte limit and refuses one byte more', async () => {

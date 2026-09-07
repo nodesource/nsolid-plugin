@@ -380,13 +380,12 @@ export interface CommandResult {
   stderr: string
   timedOut: boolean
   /**
-   * When a timeout occurred, whether the whole descendant process tree was
-   * terminated before the caller proceeds to rollback. `true` for a clean
-   * non-timeout run. Callers must treat a timed-out run with
-   * `treeTerminated === false` as requiring deferral/recovery, never restoring
-   * concurrently with a possibly-live child.
+   * Whether the whole descendant tree is confirmed gone, including after
+   * early root exit. False always requires deferral/recovery, even with exit
+   * code zero. Every runner must provide explicit evidence; true is the only
+   * value that proves whole-tree termination.
    */
-  treeTerminated?: boolean
+  treeTerminated: boolean
 }
 
 export interface CommandRunner {

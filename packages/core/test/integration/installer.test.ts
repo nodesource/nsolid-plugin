@@ -740,8 +740,8 @@ describe('install()', () => {
     // A subsequent refresh of the same bundle preserves the user-authored
     // name and leaves the entry bytes unchanged.
     const bytesBeforeRefresh = readFileSync(claudeConfigPath, 'utf8')
-    const { refreshOwnedInstallation } = await import('../../src/update/fallback-transaction.js')
-    const refreshed = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource })
+    const { refreshWithParent } = await import('../helpers/fallback-refresh.js')
+    const refreshed = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource })
     assert.strictEqual(refreshed.success, true, JSON.stringify(refreshed))
     assert.strictEqual(readFileSync(claudeConfigPath, 'utf8'), bytesBeforeRefresh)
     const afterRefresh = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
@@ -776,9 +776,9 @@ describe('install()', () => {
     const installed = readJsonFile<{ mcpServers: Record<string, Record<string, unknown>> }>(claudeConfigPath)!
     assert.strictEqual(Object.hasOwn(installed.mcpServers['nsolid-console'], 'name'), false, 'the install writer never renders a name field inside the entry')
 
-    const { refreshOwnedInstallation } = await import('../../src/update/fallback-transaction.js')
+    const { refreshWithParent } = await import('../helpers/fallback-refresh.js')
     const bytesBeforeRefresh = readFileSync(claudeConfigPath, 'utf8')
-    const refreshed = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource })
+    const refreshed = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource })
     assert.strictEqual(refreshed.success, true, JSON.stringify(refreshed))
 
     // The refresh reconciliation values must not carry the server's own name

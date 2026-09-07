@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { detectJsonMcpKey, editMcpJsonBytes, McpEditError, readMcpNodeValue } from '../../../src/update/mcp-edit.js'
+import { detectJsonMcpKey, editMcpJsonBytes, McpEditError } from '../../../src/update/mcp-edit.js'
 import { harnessMcpKey, mcpFieldDigestsFromBytes, readMcpFieldDigests, readMcpServerRecord, valueDigest } from '../../../src/update/mcp-lookup.js'
 import { parseJsonc } from '../../../src/utils/config.js'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -190,12 +190,10 @@ describe('MCP byte-preserving AST edits', () => {
     assert.deepEqual(JSON.parse(created), { mcpServers: { 'nsolid-console': { url: 'https://fresh' } } })
   })
 
-  it('reads node values without mutating the document', () => {
+  it('preserves exact document bytes when owned primitive fields already match', () => {
     const raw = '{\n  "mcpServers": {"s": {"url": "https://x", "n": 3, "b": true, "z": null}}\n}\n'
-    assert.equal(readMcpNodeValue(raw, ['mcpServers', 's', 'url']), 'https://x')
-    assert.equal(readMcpNodeValue(raw, ['mcpServers', 's', 'n']), 3)
-    assert.equal(readMcpNodeValue(raw, ['mcpServers', 's', 'b']), true)
-    assert.equal(readMcpNodeValue(raw, ['mcpServers', 's', 'z']), null)
-    assert.equal(readMcpNodeValue(raw, ['mcpServers', 's', 'missing']), undefined)
+    const fields = { url: 'https://x', n: 3, b: true, z: null }
+    const result = editMcpJsonBytes(raw, { setFields: Object.entries(fields).map(([field, value]) => ({ server: 's', field, value })) })
+    assert.equal(result, raw)
   })
 })

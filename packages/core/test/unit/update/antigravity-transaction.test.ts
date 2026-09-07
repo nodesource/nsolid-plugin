@@ -224,7 +224,7 @@ describe('Antigravity staged plugin validation', () => {
         const result = await executeAntigravityTransaction(item, {
           run: async () => {
             commands++
-            return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         })
 
@@ -255,7 +255,7 @@ describe('Antigravity staged plugin validation', () => {
             commands++
             // The agy replacement corrupts the staged plugin: validation will fail.
             rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
-            return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         }, { restoreState: async () => false })
 
@@ -283,7 +283,7 @@ describe('Antigravity staged plugin validation', () => {
         const result = await executeAntigravityTransaction(item, {
           run: async () => {
             rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
-            return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         })
 
@@ -326,7 +326,7 @@ describe('Antigravity staged plugin validation', () => {
             rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
             const { rootBackup } = findBackupPath(fixture)
             writeFileSync(path.join(rootBackup, 'plugin.json'), '{"name":"tampered"}')
-            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         })
 
@@ -351,7 +351,7 @@ describe('Antigravity staged plugin validation', () => {
             rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
             const { manifestBackup } = findBackupPath(fixture)
             writeFileSync(manifestBackup, '{"imports":{}}')
-            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         })
 
@@ -377,7 +377,7 @@ describe('Antigravity staged plugin validation', () => {
         const result = await executeAntigravityTransaction(failingSyncItem(), {
           run: async () => {
             rmSync(path.join(fixture.pluginRoot, 'plugin.json'))
-            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         })
 
@@ -398,7 +398,7 @@ describe('Antigravity staged plugin validation', () => {
         const result = await executeAntigravityTransaction(failingSyncItem(), {
           run: async () => {
             writeFileSync(path.join(fixture.pluginRoot, 'skills/example/SKILL.md'), '# substituted\n')
-            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
           },
         })
 
@@ -424,7 +424,7 @@ describe('Antigravity staged plugin validation', () => {
       // `~/.gemini/config/plugins` is deliberately absent: the sibling backup
       // parent is missing, which used to escape as a rejected ENOENT promise.
       const result = await executeAntigravityTransaction(agyItem(), {
-        run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+        run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }),
       })
 
       assert.equal(result.success, false)
@@ -462,7 +462,7 @@ describe('Antigravity staged plugin validation', () => {
       const result = await executeAntigravityTransaction(item, {
         run: async () => {
           commands++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       })
 

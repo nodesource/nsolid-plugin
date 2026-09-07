@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
+import { readTarEntries } from './tar-format.js'
 
 type PayloadEntry =
   | { kind: 'file'; content: Buffer }
@@ -212,57 +213,37 @@ function captureArchivePayload (compressedArchive: Buffer, scope: ArchivePayload
     const payloadPrefix = payloadPath ? `${payloadPath}/` : ''
     const archive = gunzipSync(compressedArchive, { maxOutputLength: MAX_UNPACKED_ARCHIVE_BYTES })
     const entries = new Map<string, PayloadEntry>()
-    let offset = 0
-    let longPath: string | undefined
-    let paxPath: string | undefined
     let archiveRoot: string | undefined
     let totalBytes = 0
-    while (offset + 512 <= archive.length) {
-      const header = archive.subarray(offset, offset + 512)
-      if (header.every((value) => value === 0)) break
-      const size = tarNumber(header.subarray(124, 136))
-      const bodyStart = offset + 512
-      const bodyEnd = bodyStart + size
-      if (!Number.isSafeInteger(size) || size < 0 || bodyEnd > archive.length) throw new Error('invalid tar size')
-      const body = archive.subarray(bodyStart, bodyEnd)
-      const type = String.fromCharCode(header[156] || 48)
-      const headerPath = [tarString(header.subarray(345, 500)), tarString(header.subarray(0, 100))].filter(Boolean).join('/')
-
-      if (type === 'L') longPath = tarString(body)
-      else if (type === 'x') paxPath = parsePaxPath(body)
-      else if (type !== 'g') {
-        const entryPath = normalizeArchivePath(paxPath ?? longPath ?? headerPath)
-        paxPath = undefined
-        longPath = undefined
-        if (entryPath) {
-          const segments = entryPath.split('/')
-          archiveRoot ??= segments[0]
-          if (segments[0] !== archiveRoot) throw new Error('multiple archive roots')
-          const repositoryRelative = segments.slice(1).join('/').replace(/\/$/, '')
-          if (repositoryRelative && !repositoryRelative.startsWith('.git/') && (!payloadPrefix || repositoryRelative.startsWith(payloadPrefix))) {
-            const relative = payloadPrefix ? repositoryRelative.slice(payloadPrefix.length) : repositoryRelative
-            if (relative) {
-              assertSafeRelativePath(relative)
-              if (type === '0' || type === '\0') {
-                if (entries.has(relative)) throw new Error('duplicate tar entry')
-                totalBytes += body.length
-                entries.set(relative, { kind: 'file', content: Buffer.from(body) })
-              } else if (type === '2') {
-                if (entries.has(relative)) throw new Error('duplicate tar entry')
-                entries.set(relative, { kind: 'symlink', target: tarString(header.subarray(157, 257)) })
-              } else if (type === '5') {
-                if (!relative.includes('/') && RESERVED_NORMALIZATION_ROOT_NAMES.has(relative)) {
-                  const marker = `${relative}/`
-                  if (entries.has(marker)) throw new Error('duplicate tar entry')
-                  entries.set(marker, { kind: 'directory' })
-                }
-              } else throw new Error('unsupported tar entry')
-            }
+    for (const { path: rawPath, type, body, linkTarget } of readTarEntries(archive)) {
+      const entryPath = normalizeArchivePath(rawPath)
+      if (entryPath) {
+        const segments = entryPath.split('/')
+        archiveRoot ??= segments[0]
+        if (segments[0] !== archiveRoot) throw new Error('multiple archive roots')
+        const repositoryRelative = segments.slice(1).join('/').replace(/\/$/, '')
+        if (repositoryRelative && !repositoryRelative.startsWith('.git/') && (!payloadPrefix || repositoryRelative.startsWith(payloadPrefix))) {
+          const relative = payloadPrefix ? repositoryRelative.slice(payloadPrefix.length) : repositoryRelative
+          if (relative) {
+            assertSafeRelativePath(relative)
+            if (type === '0' || type === '\0') {
+              if (entries.has(relative)) throw new Error('duplicate tar entry')
+              totalBytes += body.length
+              entries.set(relative, { kind: 'file', content: Buffer.from(body) })
+            } else if (type === '2') {
+              if (entries.has(relative)) throw new Error('duplicate tar entry')
+              entries.set(relative, { kind: 'symlink', target: linkTarget })
+            } else if (type === '5') {
+              if (!relative.includes('/') && RESERVED_NORMALIZATION_ROOT_NAMES.has(relative)) {
+                const marker = `${relative}/`
+                if (entries.has(marker)) throw new Error('duplicate tar entry')
+                entries.set(marker, { kind: 'directory' })
+              }
+            } else throw new Error('unsupported tar entry')
           }
         }
       }
       if (entries.size > MAX_PAYLOAD_FILES || totalBytes > MAX_PAYLOAD_BYTES) throw new Error('payload exceeds limits')
-      offset = bodyStart + Math.ceil(size / 512) * 512
     }
     if (manifestPath && entries.get(manifestPath)?.kind !== 'file') return undefined
     return entries
@@ -318,38 +299,4 @@ function assertSafeRelativePath (value: string): void {
   if (!value || path.posix.isAbsolute(value) || value.split('/').some((segment) => !segment || segment === '.' || segment === '..')) {
     throw new Error('unsafe payload path')
   }
-}
-
-function parsePaxPath (body: Buffer): string | undefined {
-  let offset = 0
-  let result: string | undefined
-  while (offset < body.length) {
-    const space = body.indexOf(0x20, offset)
-    if (space < 0) throw new Error('invalid pax record')
-    const length = Number(body.subarray(offset, space).toString('ascii'))
-    if (!Number.isSafeInteger(length) || length <= 0 || offset + length > body.length) throw new Error('invalid pax length')
-    const record = body.subarray(space + 1, offset + length - 1).toString('utf8')
-    const equals = record.indexOf('=')
-    if (equals > 0 && record.slice(0, equals) === 'path') result = record.slice(equals + 1)
-    offset += length
-  }
-  return result
-}
-
-function tarNumber (value: Buffer): number {
-  if ((value[0] ?? 0) & 0x80) {
-    let result = BigInt((value[0] ?? 0) & 0x7f)
-    for (const byte of value.subarray(1)) result = (result << 8n) | BigInt(byte)
-    const number = Number(result)
-    if (!Number.isSafeInteger(number)) throw new Error('tar number overflow')
-    return number
-  }
-  const parsed = Number.parseInt(tarString(value).trim() || '0', 8)
-  if (!Number.isSafeInteger(parsed)) throw new Error('invalid tar number')
-  return parsed
-}
-
-function tarString (value: Buffer): string {
-  const end = value.indexOf(0)
-  return value.subarray(0, end < 0 ? value.length : end).toString('utf8').replace(/\n$/, '')
 }

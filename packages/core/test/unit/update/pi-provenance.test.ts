@@ -139,7 +139,7 @@ function updateEvidence (lockPath: string, version: string, resolved: string, pa
 
 async function executeFixture (configure: (fixture: ReturnType<typeof createFixture>) => void | Promise<void>, fetchImpl?: typeof fetch) {
   const current = createFixture()
-  const item = await piStrategy.plan(current.item, { options: { fetchImpl }, commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) } })
+  const item = await piStrategy.plan(current.item, { options: { fetchImpl }, commandRunner: { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) } })
   return piStrategy.execute(item, {
     options: { fetchImpl },
     commandRunner: {
@@ -147,7 +147,7 @@ async function executeFixture (configure: (fixture: ReturnType<typeof createFixt
         assert.equal(command.env?.npm_config_registry, REGISTRY)
         assert.equal(command.env?.NPM_CONFIG_REGISTRY, REGISTRY)
         await configure(current)
-        return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
       },
     },
   })

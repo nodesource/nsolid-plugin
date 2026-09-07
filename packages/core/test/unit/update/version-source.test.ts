@@ -1,3 +1,4 @@
+import { makeTar } from '../../helpers/tar.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -260,34 +261,6 @@ describe('archive download limit', () => {
 
 describe('planned payload identities', () => {
   const COMMIT = 'bc9c87e6ce6ca73756dc20fdd41a3219bcd5b60c'
-
-  function writeOctal (target: Buffer, offset: number, length: number, value: number): void {
-    target.write(value.toString(8).padStart(length - 1, '0') + '\0', offset, length, 'ascii')
-  }
-
-  function makeTar (files: Map<string, Buffer>): Buffer {
-    const output: Buffer[] = []
-    for (const [relative, content] of files) {
-      const header = Buffer.alloc(512)
-      header.write(`repository-commit/${relative}`, 0, 100, 'utf8')
-      writeOctal(header, 100, 8, 0o644)
-      writeOctal(header, 108, 8, 0)
-      writeOctal(header, 116, 8, 0)
-      writeOctal(header, 124, 12, content.length)
-      writeOctal(header, 136, 12, 0)
-      header.fill(0x20, 148, 156)
-      header[156] = '0'.charCodeAt(0)
-      header.write('ustar\0', 257, 6, 'ascii')
-      header.write('00', 263, 2, 'ascii')
-      const checksum = header.reduce((sum, byte) => sum + byte, 0)
-      header.write(checksum.toString(8).padStart(6, '0'), 148, 6, 'ascii')
-      header[154] = 0
-      header[155] = 0x20
-      output.push(header, content, Buffer.alloc((512 - (content.length % 512)) % 512))
-    }
-    output.push(Buffer.alloc(1024))
-    return Buffer.concat(output)
-  }
 
   function cleanPayloadFiles (): Map<string, Buffer> {
     return new Map([

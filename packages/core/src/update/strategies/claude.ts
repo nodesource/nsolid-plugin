@@ -1,6 +1,6 @@
 import type { UpdateContext, UpdateInstallation, UpdatePlanItem, UpdateResult, UpdateStrategy } from '../types.js'
-import { DEFAULT_COMMAND_TIMEOUT_MS, resolveExecutableIdentity } from '../command-runner.js'
-import { managerArgsForIdentity } from '../package-manager.js'
+import { resolveExecutableIdentity } from '../command-runner.js'
+import { transactionCommand } from '../transaction-commands.js'
 import { nativeExecutionGuard } from '../native-evidence.js'
 import { executeClaudeTransaction } from '../claude-transaction.js'
 import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
@@ -28,31 +28,11 @@ export const claudeStrategy: UpdateStrategy = {
         ],
       }
     }
-    const refresh = managerArgsForIdentity(identity, ['plugin', 'marketplace', 'update', source.marketplace])
-    const update = managerArgsForIdentity(identity, ['plugin', 'update', source.pluginId, '--scope', source.scope])
     return planItem(
       installation,
       [
-        {
-          kind: 'command',
-          description: `Refresh the detected ${source.marketplace} Claude marketplace`,
-          command: {
-            executable: refresh.executable,
-            executableIdentity: identity,
-            args: refresh.args,
-            timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
-          },
-        },
-        {
-          kind: 'command',
-          description: `Update ${source.pluginId} in its detected ${source.scope} scope`,
-          command: {
-            executable: update.executable,
-            executableIdentity: identity,
-            args: update.args,
-            timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
-          },
-        },
+        transactionCommand(identity, ['plugin', 'marketplace', 'update', source.marketplace], `Refresh the detected ${source.marketplace} Claude marketplace`),
+        transactionCommand(identity, ['plugin', 'update', source.pluginId, '--scope', source.scope], `Update ${source.pluginId} in its detected ${source.scope} scope`),
       ],
       [],
       '/reload-plugins or restart Claude Code'

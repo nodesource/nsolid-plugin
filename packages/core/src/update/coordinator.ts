@@ -1,3 +1,4 @@
+import { HARNESS_VALUES } from '../types.js'
 import type { HarnessType } from '../types.js'
 import { rm } from 'node:fs/promises'
 import { createCommandRunner } from './command-runner.js'
@@ -9,6 +10,7 @@ import type {
   UpdateContext,
   UpdateInstallation,
   UpdateOptions,
+  UpdateOwnership,
   UpdatePlan,
   UpdatePlanItem,
   UpdateResult,
@@ -16,16 +18,17 @@ import type {
   UpdateStatus,
   UpdateStrategy,
   UpdateSummary,
+  UpdateTarget,
   VersionLookupResult,
 } from './types.js'
 import { planItem, resultFromPlan } from './strategies/common.js'
-import { summarizeFallbackChanges, summarizeFallbackChangesFromBytes } from './strategies/fallback.js'
+import { fallbackStrategy, isValidMutableFallbackPlan, summarizeFallbackChanges, summarizeFallbackChangesFromBytes } from './strategies/fallback.js'
+import type { InternalUpdateExecutionOutcome, InternalUpdateExecutor, PlanResourceDisposition } from './strategies/execution.js'
 import { cliPackageStrategy } from './strategies/cli-package.js'
 import { claudeStrategy } from './strategies/claude.js'
 import { codexStrategy } from './strategies/codex.js'
 import { antigravityStrategy } from './strategies/antigravity.js'
 import { piStrategy } from './strategies/pi.js'
-import { fallbackStrategy } from './strategies/fallback.js'
 import { inspectFallbackJournal, recoverFallbackJournal } from './fallback-journal.js'
 import { getTrackingFilePath } from '../utils/path.js'
 import { cliExactVersionManualCommands } from './cli-guidance.js'
@@ -40,6 +43,15 @@ const STATUSES: readonly UpdateStatus[] = [
   'unsupported',
   'unknown',
   'failed',
+]
+
+const TARGETS: readonly UpdateTarget[] = ['cli', ...HARNESS_VALUES]
+const OWNERSHIPS: readonly UpdateOwnership[] = [
+  'global-package',
+  'native-plugin',
+  'package-owned',
+  'fallback',
+  'none',
 ]
 
 export async function planUpdates (options: UpdateOptions = {}): Promise<UpdatePlan> {
@@ -253,23 +265,44 @@ export async function executeUpdatePlan (plan: UpdatePlan, options: UpdateOption
 
   const results: UpdateResult[] = []
   for (const item of plan.items) {
-    let result: UpdateResult
+    let execution: InternalUpdateExecutionOutcome
+    let fallbackExecutionAttempted = false
     if (item.planningError) {
-      result = resultFromPlan(item, 'failed', { error: item.planningError })
+      execution = { result: resultFromPlan(item, 'failed', { error: item.planningError }), planResources: 'release' }
     } else if (item.requiresConfirmation && !approved) {
-      result = resultFromPlan(item, 'skipped', { error: { code: 'CONFIRMATION_REQUIRED', message: 'Update was not approved' } })
+      execution = {
+        result: resultFromPlan(item, 'skipped', { error: { code: 'CONFIRMATION_REQUIRED', message: 'Update was not approved' } }),
+        planResources: 'release',
+      }
     } else if (!item.requiresConfirmation) {
-      result = resultFromPlan(item, statusForPlan(item, false))
+      execution = { result: resultFromPlan(item, statusForPlan(item, false)), planResources: 'release' }
     } else {
-      try {
-        result = await strategyForPlan(item).execute(item, { options, commandRunner })
-      } catch {
-        await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
-        result = resultFromPlan(item, 'failed', { error: { code: 'UPDATE_EXECUTION_FAILED', message: 'Update strategy failed' } })
+      const strategy = strategyForPlan(item)
+      if (strategy === fallbackStrategy && !isValidMutableFallbackPlan(item)) {
+        execution = {
+          result: resultFromPlan(item, 'failed', { error: { code: 'INVALID_PLAN', message: 'Mutable fallback update plan must include a transaction and command' } }),
+          // The public seam rejected this plan before execution. No internal
+          // result exists that could authorize releasing its planned state.
+          planResources: 'preserve',
+        }
+      } else {
+        fallbackExecutionAttempted = strategy === fallbackStrategy
+        try {
+          execution = await executeStrategy(strategy, item, { options, commandRunner })
+        } catch {
+          // An unexpected fallback exception has no authenticated completion
+          // verdict. Preserve its plan state instead of deriving authorization
+          // from the public error code or message.
+          if (!fallbackExecutionAttempted) await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
+          execution = {
+            result: resultFromPlan(item, 'failed', { error: { code: 'UPDATE_EXECUTION_FAILED', message: 'Update strategy failed' } }),
+            planResources: fallbackExecutionAttempted ? 'preserve' : 'release',
+          }
+        }
       }
     }
-    if (!mustPreservePlanState(result)) await cleanupPlanState(item)
-    results.push(result)
+    if (execution.planResources === 'release') await cleanupPlanState(item)
+    results.push(execution.result)
   }
   return summarizeResults(false, results)
 }
@@ -334,6 +367,7 @@ function preservationExtras (item: Pick<UpdatePlanItem, 'preservedArtifacts' | '
   return extra
 }
 
+/** Release planning-owned artifact/manifest resources; journal artifacts stay with the journal API. */
 async function cleanupPlanState (item: UpdatePlanItem): Promise<void> {
   await cleanupNpmArtifact(item.artifact?.kind === 'npm' ? item.artifact : undefined)
   // Only directories recorded at planning time (created by this process) are
@@ -343,8 +377,56 @@ async function cleanupPlanState (item: UpdatePlanItem): Promise<void> {
   }
 }
 
+/**
+ * Run a strategy through its internal outcome seam when one exists. The
+ * fallback strategy is the only strategy that owns authenticated recovery
+ * artifacts today; a missing or malformed outcome therefore fails closed and
+ * preserves its planning resources.
+ */
+async function executeStrategy (
+  strategy: UpdateStrategy,
+  item: UpdatePlanItem,
+  context: UpdateContext
+): Promise<InternalUpdateExecutionOutcome> {
+  if (strategy === fallbackStrategy) {
+    const internal = (strategy as UpdateStrategy & Partial<InternalUpdateExecutor>).executeWithOutcome
+    if (typeof internal !== 'function') {
+      return { result: await strategy.execute(item, context), planResources: 'preserve' }
+    }
+    const candidate = await internal.call(strategy, item, context) as Partial<InternalUpdateExecutionOutcome>
+    const hasValidResult = isUpdateResult(candidate?.result)
+    const result = hasValidResult
+      ? candidate.result!
+      : resultFromPlan(item, 'failed', { error: { code: 'UPDATE_EXECUTION_FAILED', message: 'Update strategy returned an invalid execution outcome' } })
+    return {
+      result,
+      // A missing disposition, including an outcome from an older adapter,
+      // fails closed. A malformed result cannot authorize release either.
+      planResources: hasValidResult && candidate.planResources === 'release' ? 'release' : 'preserve',
+    }
+  }
+  const result = await strategy.execute(item, context)
+  return { result, planResources: legacyPlanResourceDisposition(result) }
+}
+
+function isUpdateResult (value: unknown): value is UpdateResult {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { installationId?: unknown; target?: unknown; ownership?: unknown; status?: unknown; changed?: unknown }
+  return typeof candidate.installationId === 'string' &&
+    TARGETS.includes(candidate.target as UpdateTarget) &&
+    OWNERSHIPS.includes(candidate.ownership as UpdateOwnership) &&
+    STATUSES.includes(candidate.status as UpdateStatus) &&
+    typeof candidate.changed === 'boolean'
+}
+
+function legacyPlanResourceDisposition (result: UpdateResult): PlanResourceDisposition {
+  return result.error?.code === 'CLI_TREE_TERMINATION_UNCONFIRMED' ? 'preserve' : 'release'
+}
+
 function mustPreservePlanState (result: UpdateResult): boolean {
-  return result.error?.code === 'FALLBACK_TREE_TERMINATION_UNCONFIRMED' || result.error?.code === 'CLI_TREE_TERMINATION_UNCONFIRMED'
+  // The CLI strategy predates the internal outcome seam and still reports
+  // its conservative preservation decision through its stable error code.
+  return legacyPlanResourceDisposition(result) === 'preserve'
 }
 
 export function summarizePlan (plan: UpdatePlan): UpdateSummary {

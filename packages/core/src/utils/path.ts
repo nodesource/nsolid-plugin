@@ -13,6 +13,12 @@ export function normalizePath (p: string): string {
   return path.resolve(p)
 }
 
+// Lexical containment only; callers must separately authenticate filesystem paths.
+export function isSameOrContained (candidate: string, parent: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate))
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
 export function getAgentsDir (): string {
   return path.join(os.homedir(), '.agents')
 }

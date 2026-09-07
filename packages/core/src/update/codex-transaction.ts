@@ -1,8 +1,9 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
+import { isTreeTerminationUnconfirmed } from './command-runner.js'
 import type { CommandRunner, UpdateError, UpdatePlanItem } from './types.js'
-import { resolveHome } from '../utils/path.js'
+import { isSameOrContained, resolveHome } from '../utils/path.js'
 import { compareVersions, isStableVersion } from './version.js'
 import { assertNoSymlinksInTree, copyOwnedPath, createSiblingBackupPath, ownedFileDigest, ownedPathKind, ownedTreeDigest, removeOwnedPath, writeOwnedFile } from './owned-fs.js'
 import type { SiblingBackupPath } from './owned-fs.js'
@@ -131,6 +132,14 @@ export async function executeCodexTransaction (
     },
   })
 
+  // Await at each call site so restoration completes inside the transaction's
+  // catch/finally boundary, including backup retention on failed restoration.
+  const rollbackFailure = async (error: UpdateError): Promise<CodexTransactionResult> => {
+    rollbackAttempted = true
+    rollbackSucceeded = await restoreFiles(await backupSnapshot())
+    return { success: false, rollbackAttempted, rollbackSucceeded, error }
+  }
+
   try {
     // Backup is a separate phase. If a recursive copy fails after creating a
     // partial tree, that tree is not a valid rollback source and must never be
@@ -164,6 +173,18 @@ export async function executeCodexTransaction (
 
     mutationStarted = true
     const commandResult = await runTransactionCommands(item.steps, commandRunner)
+    if (!commandResult.success && isTreeTerminationUnconfirmed(commandResult.result)) {
+      preserveBackup = true
+      return {
+        success: false,
+        rollbackAttempted: false,
+        error: {
+          code: 'CODEX_TREE_TERMINATION_UNCONFIRMED',
+          message: `Codex command ended and descendant termination could not be confirmed; backups were preserved at ${configBackupStorage.directory} and ${cacheBackupStorage.directory}`,
+        },
+      }
+    }
+
     // Revalidate path kinds before reading or replacing any post-command
     // state. A command that swaps either owned root or inserts a nested cache
     // symlink creates drift: never follow it, never remove it, and preserve
@@ -204,17 +225,6 @@ export async function executeCodexTransaction (
     await dependencies.afterAuthorizedStateCaptured?.()
     if (!commandResult.success) {
       const { command, result } = commandResult
-      if (result.timedOut && result.treeTerminated !== true) {
-        preserveBackup = true
-        return {
-          success: false,
-          rollbackAttempted: false,
-          error: {
-            code: 'CODEX_TREE_TERMINATION_UNCONFIRMED',
-            message: `Codex timed out and descendant termination could not be confirmed; backups were preserved at ${configBackupStorage.directory} and ${cacheBackupStorage.directory}`,
-          },
-        }
-      }
       // Any command failure after a complete backup leaves a partially
       // mutated cache/config; rollback is gated only on backup completeness,
       // never on the failed command's arguments.
@@ -235,14 +245,7 @@ export async function executeCodexTransaction (
 
     const refreshedPlugin = pluginId ? readCodexPlugin(configPath, pluginId) : undefined
     if (pluginId && !refreshedPlugin) {
-      rollbackAttempted = true
-      rollbackSucceeded = await restoreFiles(await backupSnapshot())
-      return {
-        success: false,
-        rollbackAttempted,
-        rollbackSucceeded,
-        error: { code: 'CODEX_REGISTRATION_MISSING', message: 'Codex did not recreate the selected plugin registration' },
-      }
+      return await rollbackFailure({ code: 'CODEX_REGISTRATION_MISSING', message: 'Codex did not recreate the selected plugin registration' })
     }
 
     if (pluginId && item.version.latest && refreshedPlugin) {
@@ -259,14 +262,7 @@ export async function executeCodexTransaction (
         ? readDirectCodexPayloadVersion(selectedPayload, pluginId)
         : readCodexPayloadVersion(cachePath, pluginId)
       if (cachedVersion !== item.version.latest) {
-        rollbackAttempted = true
-        rollbackSucceeded = await restoreFiles(await backupSnapshot())
-        return {
-          success: false,
-          rollbackAttempted,
-          rollbackSucceeded,
-          error: { code: 'CODEX_VERSION_MISMATCH', message: 'Reinstalled Codex cached payload did not match the refreshed marketplace version' },
-        }
+        return await rollbackFailure({ code: 'CODEX_VERSION_MISMATCH', message: 'Reinstalled Codex cached payload did not match the refreshed marketplace version' })
       }
       if (item.artifact && (item.artifact.kind === 'git' || item.artifact.kind === 'local-snapshot')) {
         // Installed-vs-plan equivalence uses the planned comparison digest
@@ -281,14 +277,7 @@ export async function executeCodexTransaction (
           ? nativePayloadDigest(selectedPayload, { profile: expectedProfile })
           : undefined
         if (!selectedPayload || !expectedProfile || !expectedDigest || !digest || digest !== expectedDigest) {
-          rollbackAttempted = true
-          rollbackSucceeded = await restoreFiles(await backupSnapshot())
-          return {
-            success: false,
-            rollbackAttempted,
-            rollbackSucceeded,
-            error: { code: 'CODEX_CONTENT_MISMATCH', message: 'Reinstalled Codex payload did not match the planned content identity' },
-          }
+          return await rollbackFailure({ code: 'CODEX_CONTENT_MISMATCH', message: 'Reinstalled Codex payload did not match the planned content identity' })
         }
       }
     }
@@ -299,37 +288,16 @@ export async function executeCodexTransaction (
         : true
       const restoredPlugin = readCodexPlugin(configPath, pluginId)
       if (!restoredPlugin || (originalPlugin !== undefined && !codexUserOwnedFieldsMatch(restoredPlugin, originalPlugin))) {
-        rollbackAttempted = true
-        rollbackSucceeded = await restoreFiles(await backupSnapshot())
-        return {
-          success: false,
-          rollbackAttempted,
-          rollbackSucceeded,
-          error: { code: 'CODEX_REGISTRATION_MISSING', message: 'Codex did not recreate the selected plugin registration and its preserved fields' },
-        }
+        return await rollbackFailure({ code: 'CODEX_REGISTRATION_MISSING', message: 'Codex did not recreate the selected plugin registration and its preserved fields' })
       }
       if (!restoredUserFields) {
-        rollbackAttempted = true
-        rollbackSucceeded = await restoreFiles(await backupSnapshot())
-        return {
-          success: false,
-          rollbackAttempted,
-          rollbackSucceeded,
-          error: { code: 'CODEX_REGISTRATION_MISSING', message: 'Codex plugin registration could not preserve its user-owned fields' },
-        }
+        return await rollbackFailure({ code: 'CODEX_REGISTRATION_MISSING', message: 'Codex plugin registration could not preserve its user-owned fields' })
       }
     }
 
     const validation = item.steps.find((step) => step.kind === 'validation')
     if (validation && (!existsSync(configPath) || (pluginId !== undefined && !readCodexPlugin(configPath, pluginId)))) {
-      rollbackAttempted = true
-      rollbackSucceeded = await restoreFiles(await backupSnapshot())
-      return {
-        success: false,
-        rollbackAttempted,
-        rollbackSucceeded,
-        error: { code: 'CODEX_VALIDATION_FAILED', message: 'Codex configuration was not present after reinstall' },
-      }
+      return await rollbackFailure({ code: 'CODEX_VALIDATION_FAILED', message: 'Codex configuration was not present after reinstall' })
     }
     return { success: true, rollbackAttempted: false }
   } catch {
@@ -581,9 +549,4 @@ function isBroadCachePath (candidate: string, cacheBase: string): boolean {
 
 function pathDepth (filePath: string): number {
   return filePath.split(path.sep).length
-}
-
-function isSameOrContained (candidate: string, parent: string): boolean {
-  const relative = path.relative(path.resolve(parent), path.resolve(candidate))
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }

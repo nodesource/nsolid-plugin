@@ -1,5 +1,14 @@
-import type { CommandResult, CommandRunner, CommandSpec, UpdatePlanStep } from './types.js'
-import { isCommandSuccessful } from './command-runner.js'
+import type { CommandResult, CommandRunner, CommandSpec, ExecutableIdentity, UpdatePlanStep } from './types.js'
+import { DEFAULT_COMMAND_TIMEOUT_MS, isCommandSuccessful } from './command-runner.js'
+import { managerArgsForIdentity } from './package-manager.js'
+
+export function transactionCommand (
+  identity: Exclude<ExecutableIdentity, { kind: 'unsupported' }>,
+  args: string[],
+  description: string
+): Extract<UpdatePlanStep, { kind: 'command' }> {
+  return { kind: 'command', description, command: { ...managerArgsForIdentity(identity, args), executableIdentity: identity, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS } }
+}
 
 export type TransactionCommandResult =
   | { success: true; completed: readonly CommandSpec[] }

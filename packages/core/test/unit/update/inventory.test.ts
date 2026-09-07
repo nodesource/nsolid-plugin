@@ -44,7 +44,7 @@ function packageRoot (root: string, version: string): string {
 }
 
 function runner () {
-  return { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) }
+  return { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }) }
 }
 
 function registryFetch (version: string): typeof fetch {
@@ -204,7 +204,7 @@ describe('update installation inventory', () => {
       commandRunner: {
         run: async () => {
           runnerCalls++
-          return { exitCode: 0, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
     })
@@ -620,7 +620,7 @@ describe('CLI installation provenance', () => {
       commandRunner: {
         run: async () => {
           calls += 1
-          return { exitCode: 0, stdout: path.join(home, '.volta', 'tools', 'image', 'packages', 'nsolid-plugin', 'lib'), stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: path.join(home, '.volta', 'tools', 'image', 'packages', 'nsolid-plugin', 'lib'), stderr: '', timedOut: false, treeTerminated: true }
         },
       },
       packageRoot: root,
@@ -694,7 +694,7 @@ describe('CLI installation provenance', () => {
       commandRunner: {
         run: async () => {
           calls++
-          return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+          return { exitCode: 1, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
         },
       },
       packageRoot: root,

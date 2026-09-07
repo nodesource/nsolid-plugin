@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { cp as realFsCp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { refreshOwnedInstallation, setLocalFallbackManifestObserverForTests } from '../../../src/update/fallback-transaction.js'
+import { refreshOwnedInstallation } from '../../../src/update/fallback-transaction.js'
 import { applyFallbackEntry, beginFallbackJournal, claimFallbackJournalMutation, commitFallbackJournal, fallbackJournalPath, manifestDigestOf, markFallbackJournalMutating, pathDigest, pathKind, reclaimFallbackJournalMutation, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, setFallbackFrontierPublicationSeamForTests, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { valueDigest, readMcpFieldDigests, harnessMcpKey } from '../../../src/update/mcp-lookup.js'
 import { randomUUID } from 'node:crypto'
@@ -21,6 +21,9 @@ import { parseJsonc } from '../../../src/utils/config.js'
 import { resolvePackageRoot } from '../../../src/update/version.js'
 import { deriveFallbackFrontierLeafTargets, deriveFallbackFrontierPlan, type FallbackFrontierPlan } from '../../../src/update/fallback-frontier.js'
 import { getAdapter } from '../../../src/harnesses/index.js'
+import type { BundleDescriptor } from '../../../src/types.js'
+
+import { createParentIdentity, refreshWithParent } from '../../helpers/fallback-refresh.js'
 
 let home: string
 let previousHome: string | undefined
@@ -53,7 +56,47 @@ function writeJson (filePath: string, value: unknown): void {
   writeFileSync(filePath, JSON.stringify(value, null, 2))
 }
 
+function setupSkillSource (skills: Record<string, string>): { sourceRoot: string; bundlePath: string } {
+  const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
+  for (const [name, content] of Object.entries(skills)) {
+    const directory = path.join(sourceRoot, 'skills', name)
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(path.join(directory, 'SKILL.md'), content)
+  }
+  return { sourceRoot, bundlePath: path.join(sourceRoot, 'bundle.json') }
+}
+
+/** Keep scenario-specific skills and MCP values visible at each call site. */
+function writeBundle (bundlePath: string, skillNames: string[], mcpServers: BundleDescriptor['mcpServers']): void {
+  writeJson(bundlePath, {
+    name: 'nsolid-plugin',
+    version: '1.0.1',
+    skills: skillNames.map((name) => ({ name, path: `skills/${name}`, description: name })),
+    mcpServers,
+  })
+}
+
+function writeCredentials (filePath: string, mcpUrl: string, lifetimeMs: number): void {
+  writeJson(filePath, {
+    serviceToken: 'token',
+    organizationId: 'org',
+    saasToken: 'saas',
+    consoleUrl: 'https://console.example.com',
+    mcpUrl,
+    expiresAt: new Date(Date.now() + lifetimeMs).toISOString(),
+  })
+}
+
 describe('fallback refresh transaction', () => {
+  it('rejects a missing parent manifest before reading or mutating owned state', async () => {
+    const before = readdirSync(home)
+    const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath: '/missing/bundle.json', skillsSource: '/missing/package' } as Parameters<typeof refreshOwnedInstallation>[0])
+    assert.equal(result.success, false)
+    assert.equal(result.error?.code, 'INVALID_TRANSACTION_MANIFEST')
+    assert.equal(result.rollbackAttempted, undefined)
+    assert.deepEqual(readdirSync(home), before)
+  })
+
   it('replaces owned directories, reconciles shared ownership, and recreates harness links', async () => {
     const sharedDir = path.join(home, '.agents', 'skills')
     const retainedDir = path.join(sharedDir, 'retained')
@@ -77,23 +120,8 @@ describe('fallback refresh transaction', () => {
     writeFileSync(path.join(retainedSource, 'SKILL.md'), 'new retained')
     writeFileSync(path.join(addedSource, 'SKILL.md'), 'new skill')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [
-        { name: 'retained', path: 'skills/retained', description: 'retained' },
-        { name: 'added', path: 'skills/added', description: 'added' },
-      ],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    writeBundle(bundlePath, ['retained', 'added'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://example.com/mcp', 60_000)
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -106,7 +134,7 @@ describe('fallback refresh transaction', () => {
     })
 
     try {
-      const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+      const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
       assert.equal(result.success, true)
       assert.equal(readFileSync(path.join(retainedDir, 'SKILL.md'), 'utf8'), 'new retained')
       assert.equal(existsSync(path.join(retainedDir, 'obsolete.txt')), false)
@@ -124,7 +152,7 @@ describe('fallback refresh transaction', () => {
     }
   })
 
-  it('rejects a new harness link when its destination is untracked', async () => {
+  it('rejects an untracked directory at a new harness link during parent planning', async () => {
     const sharedDir = path.join(home, '.agents', 'skills')
     const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
     const trackedSource = path.join(sourceRoot, 'skills', 'tracked')
@@ -139,15 +167,7 @@ describe('fallback refresh transaction', () => {
     mkdirSync(path.join(harnessDir, 'added'), { recursive: true })
     writeFileSync(path.join(harnessDir, 'added', 'user-owned.txt'), 'keep me')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [
-        { name: 'tracked', path: 'skills/tracked', description: 'tracked' },
-        { name: 'added', path: 'skills/added', description: 'added' },
-      ],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
+    writeBundle(bundlePath, ['tracked', 'added'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -157,11 +177,18 @@ describe('fallback refresh transaction', () => {
       mcpServers: [],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, false)
-    assert.equal(result.error?.code, 'UNTRACKED_DESTINATION')
+    assert.equal(result.error?.code, 'FALLBACK_FRONTIER_LEAF_KIND_MISMATCH')
     assert.equal(existsSync(path.join(harnessDir, 'added', 'user-owned.txt')), true)
+    // Even if a caller bypasses the parent's leaf planner, the child keeps
+    // its independent collision guard and rejects before claiming a journal.
+    const transaction = await createParentIdentity({ harness: 'claude' })
+    const child = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot, transaction })
+    assert.equal(child.error?.code, 'UNTRACKED_DESTINATION')
+    assert.equal(existsSync(path.join(harnessDir, 'added', 'user-owned.txt')), true)
+    assert.equal(existsSync(fallbackJournalPath(getTrackingFilePath())), false)
     rmSync(sourceRoot, { recursive: true, force: true })
   })
 
@@ -179,12 +206,7 @@ describe('fallback refresh transaction', () => {
     mkdirSync(path.dirname(longPath), { recursive: true })
     writeFileSync(longPath, 'original')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -196,16 +218,9 @@ describe('fallback refresh transaction', () => {
     // Valid credentials let the MCP reconciliation gate pass so the run
     // reaches local planning, which must reject the kind conflict before any
     // journal or snapshot state exists.
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://example.com/mcp', 60_000)
 
-    const result = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, false)
     assert.equal(result.error?.code, 'FALLBACK_FRONTIER_LEAF_KIND_MISMATCH')
@@ -220,16 +235,8 @@ describe('fallback refresh transaction', () => {
     const skillPath = path.join(sharedDir, 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }],
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }])
     const configPath = path.join(home, '.claude.json')
     writeJson(configPath, { mcpServers: { 'old-server': { type: 'http', url: 'https://old.example/mcp' } } })
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
@@ -239,10 +246,10 @@ describe('fallback refresh transaction', () => {
       bundleVersion: '1.0.0',
       bundleVersions: { claude: '1.0.0' },
       skills: [{ name: 'tracked', path: skillPath, paths: { claude: skillPath }, installedAt: new Date().toISOString(), harnesses: ['claude'] }],
-      mcpServers: [{ name: 'old-server', configPath, harness: 'claude', configuredAt: new Date().toISOString() }],
+      mcpServers: [{ name: 'old-server', configPath, harness: 'claude', configuredAt: new Date().toISOString(), fields: { type: valueDigest('http'), url: valueDigest('https://old.example/mcp') } }],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, false)
     assert.equal(result.error?.code, 'MCP_RECONCILIATION_REQUIRED')
@@ -256,24 +263,9 @@ describe('fallback refresh transaction', () => {
     const skillPath = path.join(home, '.config', 'opencode', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }],
-    })
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }])
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://example.com/mcp', 60_000)
     const configPath = path.join(home, '.config', 'opencode', 'opencode.jsonc')
     mkdirSync(path.dirname(configPath), { recursive: true })
     const originalConfig = '{\n  // keep this comment\n  "mcp": {\n    "old-server": { "url": "https://old.example/mcp", "userSetting": true }\n  }\n}\n'
@@ -293,7 +285,7 @@ describe('fallback refresh transaction', () => {
       }],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, false)
     assert.equal(result.error?.code, 'MCP_RECONCILIATION_REQUIRED')
@@ -306,24 +298,9 @@ describe('fallback refresh transaction', () => {
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }],
-    })
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://new.example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }])
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://new.example.com/mcp', 60_000)
     const configPath = path.join(home, '.codex', 'config.toml')
     mkdirSync(path.dirname(configPath), { recursive: true })
     // CRLF document with a comment, an unrelated table, and user credentials:
@@ -354,7 +331,7 @@ describe('fallback refresh transaction', () => {
       }],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, true, JSON.stringify(result))
     const final = readFileSync(configPath, 'utf8')
@@ -396,24 +373,9 @@ describe('fallback refresh transaction', () => {
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }],
-    })
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://new.example.com/mcp',
-      expiresAt: new Date(Date.now() + 120_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }])
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://new.example.com/mcp', 120_000)
     const configPath = path.join(home, '.codex', 'config.toml')
     mkdirSync(path.dirname(configPath), { recursive: true })
     const originalConfig = [
@@ -437,7 +399,7 @@ describe('fallback refresh transaction', () => {
       }],
     })
 
-    const first = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    const first = await refreshWithParent({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
     assert.equal(first.success, true, JSON.stringify(first))
 
     const configAfterFirst = readFileSync(configPath, 'utf8')
@@ -448,7 +410,7 @@ describe('fallback refresh transaction', () => {
     assert.deepEqual(Object.keys(trackedAfterFirst?.fields ?? {}).sort(), ['headers', 'url'])
     assert.equal(trackedAfterFirst?.fields?.url, valueDigest('https://new.example.com/mcp'))
 
-    const second = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    const second = await refreshWithParent({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
     assert.equal(second.success, true, JSON.stringify(second))
 
     // Reviewer's exact regression: refresh #2 of the same bundle must not
@@ -477,14 +439,7 @@ describe('fallback refresh transaction', () => {
     writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
     writeJson(bundlePath, bundleVersion('https://one.example.com/mcp'))
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://one.example.com/mcp',
-      expiresAt: new Date(Date.now() + 120_000).toISOString(),
-    })
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://one.example.com/mcp', 120_000)
     const configPath = path.join(home, '.codex', 'config.toml')
     mkdirSync(path.dirname(configPath), { recursive: true })
     const originalConfig = [
@@ -508,7 +463,7 @@ describe('fallback refresh transaction', () => {
       }],
     })
 
-    const first = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    const first = await refreshWithParent({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
     assert.equal(first.success, true, JSON.stringify(first))
     const trackingAfterFirst = await readTrackingFile()
     const trackedAfterFirst = trackingAfterFirst?.mcpServers.find((entry) => entry.name === 'alpha-console')
@@ -517,15 +472,8 @@ describe('fallback refresh transaction', () => {
     // Second refresh with a changed desired value: owned fields keep their
     // digests updated while the foreign field survives untouched.
     writeJson(bundlePath, bundleVersion('https://two.example.com/mcp'))
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://two.example.com/mcp',
-      expiresAt: new Date(Date.now() + 120_000).toISOString(),
-    })
-    const second = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://two.example.com/mcp', 120_000)
+    const second = await refreshWithParent({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
     assert.equal(second.success, true, JSON.stringify(second))
 
     const configAfterSecond = readFileSync(configPath, 'utf8')
@@ -542,24 +490,9 @@ describe('fallback refresh transaction', () => {
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'fresh-server', url: 'https://example.com/mcp', headers: {} }],
-    })
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'fresh-server', url: 'https://example.com/mcp', headers: {} }])
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://example.com/mcp', 60_000)
     const configPath = path.join(home, '.codex', 'config.toml')
     mkdirSync(path.dirname(configPath), { recursive: true })
     const malformedConfig = '# user comment\n[mcp_servers.alpha\nurl = "broken"\n'
@@ -573,7 +506,7 @@ describe('fallback refresh transaction', () => {
       mcpServers: [],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'codex', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, false, JSON.stringify(result))
     assert.equal(result.error?.code, 'MCP_PARSE_FAILED')
@@ -601,24 +534,9 @@ describe('fallback refresh transaction', () => {
     const skillPath = path.join(home, '.config', 'opencode', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }],
-    })
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://new.example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }])
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://new.example.com/mcp', 60_000)
     const configPath = path.join(home, '.config', 'opencode', 'opencode.jsonc')
     mkdirSync(path.dirname(configPath), { recursive: true })
     writeFileSync(configPath, '{\n  "mcpServers": {\n    "alpha-console": { "url": "https://old.example/mcp", "note": "keep-note" },\n    "user-own": { "url": "https://user.example/mcp" }\n  }\n}\n')
@@ -637,7 +555,7 @@ describe('fallback refresh transaction', () => {
       }],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, true, JSON.stringify(result))
     const final = JSON.parse(readFileSync(configPath, 'utf8')) as { mcp?: Record<string, unknown>, mcpServers?: Record<string, { url?: string, note?: string }> }
@@ -663,24 +581,9 @@ describe('fallback refresh transaction', () => {
       mkdirSync(skillPath, { recursive: true })
       writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     }
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'retained'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'retained', 'SKILL.md'), 'new')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'retained', path: 'skills/retained', description: 'retained' }],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
-    writeJson(path.join(home, '.agents', '.nodesource-auth.json'), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ retained: 'new' })
+    writeBundle(bundlePath, ['retained'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
+    writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://example.com/mcp', 60_000)
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -693,7 +596,7 @@ describe('fallback refresh transaction', () => {
       mcpServers: [],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, true, JSON.stringify(result))
     const tracking = await readTrackingFile()
@@ -704,7 +607,7 @@ describe('fallback refresh transaction', () => {
   })
 
   it('rejects a bundle whose version does not match its package manifest', async () => {
-    const sharedDir = path.join(home, '.agents', 'skills')
+    const sharedDir = path.join(home, '.config', 'opencode', 'skills')
     const skillPath = path.join(sharedDir, 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
@@ -713,12 +616,7 @@ describe('fallback refresh transaction', () => {
     writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
     writeJson(path.join(sourceRoot, 'package.json'), { name: 'nsolid-plugin', version: '1.0.2' })
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -728,7 +626,7 @@ describe('fallback refresh transaction', () => {
       mcpServers: [],
     })
 
-    const result = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+    const result = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, false)
     assert.equal(result.error?.code, 'FALLBACK_BUNDLE_VERSION_MISMATCH')
@@ -798,12 +696,7 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
     mkdirSync(skillSource, { recursive: true })
     writeFileSync(path.join(skillSource, 'SKILL.md'), 'new tracked')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://new.example.com/mcp', headers: {} }],
-    })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'nsolid-console', url: 'https://new.example.com/mcp', headers: {} }])
 
     const trackingPath = getTrackingFilePath()
     const identity: FallbackTransactionIdentity = {
@@ -1106,14 +999,14 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       assert.equal(readFileSync(path.join(fixture.linkPath, 'SKILL.md'), 'utf8'), 'new tracked')
 
       // SECOND refresh under the same simulated Windows policy: the committed
-      // state refreshes again through a fresh local journal flow, the junction
+      // state refreshes again through a fresh parent journal flow, the junction
       // still fails, and the copied directory again binds to the registered
       // newly staged bytes instead of the live directory.
       const secondOriginalPlatform = process.platform
       let second
       try {
         Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-        second = await refreshWithSimulatedWindows({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+        second = await refreshWithParent({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot }, refreshWithSimulatedWindows)
       } finally {
         Object.defineProperty(process, 'platform', { value: secondOriginalPlatform, configurable: true })
       }
@@ -1121,7 +1014,7 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       assert.equal(materializations.length, 2, 'the second refresh must materialize the staged link through the same Windows-safe policy')
       assert.equal(lstatSync(fixture.linkPath).isSymbolicLink(), false)
       assert.equal(readFileSync(path.join(fixture.linkPath, 'SKILL.md'), 'utf8'), 'new tracked')
-      assert.equal(existsSync(fallbackJournalPath(getTrackingFilePath())), false, 'the second local run must commit and remove its journal')
+      assert.equal(existsSync(fallbackJournalPath(getTrackingFilePath())), false, 'the second parent run must commit and remove its journal')
       assert.equal(readdirSync(harnessDirParent).some((name) => name.startsWith(`.${path.basename(harnessDir)}.nsolid-stage-`)), false)
     } finally {
       rmSync(fixture.sourceRoot, { recursive: true, force: true })
@@ -1136,7 +1029,7 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       writeFileSync(path.join(fixture.linkPath, 'SKILL.md'), 'old tracked')
       const linkParent = path.dirname(fixture.linkPath)
       for (const round of [1, 2]) {
-        const result = await refreshOwnedInstallation({ harness: 'pi', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+        const result = await refreshWithParent({ harness: 'pi', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
         assert.equal(result.success, true, `refresh #${round} failed: ${JSON.stringify(result)}`)
         // The shared skill and the Pi copied link both hold the NEW staged
         // bytes; the copy is a real directory, not a symlink.
@@ -1161,7 +1054,7 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       // bound to the registered staged skill payloads.
       rmSync(path.dirname(fixture.linkPath), { recursive: true, force: true })
       assert.equal(existsSync(fixture.linkPath), false)
-      const result = await refreshOwnedInstallation({ harness: 'pi', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+      const result = await refreshWithParent({ harness: 'pi', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
       assert.equal(result.success, true, JSON.stringify(result))
       assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'new tracked')
       assert.equal(existsSync(fixture.linkPath), true)
@@ -1211,12 +1104,7 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new tracked')
       const bundlePath = path.join(sourceRoot, 'bundle.json')
       const newUrl = 'https://new.example.com/mcp'
-      writeJson(bundlePath, {
-        name: 'nsolid-plugin',
-        version: '1.0.1',
-        skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-        mcpServers: [{ name: 'alpha-console', url: newUrl, headers: {} }],
-      })
+      writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: newUrl, headers: {} }])
       const trackingPath = getTrackingFilePath()
       const identity: FallbackTransactionIdentity = {
         installationId: 'opencode:fallback',
@@ -1316,70 +1204,37 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
     }
   })
 
-  it('aborts before claiming the journal when an MCP configuration cannot be parsed', async () => {
-    // Corrupt the canonical config BEFORE planning: the manifest captures the
-    // corrupt bytes as the planning state, and the render preflight must fail
-    // before the journal is claimed, so nothing is staged.
-    writeFileSync(path.join(home, '.claude.json'), '{ mcpServers: broken')
-    const fixture = await setupJournalFixture({ harness: 'claude' })
-    try {
-      const { handle: journal } = await beginFallbackJournal(fixture.identity)
-      await markFallbackJournalMutating(journal)
-      const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
-      const journalBefore = readFileSync(journalPath)
+  for (const harness of ['claude', 'codex'] as const) {
+    it(`aborts before claiming the journal when the ${harness} configuration cannot be parsed`, async () => {
+      // Capture invalid bytes before planning; render must reject without claiming.
+      const configPath = harness === 'codex' ? path.join(home, '.codex', 'config.toml') : path.join(home, '.claude.json')
+      const malformedConfig = harness === 'codex' ? '# user comment\n[mcp_servers.alpha\nurl = "broken"\n' : '{ mcpServers: broken'
+      mkdirSync(path.dirname(configPath), { recursive: true })
+      writeFileSync(configPath, malformedConfig)
+      const fixture = await setupJournalFixture({ harness })
+      try {
+        const { handle: journal } = await beginFallbackJournal(fixture.identity)
+        await markFallbackJournalMutating(journal)
+        const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+        const journalBefore = readFileSync(journalPath)
 
-      const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot, transaction: fixture.identity })
+        const result = await refreshOwnedInstallation({ harness, bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot, transaction: fixture.identity })
 
-      assert.equal(result.success, false)
-      assert.notEqual(result.rollbackAttempted, true)
-      // The journal was never claimed or rewritten.
-      assert.deepEqual(readFileSync(journalPath), journalBefore)
-      // No live byte moved.
-      assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked')
-      // Zero staging artifacts survive the aborted transaction.
-      const leftovers = readdirSync(path.join(home, '.agents')).filter((name) => name.includes('.nsolid-stage-'))
-      assert.equal(leftovers.length, 0, leftovers.join(', '))
-    } finally {
-      rmSync(fixture.sourceRoot, { recursive: true, force: true })
-    }
-  })
-
-  it('aborts before claiming the journal when the codex TOML configuration is malformed', async () => {
-    const malformedConfig = '# user comment\n[mcp_servers.alpha\nurl = "broken"\n'
-    // Corrupt the canonical codex config BEFORE planning so the manifest
-    // captures these bytes; the render preflight must then fail before the
-    // journal is claimed.
-    const configPath = path.join(home, '.codex', 'config.toml')
-    mkdirSync(path.dirname(configPath), { recursive: true })
-    writeFileSync(configPath, malformedConfig)
-    const fixture = await setupJournalFixture({ harness: 'codex' })
-    try {
-      const { handle: journal } = await beginFallbackJournal(fixture.identity)
-      await markFallbackJournalMutating(journal)
-      const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
-      const journalBefore = readFileSync(journalPath)
-
-      const result = await refreshOwnedInstallation({ harness: 'codex', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot, transaction: fixture.identity })
-
-      assert.equal(result.success, false)
-      assert.equal(result.error?.code, 'MCP_PARSE_FAILED')
-      assert.notEqual(result.rollbackAttempted, true)
-      // The journal was never claimed or rewritten.
-      assert.deepEqual(readFileSync(journalPath), journalBefore)
-      // No live byte moved.
-      assert.equal(readFileSync(configPath, 'utf8'), malformedConfig)
-      assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked')
-      // Zero staging artifacts survive the aborted transaction.
-      for (const dir of [path.join(home, '.agents'), path.join(home, '.codex')]) {
-        const dirLeftovers = existsSync(dir)
-          ? readdirSync(dir).filter((name) => name.includes('.nsolid-stage-'))
-          : []
-        assert.equal(dirLeftovers.length, 0, `${dir}: ${dirLeftovers.join(', ')}`)
+        assert.equal(result.success, false)
+        if (harness === 'codex') assert.equal(result.error?.code, 'MCP_PARSE_FAILED')
+        assert.notEqual(result.rollbackAttempted, true)
+        assert.deepEqual(readFileSync(journalPath), journalBefore, 'the journal was never claimed or rewritten')
+        assert.equal(readFileSync(configPath, 'utf8'), malformedConfig)
+        assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked')
+        for (const dir of new Set([path.join(home, '.agents'), path.dirname(configPath)])) {
+          const leftovers = readdirSync(dir).filter((name) => name.includes('.nsolid-stage-'))
+          assert.equal(leftovers.length, 0, `${dir}: ${leftovers.join(', ')}`)
+        }
+      } finally {
+        rmSync(fixture.sourceRoot, { recursive: true, force: true })
       }
-    } finally {
-      rmSync(fixture.sourceRoot, { recursive: true, force: true })
-    }
-  })
+    })
+  }
 
   it('removes journaled new destinations on recovery and the next update installs cleanly', async () => {
     const fixture = await setupJournalFixture({ harness: 'claude' })
@@ -1444,7 +1299,7 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked')
 
       // The next update no longer sees an untracked destination.
-      const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: sourceRoot })
+      const result = await refreshWithParent({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: sourceRoot })
       assert.equal(result.success, true)
       assert.equal(existsSync(addedSkill), true)
       assert.equal(readFileSync(path.join(addedSkill, 'SKILL.md'), 'utf8'), 'new skill')
@@ -1480,12 +1335,7 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
     mkdirSync(skillSource, { recursive: true })
     writeFileSync(path.join(skillSource, 'SKILL.md'), 'tracked')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }],
-    })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }])
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old tracked')
@@ -1507,7 +1357,7 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
       const driftedText = before.replace(JSON.stringify(alphaRecord), JSON.stringify(drifted))
       writeFileSync(configA, driftedText)
 
-      const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+      const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
       assert.equal(result.success, false)
       assert.equal(result.error?.code, 'FALLBACK_MCP_DRIFT')
       // The drifted bytes are preserved; no owned update was applied.
@@ -1516,7 +1366,7 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
 
       // Sanity: with the pristine bytes the same refresh succeeds.
       writeFileSync(configA, before)
-      const retry = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+      const retry = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
       assert.equal(retry.success, true)
       rmSync(sourceRoot, { recursive: true, force: true })
     } finally {
@@ -1560,12 +1410,7 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
     mkdirSync(skillSource, { recursive: true })
     writeFileSync(path.join(skillSource, 'SKILL.md'), 'tracked')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }],
-    })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }])
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -1580,7 +1425,7 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
     writeFileSync(path.join(home, '.agents', 'skills', 'tracked', 'SKILL.md'), 'old tracked')
 
     try {
-      const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+      const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
       assert.equal(result.success, true)
 
       // Config A: alpha-console updated in place; foreign bytes untouched.
@@ -1629,12 +1474,7 @@ describe('credentialless fallback reconciliation', () => {
     mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
     writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
     const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-      mcpServers: [{ name: 'new-server', url: 'https://mcp.example.com/mcp', headers: { AUTH: 'auth-token-value' } }],
-    })
+    writeBundle(bundlePath, ['tracked'], [{ name: 'new-server', url: 'https://mcp.example.com/mcp', headers: { AUTH: 'auth-token-value' } }])
     const configPath = path.join(home, '.claude.json')
     writeJson(configPath, {})
     writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
@@ -1664,7 +1504,7 @@ describe('credentialless fallback reconciliation', () => {
     const fixture = await setupCredentiallessFixture()
     const configBefore = readFileSync(fixture.configPath, 'utf8')
 
-    const blocked = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+    const blocked = await refreshWithParent({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
     assert.equal(blocked.success, false)
     assert.equal(blocked.error?.code, 'MCP_RECONCILIATION_REQUIRED')
     assert.equal(blocked.rollbackAttempted, undefined, 'the reconciliation gate must abort before any mutation')
@@ -1678,7 +1518,7 @@ describe('credentialless fallback reconciliation', () => {
 
     // The same fixture reconciles successfully once valid credentials exist.
     writeJson(getAuthFilePath(), validCredentialsJson())
-    const retried = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+    const retried = await refreshWithParent({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
     assert.equal(retried.success, true, String(retried.error?.code ?? ''))
     const tracking = await readTrackingFile()
     assert.equal(tracking?.bundleVersions?.claude, '1.0.1')
@@ -1750,29 +1590,28 @@ describe('credentialless fallback reconciliation', () => {
   })
 
   it('external child exits 0 leaving the applied journal for the parent to reclaim, prove, and commit', { timeout: 120_000 }, async () => {
-    // The spawned CLI resolves its bundle and skills source from the package
-    // root it lives in (resolvePackageRoot over src/update), so this fixture
-    // plans against exactly that resolved root's bundle: one already-installed
-    // skill is refreshed and every other bundle skill is a planned new
-    // destination. The child stages skills from <resolvedRoot>/skills/<name>,
-    // so the fixture materializes any missing sources there and removes only
-    // what it created afterwards.
+    // Run the real CLI from a private package root with its own skill sources.
+    // Shared checkout assets must stay untouched while other suites inspect
+    // source hygiene. Keep the real bundle and dependencies, and use the repo
+    // as cwd to verify that the CLI resolves assets from its own package.
     const repoRoot = fileURLToPath(new URL('../../../../../', import.meta.url))
-    const cliPath = fileURLToPath(new URL('../../../src/update/refresh-owned-cli.ts', import.meta.url))
-    const childPackageRoot = resolvePackageRoot(path.dirname(cliPath))
+    const sourcePackageRoot = resolvePackageRoot(path.dirname(fileURLToPath(new URL('../../../src/update/refresh-owned-cli.ts', import.meta.url))))
+    const sharedSkillsPath = path.join(sourcePackageRoot, 'skills')
+    const sharedSkillsBefore = await pathDigest(sharedSkillsPath)
+    const childPackageRoot = path.join(home, 'child-package')
+    mkdirSync(childPackageRoot)
+    cpSync(path.join(sourcePackageRoot, 'src'), path.join(childPackageRoot, 'src'), { recursive: true })
+    for (const file of ['package.json', 'bundle.json']) cpSync(path.join(sourcePackageRoot, file), path.join(childPackageRoot, file))
+    symlinkSync(path.join(sourcePackageRoot, 'node_modules'), path.join(childPackageRoot, 'node_modules'), 'junction')
+    const cliPath = path.join(childPackageRoot, 'src', 'update', 'refresh-owned-cli.ts')
     const realBundle = JSON.parse(readFileSync(path.join(childPackageRoot, 'bundle.json'), 'utf8')) as { version: string; skills: Array<{ name: string }> }
     assert.ok(realBundle.skills.length > 1, 'the real bundle must contain skills for this fixture')
     const refreshedName = realBundle.skills[0]!.name
     const fixtureSkillsRoot = path.join(childPackageRoot, 'skills')
-    const createdSkillsRoot = !existsSync(fixtureSkillsRoot)
-    if (createdSkillsRoot) mkdirSync(fixtureSkillsRoot, { recursive: true })
-    const createdSkillSources: string[] = []
     for (const skill of realBundle.skills) {
       const sourceDir = path.join(fixtureSkillsRoot, skill.name)
-      if (existsSync(sourceDir)) continue
       mkdirSync(sourceDir, { recursive: true })
       writeFileSync(path.join(sourceDir, 'SKILL.md'), `fixture source bytes for ${skill.name}\n`)
-      createdSkillSources.push(sourceDir)
     }
     writeJson(getAuthFilePath(), validCredentialsJson())
     const trackingPath = getTrackingFilePath()
@@ -1823,6 +1662,7 @@ describe('credentialless fallback reconciliation', () => {
     const { pathToFileURL } = await import('node:url')
     const require = createRequire(import.meta.url)
     try {
+      assert.equal(await pathDigest(sharedSkillsPath), sharedSkillsBefore, 'the child fixture must not mutate shared package skills')
       const child = spawn(process.execPath, ['--import', pathToFileURL(require.resolve('tsx/esm')).href, cliPath, '--transaction', manifestPath, '--manifest-digest', manifestDigestOf(identity), '--result', resultPath], {
         env: { ...process.env, HOME: home, USERPROFILE: home },
         cwd: repoRoot,
@@ -1866,16 +1706,9 @@ describe('credentialless fallback reconciliation', () => {
       assert.ok(config.mcpServers['nsolid-console'], 'the canonical config must gain the bundle MCP server')
       const tracking = await readTrackingFile()
       assert.equal(tracking?.bundleVersions?.claude, realBundle.version)
+      assert.equal(await pathDigest(sharedSkillsPath), sharedSkillsBefore, 'the child must leave shared package skills unchanged')
     } finally {
       rmSync(workspace, { recursive: true, force: true })
-      // Remove only fixture-created sources: pre-existing skill sources in the
-      // package root are repository content and must never be touched.
-      for (const sourceDir of createdSkillSources) {
-        rmSync(sourceDir, { recursive: true, force: true })
-      }
-      if (createdSkillsRoot) {
-        rmSync(fixtureSkillsRoot, { recursive: true, force: true })
-      }
     }
   })
   it('refreshes an owned MCP config whose tracked fields already match the desired render without touching the config bytes', async () => {
@@ -1893,7 +1726,7 @@ describe('credentialless fallback reconciliation', () => {
     })
     writeJson(getAuthFilePath(), validCredentialsJson())
 
-    const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+    const result = await refreshWithParent({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
     assert.equal(result.success, true, JSON.stringify(result))
     // Regression: a planned no-op field update must never move the live
     // configuration into quarantine with no staged replacement.
@@ -1906,30 +1739,35 @@ describe('credentialless fallback reconciliation', () => {
   })
 })
 
-describe('fallback local frontier planning', () => {
+describe('fallback parent frontier planning', () => {
   interface LocalManifestObservation {
     manifest: FallbackTransactionIdentity | undefined
     plan: FallbackFrontierPlan | undefined
     leaves: ReturnType<typeof deriveFallbackFrontierLeafTargets> | undefined
+    observeManifest: (manifest: FallbackTransactionIdentity) => Promise<void>
   }
 
   /**
-   * Install the test-only observer and derive the shared-API expectation at
-   * the same live-state instant: the observer fires after local planning and
-   * before any mutation, so both derivations see identical filesystem state.
+   * Derive the shared-API expectation at the same live-state instant: the
+   * observer fires after local planning and before any mutation, so both
+   * derivations see identical filesystem state.
    */
   function observeLocalManifest (deriveExpectation: () => Promise<{ plan: FallbackFrontierPlan, leaves: ReturnType<typeof deriveFallbackFrontierLeafTargets> }>): LocalManifestObservation {
-    const observation: LocalManifestObservation = { manifest: undefined, plan: undefined, leaves: undefined }
-    setLocalFallbackManifestObserverForTests(async (manifest) => {
-      observation.manifest = manifest
-      const expectation = await deriveExpectation()
-      observation.plan = expectation.plan
-      observation.leaves = expectation.leaves
-    })
+    const observation: LocalManifestObservation = {
+      manifest: undefined,
+      plan: undefined,
+      leaves: undefined,
+      observeManifest: async (manifest) => {
+        observation.manifest = manifest
+        const expectation = await deriveExpectation()
+        observation.plan = expectation.plan
+        observation.leaves = expectation.leaves
+      },
+    }
     return observation
   }
 
-  it('derives the local manifest frontier graph through the shared planner API', async () => {
+  it('derives the parent manifest frontier graph through the shared planner API', async () => {
     const sharedDir = path.join(home, '.agents', 'skills')
     const retainedDir = path.join(sharedDir, 'retained')
     const removedDir = path.join(sharedDir, 'removed')
@@ -1941,29 +1779,9 @@ describe('fallback local frontier planning', () => {
     mkdirSync(claudeSkills, { recursive: true })
     symlinkSync(retainedDir, path.join(claudeSkills, 'retained'), 'dir')
     symlinkSync(removedDir, path.join(claudeSkills, 'removed'), 'dir')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'retained'), { recursive: true })
-    mkdirSync(path.join(sourceRoot, 'skills', 'added'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'retained', 'SKILL.md'), 'new retained')
-    writeFileSync(path.join(sourceRoot, 'skills', 'added', 'SKILL.md'), 'new skill')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [
-        { name: 'retained', path: 'skills/retained', description: 'retained' },
-        { name: 'added', path: 'skills/added', description: 'added' },
-      ],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
-    writeJson(getAuthFilePath(), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ retained: 'new retained', added: 'new skill' })
+    writeBundle(bundlePath, ['retained', 'added'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
+    writeCredentials(getAuthFilePath(), 'https://example.com/mcp', 60_000)
     writeJson(getTrackingFilePath(), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -1990,11 +1808,11 @@ describe('fallback local frontier planning', () => {
       return { plan: await deriveFallbackFrontierPlan(leaves), leaves }
     })
     try {
-      const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+      const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest: observation.observeManifest })
       assert.equal(result.success, true, JSON.stringify(result))
       assert.ok(observation.manifest && observation.plan && observation.leaves)
       // Exact parity with the shared planner for the same planned state: the
-      // local manifest carries byte-identical frontier evidence.
+      // parent manifest carries byte-identical frontier evidence.
       assert.deepEqual(observation.manifest.plannedMissingFrontiers, observation.plan.frontiers)
       // Graph coverage: bundle destinations, tracked removals, canonical MCP,
       // and tracking leaves are all authorized by one derivation.
@@ -2020,7 +1838,6 @@ describe('fallback local frontier planning', () => {
         assert.ok(entry.leaves.every((leaf) => leaf.id !== mcpLeaf.id))
       }
     } finally {
-      setLocalFallbackManifestObserverForTests(undefined)
       rmSync(sourceRoot, { recursive: true, force: true })
     }
   })
@@ -2029,24 +1846,9 @@ describe('fallback local frontier planning', () => {
     const destination = path.resolve(getSkillsDir())
     const claudeSkills = path.join(home, '.claude', 'skills')
     const keptPath = path.join(destination, 'kept')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'kept'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'kept', 'SKILL.md'), 'new kept')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'kept', path: 'skills/kept', description: 'kept' }],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
-    writeJson(getAuthFilePath(), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ kept: 'new kept' })
+    writeBundle(bundlePath, ['kept'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
+    writeCredentials(getAuthFilePath(), 'https://example.com/mcp', 60_000)
     writeJson(getTrackingFilePath(), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -2058,14 +1860,14 @@ describe('fallback local frontier planning', () => {
     const trackingDirBefore = readdirSync(trackingDir).sort()
 
     let observedFrontierCount: number | undefined
-    setLocalFallbackManifestObserverForTests((manifest) => {
+    const observeManifest = (manifest: FallbackTransactionIdentity): void => {
       observedFrontierCount = manifest.plannedMissingFrontiers?.length
-    })
+    }
     try {
       const originalPlatform = process.platform
       try {
         Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-        const rejected = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+        const rejected = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest })
         assert.equal(rejected.success, false)
         assert.equal(rejected.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
         assert.equal(rejected.rollbackAttempted, false)
@@ -2081,16 +1883,15 @@ describe('fallback local frontier planning', () => {
       assert.equal(existsSync(destination), false)
       assert.equal(existsSync(claudeSkills), false)
       // On linux the same run passes the preflight and completes end-to-end.
-      const result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+      const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest })
       assert.equal(result.success, true, JSON.stringify(result))
       assert.equal(readFileSync(path.join(destination, 'kept', 'SKILL.md'), 'utf8'), 'new kept')
     } finally {
-      setLocalFallbackManifestObserverForTests(undefined)
       rmSync(sourceRoot, { recursive: true, force: true })
     }
   })
 
-  it('keeps existing-parent local updates supported on non-linux platforms', async () => {
+  it('keeps existing-parent parent-managed updates supported on non-linux platforms', async () => {
     // Replace-only bundle over fully existing parents: zero frontiers.
     const sharedDir = path.join(home, '.agents', 'skills')
     const retainedDir = path.join(sharedDir, 'retained')
@@ -2103,24 +1904,9 @@ describe('fallback local frontier planning', () => {
     mkdirSync(claudeSkills, { recursive: true })
     symlinkSync(retainedDir, path.join(claudeSkills, 'retained'), 'dir')
     symlinkSync(removedDir, path.join(claudeSkills, 'removed'), 'dir')
-    const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
-    mkdirSync(path.join(sourceRoot, 'skills', 'retained'), { recursive: true })
-    writeFileSync(path.join(sourceRoot, 'skills', 'retained', 'SKILL.md'), 'new retained')
-    const bundlePath = path.join(sourceRoot, 'bundle.json')
-    writeJson(bundlePath, {
-      name: 'nsolid-plugin',
-      version: '1.0.1',
-      skills: [{ name: 'retained', path: 'skills/retained', description: 'retained' }],
-      mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
-    })
-    writeJson(getAuthFilePath(), {
-      serviceToken: 'token',
-      organizationId: 'org',
-      saasToken: 'saas',
-      consoleUrl: 'https://console.example.com',
-      mcpUrl: 'https://example.com/mcp',
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    })
+    const { sourceRoot, bundlePath } = setupSkillSource({ retained: 'new retained' })
+    writeBundle(bundlePath, ['retained'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
+    writeCredentials(getAuthFilePath(), 'https://example.com/mcp', 60_000)
     writeJson(getTrackingFilePath(), {
       version: '1.0.0',
       installedAt: new Date().toISOString(),
@@ -2133,15 +1919,15 @@ describe('fallback local frontier planning', () => {
     })
 
     let observedFrontiers: readonly unknown[] | undefined
-    setLocalFallbackManifestObserverForTests((manifest) => {
+    const observeManifest = (manifest: FallbackTransactionIdentity): void => {
       observedFrontiers = manifest.plannedMissingFrontiers
-    })
+    }
     try {
       const originalPlatform = process.platform
       let result
       try {
         Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-        result = await refreshOwnedInstallation({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
+        result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest })
       } finally {
         Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
       }
@@ -2150,7 +1936,6 @@ describe('fallback local frontier planning', () => {
       assert.deepEqual(observedFrontiers, [])
       assert.equal(readFileSync(path.join(retainedDir, 'SKILL.md'), 'utf8'), 'new retained')
     } finally {
-      setLocalFallbackManifestObserverForTests(undefined)
       rmSync(sourceRoot, { recursive: true, force: true })
     }
   })
@@ -2172,20 +1957,8 @@ describe('fallback local frontier planning', () => {
       mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
       writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
       const bundlePath = path.join(sourceRoot, 'bundle.json')
-      writeJson(bundlePath, {
-        name: 'nsolid-plugin',
-        version: '1.0.1',
-        skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-        mcpServers: [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }],
-      })
-      writeJson(getAuthFilePath(), {
-        serviceToken: 'token',
-        organizationId: 'org',
-        saasToken: 'saas',
-        consoleUrl: 'https://console.example.com',
-        mcpUrl: 'https://example.com/mcp',
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      })
+      writeBundle(bundlePath, ['tracked'], [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }])
+      writeCredentials(getAuthFilePath(), 'https://example.com/mcp', 60_000)
       writeJson(getTrackingFilePath(), {
         version: '1.0.0',
         installedAt: new Date().toISOString(),
@@ -2218,21 +1991,21 @@ describe('fallback local frontier planning', () => {
       })
 
       let observedFrontierCount: number | undefined
-      setLocalFallbackManifestObserverForTests((manifest) => {
+      const observeManifest = (manifest: FallbackTransactionIdentity): void => {
         observedFrontierCount = manifest.plannedMissingFrontiers.length
         assert.deepEqual(manifest.plannedMissingFrontiers.map((frontier) => path.resolve(frontier.frontierPath)), [path.resolve(frontierRoot)])
         assert.deepEqual(manifest.plannedMissingFrontiers[0].leaves.map((leaf) => leaf.role), ['mcp-config'])
-      })
+      }
 
       try {
         if (process.platform !== 'linux') {
           // Platform preflight rejects the active frontier before any mutation.
-          const rejected = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+          const rejected = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot, observeManifest })
           assert.equal(rejected.success, false)
           assert.equal(rejected.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
           return
         }
-        const result = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+        const result = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot, observeManifest })
         assert.equal(result.success, true, JSON.stringify(result))
         assert.equal(observedFrontierCount, 1)
         // The seam observed the reservation window exactly once and never an
@@ -2247,11 +2020,10 @@ describe('fallback local frontier planning', () => {
         const tracking = await readTrackingFile()
         assert.equal(tracking?.bundleVersions?.opencode, '1.0.1')
         assert.ok(tracking?.mcpServers.some((entry) => entry.name === 'new-server'))
-        // A successful local refresh leaves no pending journal behind.
+        // A successful parent-managed refresh leaves no pending journal behind.
         assert.equal(existsSync(fallbackJournalPath(getTrackingFilePath())), false)
       } finally {
         setFallbackFrontierPublicationSeamForTests(undefined)
-        setLocalFallbackManifestObserverForTests(undefined)
         rmSync(sourceRoot, { recursive: true, force: true })
       }
     } finally {
@@ -2275,20 +2047,8 @@ describe('fallback local frontier planning', () => {
       mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
       writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
       const bundlePath = path.join(sourceRoot, 'bundle.json')
-      writeJson(bundlePath, {
-        name: 'nsolid-plugin',
-        version: '1.0.1',
-        skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-        mcpServers: [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }],
-      })
-      writeJson(getAuthFilePath(), {
-        serviceToken: 'token',
-        organizationId: 'org',
-        saasToken: 'saas',
-        consoleUrl: 'https://console.example.com',
-        mcpUrl: 'https://example.com/mcp',
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      })
+      writeBundle(bundlePath, ['tracked'], [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }])
+      writeCredentials(getAuthFilePath(), 'https://example.com/mcp', 60_000)
       const destination = path.join(home, '.config', 'opencode', 'skills')
       const configPath = path.join(home, '.config', 'opencode', 'opencode.jsonc')
       writeJson(getTrackingFilePath(), {
@@ -2309,13 +2069,13 @@ describe('fallback local frontier planning', () => {
       assert.equal(await pathKind(configPath), 'missing')
 
       let observedFrontierCount: number | undefined
-      setLocalFallbackManifestObserverForTests((manifest) => {
+      const observeManifest = (manifest: FallbackTransactionIdentity): void => {
         observedFrontierCount = manifest.plannedMissingFrontiers.length
         assert.deepEqual(manifest.plannedMissingFrontiers.map((frontier) => path.resolve(frontier.frontierPath)), [path.resolve(frontierRoot)])
         const frontier = manifest.plannedMissingFrontiers[0]
         assert.deepEqual(frontier.leaves.map((leaf) => leaf.role).sort(), ['mcp-config', 'skill'])
         assert.deepEqual(frontier.leaves.map((leaf) => leaf.activation).sort(), ['conditional', 'required'])
-      })
+      }
 
       const seamEvents: Array<{ phase: string; frontierPath: string }> = []
       let beforeReserveObserved = false
@@ -2332,12 +2092,12 @@ describe('fallback local frontier planning', () => {
       try {
         if (process.platform !== 'linux') {
           // Platform preflight rejects the active frontier before any mutation.
-          const rejected = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+          const rejected = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot, observeManifest })
           assert.equal(rejected.success, false)
           assert.equal(rejected.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
           return
         }
-        const result = await refreshOwnedInstallation({ harness: 'opencode', bundlePath, skillsSource: sourceRoot })
+        const result = await refreshWithParent({ harness: 'opencode', bundlePath, skillsSource: sourceRoot, observeManifest })
         assert.equal(result.success, true, JSON.stringify(result))
         assert.equal(observedFrontierCount, 1)
         // The seam observed the reservation window exactly once and never an
@@ -2353,11 +2113,10 @@ describe('fallback local frontier planning', () => {
         const tracking = await readTrackingFile()
         assert.equal(tracking?.bundleVersions?.opencode, '1.0.1')
         assert.ok(tracking?.mcpServers.some((entry) => entry.name === 'new-server'))
-        // A successful local refresh leaves no pending journal behind.
+        // A successful parent-managed refresh leaves no pending journal behind.
         assert.equal(existsSync(fallbackJournalPath(getTrackingFilePath())), false)
       } finally {
         setFallbackFrontierPublicationSeamForTests(undefined)
-        setLocalFallbackManifestObserverForTests(undefined)
       }
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true })
@@ -2365,7 +2124,7 @@ describe('fallback local frontier planning', () => {
   })
 
   it('rejects an unsupported active link+MCP frontier without creating the shared root or a journal', async () => {
-    // Antigravity local refresh whose ENTIRE ~/.gemini root is missing: the
+    // Antigravity parent-managed refresh whose ENTIRE ~/.gemini root is missing: the
     // derived planned-missing frontier there carries BOTH a required link
     // leaf (~/.gemini/config/skills/<name>) and an ACTIVE conditional
     // mcp-config leaf (~/.gemini/config/mcp_config.json, rendered because
@@ -2383,20 +2142,8 @@ describe('fallback local frontier planning', () => {
       mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
       writeFileSync(path.join(sourceRoot, 'skills', 'tracked', 'SKILL.md'), 'new')
       const bundlePath = path.join(sourceRoot, 'bundle.json')
-      writeJson(bundlePath, {
-        name: 'nsolid-plugin',
-        version: '1.0.1',
-        skills: [{ name: 'tracked', path: 'skills/tracked', description: 'tracked' }],
-        mcpServers: [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }],
-      })
-      writeJson(getAuthFilePath(), {
-        serviceToken: 'token',
-        organizationId: 'org',
-        saasToken: 'saas',
-        consoleUrl: 'https://console.example.com',
-        mcpUrl: 'https://example.com/mcp',
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      })
+      writeBundle(bundlePath, ['tracked'], [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }])
+      writeCredentials(getAuthFilePath(), 'https://example.com/mcp', 60_000)
       writeJson(getTrackingFilePath(), {
         version: '1.0.0',
         installedAt: new Date().toISOString(),
@@ -2418,7 +2165,7 @@ describe('fallback local frontier planning', () => {
       assert.equal(await pathKind(configPath), 'missing')
 
       let observedFrontierCount: number | undefined
-      setLocalFallbackManifestObserverForTests((manifest) => {
+      const observeManifest = (manifest: FallbackTransactionIdentity): void => {
         observedFrontierCount = manifest.plannedMissingFrontiers.length
         assert.deepEqual(manifest.plannedMissingFrontiers.map((frontier) => path.resolve(frontier.frontierPath)), [path.resolve(frontierRoot)])
         const frontier = manifest.plannedMissingFrontiers[0]
@@ -2426,7 +2173,7 @@ describe('fallback local frontier planning', () => {
         // conditional mcp-config under one missing root.
         assert.deepEqual(frontier.leaves.map((leaf) => leaf.role).sort(), ['link', 'mcp-config'])
         assert.deepEqual(frontier.leaves.map((leaf) => leaf.activation).sort(), ['conditional', 'required'])
-      })
+      }
 
       const seamEvents: Array<{ phase: string; frontierPath: string }> = []
       setFallbackFrontierPublicationSeamForTests(async (event) => {
@@ -2436,12 +2183,12 @@ describe('fallback local frontier planning', () => {
       try {
         if (process.platform !== 'linux') {
           // Platform preflight rejects the active frontier before any mutation.
-          const rejected = await refreshOwnedInstallation({ harness: 'antigravity', bundlePath, skillsSource: sourceRoot })
+          const rejected = await refreshWithParent({ harness: 'antigravity', bundlePath, skillsSource: sourceRoot, observeManifest })
           assert.equal(rejected.success, false)
           assert.equal(rejected.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
           return
         }
-        const result = await refreshOwnedInstallation({ harness: 'antigravity', bundlePath, skillsSource: sourceRoot })
+        const result = await refreshWithParent({ harness: 'antigravity', bundlePath, skillsSource: sourceRoot, observeManifest })
         assert.equal(result.success, false, JSON.stringify(result))
         assert.equal(result.error?.code, 'INVALID_TRANSACTION_MANIFEST')
         assert.equal(observedFrontierCount, 1)
@@ -2455,12 +2202,11 @@ describe('fallback local frontier planning', () => {
         assert.equal(await pathKind(configPath), 'missing')
         // The owned shared skill was never touched.
         assert.equal(readFileSync(path.join(sharedSkillPath, 'SKILL.md'), 'utf8'), 'old')
-        // The local lifecycle rolled back and disposed its journal, leaving no
-        // pending transaction state behind for the next run.
-        assert.equal(existsSync(fallbackJournalPath(getTrackingFilePath())), false)
+        // The child cannot dispose the parent's journal. If the owner cannot
+        // re-authenticate the already-restored snapshot, it preserves residue.
+        assert.equal(existsSync(fallbackJournalPath(getTrackingFilePath())), true)
       } finally {
         setFallbackFrontierPublicationSeamForTests(undefined)
-        setLocalFallbackManifestObserverForTests(undefined)
         rmSync(sourceRoot, { recursive: true, force: true })
       }
     } finally {

@@ -1,4 +1,4 @@
-import { cp, lstat, mkdtemp, open, readlink, readFile, readdir, rename, rm } from 'node:fs/promises'
+import { cp, lstat, mkdtemp, open, readFile, readdir, rename, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
@@ -115,19 +115,6 @@ export async function ownedTreeDigest (
 }
 
 /**
- * Digest any owned path kind: file → file digest, directory → tree digest,
- * symlink → `symlink:<link target>`, missing/other → null. Always lstat-first;
- * a symlink is never dereferenced.
- */
-export async function ownedPathDigest (targetPath: string): Promise<string | null> {
-  const kind = await ownedPathKind(targetPath)
-  if (kind === 'file') return ownedFileDigest(targetPath)
-  if (kind === 'directory') return ownedTreeDigest(targetPath)
-  if (kind === 'junction-or-symlink') return `symlink:${symlinkTargetForDigest(await readlink(targetPath))}`
-  return null
-}
-
-/**
  * Assert that `root` is a directory containing no symlink anywhere, without
  * dereferencing anything. On the first symlink (sorted path order) throws
  * `OwnedFsError('SYMLINK_IN_TREE', relativePath)`, with `'.'` when the root
@@ -237,10 +224,4 @@ export async function writeOwnedFile (
     await rm(temp, { force: true }).catch(() => {})
     throw error
   }
-}
-
-/** Normalize a symlink target for digesting; identical framing to native-payload. */
-function symlinkTargetForDigest (target: string): string {
-  if (process.platform !== 'win32') return target
-  return target.replace(/\\/g, '/')
 }

@@ -58,7 +58,7 @@ describe('global CLI package ownership', () => {
       commandRunner: {
         run: async (spec) => {
           calls.push({ executable: spec.executable, args: spec.args })
-          return { exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false }
+          return { exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false, treeTerminated: true }
         },
       },
       packageRoot: paths.packagePath,
@@ -107,7 +107,7 @@ describe('global CLI package ownership', () => {
 
     const result = await detectGlobalPackageOwnership({
       commandRunner: {
-        run: async () => ({ exitCode: 0, stdout: `${globalRoot}\n`, stderr: '', timedOut: false }),
+        run: async () => ({ exitCode: 0, stdout: `${globalRoot}\n`, stderr: '', timedOut: false, treeTerminated: true }),
       },
       packageRoot: storePackage,
       executablePath,
@@ -185,7 +185,7 @@ describe('global CLI package ownership', () => {
     const paths = fixture()
     const result = await detectGlobalPackageOwnership({
       commandRunner: {
-        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false }),
+        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false, treeTerminated: true }),
       },
       packageRoot: paths.packagePath,
       executablePath: paths.executablePath,
@@ -200,7 +200,7 @@ describe('global CLI package ownership', () => {
     const broken = path.join(paths.root, 'missing', 'nsolid-plugin')
     const mismatch = await detectGlobalPackageOwnership({
       commandRunner: {
-        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'other', 'node_modules')}\n`, stderr: '', timedOut: false }),
+        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'other', 'node_modules')}\n`, stderr: '', timedOut: false, treeTerminated: true }),
       },
       packageRoot: paths.packagePath,
       executablePath: paths.executablePath,
@@ -208,7 +208,7 @@ describe('global CLI package ownership', () => {
     })
     const brokenResult = await detectGlobalPackageOwnership({
       commandRunner: {
-        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false }),
+        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false, treeTerminated: true }),
       },
       packageRoot: paths.packagePath,
       executablePath: broken,
@@ -245,7 +245,7 @@ describe('global CLI package ownership', () => {
     const paths = fixture(['npm', 'pnpm'])
     const result = await detectGlobalPackageOwnership({
       commandRunner: {
-        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false }),
+        run: async () => ({ exitCode: 0, stdout: `${path.join(paths.root, 'lib', 'node_modules')}\n`, stderr: '', timedOut: false, treeTerminated: true }),
       },
       packageRoot: paths.packagePath,
       executablePath: paths.executablePath,

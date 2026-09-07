@@ -122,10 +122,8 @@ export function compareUtf8 (a: string, b: string): number {
 }
 
 /**
- * Normalized trusted inputs for shared leaf derivation. Both the external
- * strategy planner and the transaction-less local planner must feed this one
- * API so the derived leaf graph is identical for the same planned state: the
- * child can never widen it, and neither planner can fork the semantics.
+ * Normalized trusted inputs for the parent's leaf derivation. The child
+ * consumes the resulting graph and can never widen its approved destinations.
  */
 export interface FallbackFrontierLeafInputs {
   /** Tracked owned-skill evidence. A path already covered by the bundle is deduplicated (bundle wins). */
@@ -721,31 +719,6 @@ function frontierEquals (expected: FallbackFrontierEvidence, observed: FallbackF
     if (a.id !== b.id || a.role !== b.role || a.activation !== b.activation || a.path !== b.path) return `leaves[${index}]`
   }
   return undefined
-}
-
-/**
- * Revalidate observed evidence (for example loaded from a journal manifest)
- * against the expected in-memory graph. Every mismatch — shape, order,
- * identity, or content — fails closed with FALLBACK_FRONTIER_DRIFT.
- */
-export function assertFallbackFrontierPlanMatches (expected: readonly FallbackFrontierEvidence[], observed: unknown): void {
-  let parsed: FallbackFrontierEvidence[]
-  try {
-    parsed = observed as FallbackFrontierEvidence[]
-    assertFallbackFrontierEvidenceList(parsed)
-  } catch (error) {
-    throw new FallbackFrontierError(FALLBACK_FRONTIER_ERROR_CODES.DRIFT, `Frontier evidence failed strict parsing: ${(error as Error).message}`)
-  }
-  const expectedSorted = [...expected].sort((a, b) => compareUtf8(a.frontierPath, b.frontierPath))
-  if (expectedSorted.length !== parsed.length) {
-    throw new FallbackFrontierError(FALLBACK_FRONTIER_ERROR_CODES.DRIFT, `Frontier count drifted: expected ${expectedSorted.length}, observed ${parsed.length}`)
-  }
-  for (let index = 0; index < expectedSorted.length; index++) {
-    const field = frontierEquals(expectedSorted[index], parsed[index])
-    if (field !== undefined) {
-      throw new FallbackFrontierError(FALLBACK_FRONTIER_ERROR_CODES.DRIFT, `Frontier ${expectedSorted[index].frontierPath} drifted at ${field}`)
-    }
-  }
 }
 
 /** One physical filesystem target the fallback journal must carry as an entry. */

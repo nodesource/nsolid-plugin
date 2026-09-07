@@ -151,6 +151,11 @@ interface ArtifactCapability {
  */
 const handleCapabilities = new Map<string, Map<string, ArtifactCapability>>()
 
+// Only a verified publication by this process authorizes replacing changed
+// tracking during rollback. Disk applied/stageDigest fields cannot grant this
+// authority, and an external parent without it must preserve concurrent bytes.
+const publishedTrackingDigests = new Map<string, string>()
+
 /**
  * Object-identity authority registry: every handle object issued by a
  * legitimate transition (begin/claim/reclaim/register/apply) is bound here to
@@ -713,8 +718,8 @@ export async function claimFallbackJournalMutation (manifest: FallbackTransactio
 /**
  * Parent reclaim after the child command has completed (and NEVER while tree
  * termination is unconfirmed — enforcing that is caller policy). Refuses while
- * the recorded mutator is a live different process; a same-process mutator is
- * the transaction-less local transition and is released here. The owner adopts
+ * the recorded mutator is a live different process; same-process test harnesses
+ * can reclaim their own mutator. The owner adopts
  * the latest disk revision without adopting any dynamic journal field as
  * authority: restore decisions come only from the trusted in-memory manifest.
  */
@@ -732,6 +737,36 @@ export async function reclaimFallbackJournalMutation (handle: FallbackJournalHan
   const reclaimed: FallbackJournalHandle = { ...handle, role: 'owner', revision }
   issueGenuineHandle(reclaimed)
   return reclaimed
+}
+
+/**
+ * Recover a failed parent transaction after orchestration has confirmed that
+ * the command process tree terminated. Reclaim and restore stay one journal
+ * operation so consumers do not need to coordinate owner authority, CAS, and
+ * journal-owned preservation evidence themselves. This operation never
+ * interprets command output or decides whether tree termination was confirmed.
+ */
+export async function recoverFallbackJournalMutation (
+  handle: FallbackJournalHandle,
+  snapshotDirectory?: string
+): Promise<FallbackJournalOperationResult> {
+  const preserveOwnedArtifacts = (): FallbackJournalOperationResult => ({
+    succeeded: false,
+    unproven: true,
+    preservedArtifacts: dedupePaths([handle.journalPath, ...(snapshotDirectory === undefined ? [] : [snapshotDirectory])]),
+    preservedPaths: [],
+  })
+  let owner: FallbackJournalHandle
+  try {
+    owner = await reclaimFallbackJournalMutation(handle)
+  } catch {
+    return preserveOwnedArtifacts()
+  }
+  try {
+    return await restoreFallbackJournal(owner)
+  } catch {
+    return preserveOwnedArtifacts()
+  }
 }
 
 /** Register a staged replacement payload for one entry. Mutator role; the capability stays in this process's memory. */
@@ -774,6 +809,7 @@ export async function registerFallbackStage (handle: FallbackJournalHandle, targ
         [`.nsolid-stage-${token}`, 'file'],
       ]),
       copiedLinkBinding,
+      stageDigest,
     })
     // Trusted bundle-skill digest binding, computed from the registered
     // staged payload BEFORE the CAS so binding failures abort cleanly. It is
@@ -783,12 +819,7 @@ export async function registerFallbackStage (handle: FallbackJournalHandle, targ
       ? { finalSkillPath: resolved, skillName: skillDestination.skillName, digest: await digestRegisteredSkillPayload(resolved, stagePath) }
       : undefined
     if (skillBinding !== undefined) assertRegisteredSkillBindingAvailable(handle, skillBinding.finalSkillPath, skillBinding)
-    const revision = await casWrite(handle.journalPath, {
-      ...journal,
-      entries: journal.entries.map((candidate) => candidate === entry
-        ? { ...candidate, stage: stagePath, stageDigest, applied: false }
-        : candidate),
-    }, journal)
+    const revision = await casWrite(handle.journalPath, journalWithEntryUpdate(journal, entry, { stage: stagePath, stageDigest, applied: false }), journal)
     if (skillBinding !== undefined) storeRegisteredSkillBinding(handle, skillBinding.finalSkillPath, skillBinding)
     const staged = { ...handle, revision }
     issueGenuineHandle(staged)
@@ -1481,12 +1512,7 @@ export async function registerFallbackFrontierStage (
     for (const binding of skillBindings) {
       if (binding !== undefined) assertRegisteredSkillBindingAvailable(handle, binding.finalSkillPath, binding)
     }
-    const revision = await casWrite(handle.journalPath, {
-      ...journal,
-      entries: journal.entries.map((candidate) => candidate === entry
-        ? { ...candidate, stage: stagePath, stageDigest, applied: false }
-        : candidate),
-    }, journal)
+    const revision = await casWrite(handle.journalPath, journalWithEntryUpdate(journal, entry, { stage: stagePath, stageDigest, applied: false }), journal)
     for (const binding of skillBindings) {
       if (binding !== undefined) storeRegisteredSkillBinding(handle, binding.finalSkillPath, binding)
     }
@@ -1699,12 +1725,7 @@ async function applyFrontierPublication (
       completedFrontierPublications.set(handle.transactionId, publications)
     }
     publications.set(resolved, Object.freeze({ frontierPath: resolved, dev: reserved.dev, ino: reserved.ino, stageDigest, cleanupPending: true, activeConditionalLeafIds: plan.activeConditionalLeafIds, copiedLinkBindings: stageCapability.copiedLinkBindings !== undefined ? Object.freeze({ ...stageCapability.copiedLinkBindings }) : undefined }))
-    const applied = await withCasWrite(handle, {
-      ...journal,
-      entries: journal.entries.map((candidate) => path.resolve(candidate.path) === resolved
-        ? { ...candidate, applied: true }
-        : candidate),
-    }, journal)
+    const applied = await withCasWrite(handle, journalWithEntryUpdate(journal, resolved, { applied: true }), journal)
     const active = { ...handle, revision: applied.revision }
     // ---- Post-publication bookkeeping: fail-closed preservation reported as
     // cleanup-pending; never a publication failure. The cleanup outcome is
@@ -1877,12 +1898,7 @@ async function rollbackFrontierPublication (
     // destructive authority by themselves. ----
     let pendingJournal: FallbackJournal
     try {
-      pendingJournal = await withCasWrite(activeHandle, {
-        ...journal,
-        entries: journal.entries.map((candidate) => path.resolve(candidate.path) === resolved
-          ? { ...candidate, frontierRollbackPending: true, quarantine: quarantinePath }
-          : candidate),
-      }, journal)
+      pendingJournal = await withCasWrite(activeHandle, journalWithEntryUpdate(journal, resolved, { frontierRollbackPending: true, quarantine: quarantinePath }), journal)
     } catch {
       throw fail('the durable rollback-pending state could not be recorded; nothing was moved')
     }
@@ -2020,7 +2036,7 @@ async function rollbackFrontierPublication (
     // durable pending record blocks all automatic retries and retires the
     // publication authority even when the failure happened before rename.
     if (allocatedContainer !== undefined) {
-      const journalPending = pendingContainerOf(activeHandle, journal, resolved) !== undefined
+      const journalPending = pendingContainerOf(journal, resolved) !== undefined
       if (journalPending) completedFrontierPublications.get(activeHandle.transactionId)?.delete(resolved)
       return {
         outcome: 'preserved',
@@ -2040,7 +2056,7 @@ async function rollbackFrontierPublication (
 }
 
 /** The durable quarantine container recorded in a pending journal entry, if any (reporting only). */
-function pendingContainerOf (handle: FallbackJournalHandle, journal: FallbackJournal, resolved: string): string | undefined {
+function pendingContainerOf (journal: FallbackJournal, resolved: string): string | undefined {
   const entry = journal.entries.find((candidate) => path.resolve(candidate.path) === resolved)
   if (entry?.frontierRollbackPending !== true || entry.quarantine === undefined) return undefined
   return path.dirname(path.resolve(entry.quarantine))
@@ -2077,7 +2093,7 @@ export async function applyFallbackEntry (handle: FallbackJournalHandle, target:
   }
   if (entry.stage !== stageCapability.payload) throw new Error(`Fallback journal stage for ${resolved} does not match the registered capability`)
   const stageDigest = await pathDigest(stageCapability.payload)
-  if (!stageDigest || stageDigest !== entry.stageDigest) throw new Error(`Staged payload for ${resolved} no longer matches its registered digest`)
+  if (!stageDigest || stageDigest !== entry.stageDigest || stageDigest !== stageCapability.stageDigest) throw new Error(`Staged payload for ${resolved} no longer matches its registered digest`)
   // A copied-link stage must still satisfy the binding frozen at
   // registration BEFORE any live mutation: the frozen record alone is the
   // authority, never the registry or the mutable live skill bytes.
@@ -2109,12 +2125,7 @@ export async function applyFallbackEntry (handle: FallbackJournalHandle, target:
   }
   // Durably record the quarantine BEFORE the live path moves: a termination in
   // any later window leaves a journal that explains the missing target.
-  journal = await withCasWrite(active, {
-    ...journal,
-    entries: journal.entries.map((candidate) => candidate === entry
-      ? { ...candidate, quarantine: quarantinePath }
-      : candidate),
-  }, journal)
+  journal = await withCasWrite(active, journalWithEntryUpdate(journal, entry, { quarantine: quarantinePath }), journal)
   active = { ...active, revision: journal.revision }
   // The payload child only legitimately appears with the live rename: record
   // it immediately before the move so the cleanup structure matches reality.
@@ -2129,6 +2140,7 @@ export async function applyFallbackEntry (handle: FallbackJournalHandle, target:
   stageCapability.children = new Map([[`.nsolid-stage-${stageCapability.token}`, 'file']])
   const appliedDigest = await pathDigest(resolved)
   if (!appliedDigest || appliedDigest !== entry.stageDigest) throw new Error(`Swap for ${resolved} did not produce the staged digest`)
+  if (resolved === path.resolve(active.manifest.trackingPath)) publishedTrackingDigests.set(active.transactionId, appliedDigest)
   // Post-swap proof for a copied link: the published path itself must still
   // satisfy the frozen binding (kind, digest/link text, final destination
   // resolution from the live location) before the swap is recorded applied.
@@ -2139,12 +2151,7 @@ export async function applyFallbackEntry (handle: FallbackJournalHandle, target:
     await assertPathMatchesCopiedLinkBinding(`Published copied link ${resolved}`, resolved, stageCapability.copiedLinkBinding)
     retainAppliedCopiedLinkBinding(active, resolved, stageCapability.copiedLinkBinding)
   }
-  journal = await withCasWrite(active, {
-    ...journal,
-    entries: journal.entries.map((candidate) => path.resolve(candidate.path) === resolved
-      ? { ...candidate, applied: true }
-      : candidate),
-  }, journal)
+  journal = await withCasWrite(active, journalWithEntryUpdate(journal, resolved, { applied: true }), journal)
   active = { ...active, revision: journal.revision }
   // Both containers are cleaned by their creator while the capabilities are
   // still in memory. Failures are reporting-only residue and never fail an
@@ -2244,24 +2251,14 @@ async function applyDeletionOnlyEntry (
     // Durably record the quarantine BEFORE the live path moves, mirroring the
     // swap path: a termination in any later window leaves a journal that
     // explains the missing target.
-    const recorded = await withCasWrite(handle, {
-      ...journal,
-      entries: journal.entries.map((candidate) => candidate === entry
-        ? { ...candidate, quarantine: quarantinePath }
-        : candidate),
-    }, journal)
+    const recorded = await withCasWrite(handle, journalWithEntryUpdate(journal, entry, { quarantine: quarantinePath }), journal)
     // The payload child only legitimately appears with the live rename: record
     // it immediately before the move so the cleanup structure matches reality.
     capability.children = new Map([...capability.children!, [path.basename(quarantinePath), kind]])
     await rename(resolved, quarantinePath)
     moved = true
     if (await pathKind(resolved) !== 'missing') throw new Error(`Deletion for ${resolved} did not clear the target`)
-    const applied = await withCasWrite({ ...handle, revision: recorded.revision }, {
-      ...recorded,
-      entries: recorded.entries.map((candidate) => path.resolve(candidate.path) === resolved
-        ? { ...candidate, applied: true }
-        : candidate),
-    }, recorded)
+    const applied = await withCasWrite({ ...handle, revision: recorded.revision }, journalWithEntryUpdate(recorded, resolved, { applied: true }), recorded)
     // The quarantine is preservation, not garbage: it stays in place until
     // commit or restore removes it through the capability registered above.
     const appliedHandle = { ...handle, revision: applied.revision }
@@ -2345,6 +2342,17 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
       if (!await backupAuthenticates(entry, evidence, authority)) {
         return { succeeded: false, unproven: true, preservedArtifacts, preservedPaths }
       }
+    }
+    // A backup authenticates the original, not the current tracking file.
+    // Refuse BEFORE any restoration when current bytes are neither the
+    // original nor this process's verified publication. Do not merge foreign
+    // records or derive overwrite authority from mutable journal fields.
+    const trackingPath = path.resolve(authority.trackingPath)
+    const trackingEntry = journal.entries.find((entry) => path.resolve(entry.path) === trackingPath)
+    const approvedTrackingDigest = await pathKind(trackingPath) === 'file' ? await pathDigest(trackingPath) : undefined
+    if (!approvedTrackingDigest || !trackingEntry ||
+      (approvedTrackingDigest !== trackingEntry.digest && approvedTrackingDigest !== publishedTrackingDigests.get(handle.transactionId))) {
+      return { succeeded: false, unproven: true, preservedArtifacts, preservedPaths: [trackingPath] }
     }
     // Quarantine containers created by this restore are this invocation's
     // capabilities; they are cleaned after postvalidation succeeds.
@@ -2447,6 +2455,9 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
       if (entry.existed) {
         const liveDigest = kind !== 'missing' ? await pathDigest(resolved) : null
         if (liveDigest === undefined) { preservedPaths.push(resolved); continue }
+        if (resolved === trackingPath && (kind !== 'file' || liveDigest !== approvedTrackingDigest)) {
+          preservedPaths.push(resolved); continue
+        }
         // Already the authenticated original: nothing to replace.
         if (kind === entry.kind && liveDigest === entry.digest) continue
         if (!entry.backup) { preservedPaths.push(resolved); continue }
@@ -2460,6 +2471,14 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
         // Preserve the current bytes by quarantine-rename instead of rm, then
         // install a verified copy of the authenticated backup atomically.
         if (!await renameLiveToRestoreQuarantine(resolved, restoreCapabilities)) { preservedPaths.push(resolved); continue }
+        if (resolved === trackingPath) {
+          const moved = restoreCapabilities.get(resolved)
+          if (!moved?.payload || await pathKind(moved.payload) !== 'file' || await pathDigest(moved.payload) !== approvedTrackingDigest) {
+            if (moved) preservedArtifacts.push(moved.container)
+            preservedPaths.push(resolved)
+            continue
+          }
+        }
         if (retainedBinding !== undefined && kind !== 'missing') {
           // Post-quarantine verification: the moved bytes must still match
           // the retained binding; exact link texts resolve against the
@@ -2531,6 +2550,7 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
       // that authority. A mutator handle deliberately leaves the journal for
       // its owner.
       await rm(journalPath, { force: true }).catch(() => {})
+      publishedTrackingDigests.delete(handle.transactionId)
     }
     return { succeeded: true, preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
   } catch {
@@ -2589,7 +2609,130 @@ export async function commitFallbackJournal (handle: FallbackJournalHandle): Pro
   // The journal is removed last: until it disappears the transaction stays
   // discoverable and pending.
   await rm(journalPath, { force: true }).catch(() => {})
+  publishedTrackingDigests.delete(handle.transactionId)
   return { succeeded: true, preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
+}
+
+/** Current ownership scope shared by next-run recovery and read-only inspection. */
+function currentTrackingOwnedPaths (trackingPath: string): Set<string> {
+  let currentTracking: TrackingData | undefined
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path.resolve(trackingPath), 'utf8'))
+    if (isValidTrackingData(parsed)) currentTracking = parsed as TrackingData
+  } catch { currentTracking = undefined }
+  const ownedPaths = new Set<string>([path.resolve(trackingPath)])
+  if (currentTracking !== undefined) {
+    for (const skill of currentTracking.skills) {
+      for (const owned of [skill.path, ...Object.values(skill.paths ?? {})]) {
+        if (typeof owned === 'string') ownedPaths.add(path.resolve(owned))
+      }
+    }
+    for (const server of currentTracking.mcpServers) ownedPaths.add(path.resolve(server.configPath))
+  }
+  return ownedPaths
+}
+
+interface RecoveryInspectionScope {
+  trackingPath: string
+  ownedPaths: ReadonlySet<string>
+  frontierPaths: ReadonlySet<string>
+  preservedPaths: string[]
+  preservedArtifacts: string[]
+  recovered: boolean
+}
+
+/**
+ * Read-only entry checks shared by inspection and next-run recovery.
+ * Return the backup and proven ancestor chain only for an owned entry with an
+ * authenticated backup. Other entries update the report and are skipped.
+ * A returned chain must still be rechecked before each recovery mutation.
+ */
+async function inspectRecoveryEntry (entry: FallbackJournalEntry, scope: RecoveryInspectionScope): Promise<{ backup: string; ancestorChain: LiveAncestorIdentity[] } | undefined> {
+  const resolved = path.resolve(entry.path)
+  if (entry.frontierRollbackPending === true) {
+    // Ambiguous publication state is reporting/blocking evidence only.
+    scope.preservedPaths.push(resolved)
+    if (entry.quarantine !== undefined) {
+      scope.preservedArtifacts.push(path.dirname(path.resolve(entry.quarantine)))
+      scope.preservedPaths.push(path.resolve(entry.quarantine))
+    }
+    scope.recovered = false
+    return undefined
+  }
+  if (scope.frontierPaths.has(resolved)) {
+    // Planned-missing frontiers are never restored; live presence blocks.
+    if (await pathKind(resolved) === 'missing') return undefined
+  } else if (!scope.ownedPaths.has(resolved)) {
+    if (entry.existed) scope.preservedPaths.push(resolved)
+    return undefined
+  } else if (!entry.existed) {
+    return undefined
+  } else if (entry.backup && await pathKind(entry.backup) === entry.kind && await pathDigest(entry.backup) === entry.digest) {
+    // Prove the complete lstat-only ancestor chain before trusting live
+    // digests: byte-identical content under a substituted parent is unsafe.
+    const ancestorChain = await captureLiveAncestorChain(resolved)
+    if (ancestorChain !== undefined) {
+      if (resolved !== scope.trackingPath) return { backup: entry.backup, ancestorChain }
+      // A later process has no publication capability for changed tracking.
+      // Keep the backup and ancestor checks even when no write is needed;
+      // recovery must not undo restore's concurrent-byte preservation.
+      if (await pathKind(resolved) === entry.kind && await pathDigest(resolved) === entry.digest) return undefined
+    }
+  }
+  scope.preservedPaths.push(resolved)
+  scope.recovered = false
+  return undefined
+}
+
+export interface FallbackRecoveryResult {
+  pending: boolean
+  recovered: boolean
+  restoredPaths: string[]
+  preservedArtifacts: string[]
+  preservedPaths: string[]
+}
+
+/** Read-only transaction preflight; its observations never authorize a later write. */
+function prepareFallbackRecovery (trackingPath: string): FallbackRecoveryResult | { journal: FallbackJournal; scope: RecoveryInspectionScope } {
+  const result: FallbackRecoveryResult = { pending: false, recovered: true, restoredPaths: [], preservedArtifacts: [], preservedPaths: [] }
+  const journalPath = fallbackJournalPath(trackingPath)
+  if (!existsSync(journalPath)) return result
+  result.pending = true
+  result.recovered = false
+  let journal: FallbackJournal
+  try {
+    journal = strictLoad(journalPath)
+  } catch {
+    result.preservedArtifacts.push(journalPath)
+    return result
+  }
+  // Neither inspection nor recovery may run beside another live mutator.
+  if (journal.mutator !== undefined && !processMatches(journal.mutator) && processIsLive(journal.mutator)) return result
+  result.preservedArtifacts.push(journalPath)
+  if (!snapshotShapeIsValid(journal)) return result
+  if (journal.snapshotDirectory !== undefined) result.preservedArtifacts.push(path.resolve(journal.snapshotDirectory))
+  const trackingResolved = path.resolve(journal.manifest.trackingPath)
+  const trackingEntry = journal.entries.find((entry) => path.resolve(entry.path) === trackingResolved)
+  // A digest rewritten in the mutable journal cannot authenticate tracking.
+  if (trackingEntry?.existed === true && trackingEntry.backup !== undefined && trackingDigest(trackingEntry.backup) !== journal.manifest.trackingDigest) {
+    result.preservedPaths.push(trackingResolved)
+    return result
+  }
+  return {
+    journal,
+    scope: {
+      trackingPath: trackingResolved,
+      ownedPaths: currentTrackingOwnedPaths(journal.manifest.trackingPath),
+      frontierPaths: new Set(journal.manifest.plannedMissingFrontiers.map((frontier) => path.resolve(frontier.frontierPath))),
+      preservedPaths: result.preservedPaths,
+      preservedArtifacts: result.preservedArtifacts,
+      recovered: true,
+    },
+  }
+}
+
+function recoveryResult (scope: RecoveryInspectionScope, restoredPaths: readonly string[] = []): FallbackRecoveryResult {
+  return { pending: true, recovered: scope.recovered, restoredPaths: dedupePaths(restoredPaths), preservedArtifacts: dedupePaths(scope.preservedArtifacts), preservedPaths: dedupePaths(scope.preservedPaths) }
 }
 
 /**
@@ -2604,107 +2747,17 @@ export async function commitFallbackJournal (handle: FallbackJournalHandle): Pro
  * digest fails closed with nothing restored. Everything else is preserved
  * and reported pending.
  */
-export async function recoverFallbackJournal (trackingPath: string): Promise<{ pending: boolean; recovered: boolean; restoredPaths: string[]; preservedArtifacts: string[]; preservedPaths: string[] }> {
-  const preservedArtifacts: string[] = []
-  const preservedPaths: string[] = []
+export async function recoverFallbackJournal (trackingPath: string): Promise<FallbackRecoveryResult> {
+  const prepared = prepareFallbackRecovery(trackingPath)
+  if ('pending' in prepared) return prepared
+  const { journal, scope } = prepared
+  const { preservedPaths, preservedArtifacts } = scope
   const restoredPaths: string[] = []
-  const journalPath = fallbackJournalPath(trackingPath)
-  if (!existsSync(journalPath)) return { pending: false, recovered: true, restoredPaths, preservedArtifacts, preservedPaths }
-  let journal: FallbackJournal
-  try {
-    journal = strictLoad(journalPath)
-  } catch {
-    preservedArtifacts.push(journalPath)
-    return { pending: true, recovered: false, restoredPaths, preservedArtifacts, preservedPaths }
-  }
-  // A live mutator still owns the transaction; never run concurrently with it.
-  if (journal.mutator !== undefined && !processMatches(journal.mutator) && processIsLive(journal.mutator)) {
-    return { pending: true, recovered: false, restoredPaths, preservedArtifacts, preservedPaths }
-  }
-  if (!snapshotShapeIsValid(journal)) {
-    preservedArtifacts.push(journalPath)
-    return { pending: true, recovered: false, restoredPaths, preservedArtifacts, preservedPaths }
-  }
-  // Tracking preflight BEFORE any live mutation: the tracking backup must
-  // authenticate against the planned manifest tracking digest (raw backup
-  // bytes), not merely against its own journaled entry digest. A rewritten
-  // tracking backup with a recomputed entry digest leaves the manifest and
-  // its hash untouched, so the entry self-check cannot see it — but the
-  // forged bytes would then be installed as the live tracking file for
-  // later consumers. Fail closed here with nothing restored.
-  const trackingResolved = path.resolve(journal.manifest.trackingPath)
-  const trackingEntry = journal.entries.find((entry) => path.resolve(entry.path) === trackingResolved)
-  if (trackingEntry?.existed === true && trackingEntry.backup !== undefined) {
-    if (trackingDigest(trackingEntry.backup) !== journal.manifest.trackingDigest) {
-      preservedArtifacts.push(journalPath)
-      if (journal.snapshotDirectory !== undefined) preservedArtifacts.push(path.resolve(journal.snapshotDirectory))
-      preservedPaths.push(trackingResolved)
-      return { pending: true, recovered: false, restoredPaths, preservedArtifacts, preservedPaths }
-    }
-  }
-  // Narrow the restore scope to what the CURRENT tracking file declares owned.
-  let currentTracking: TrackingData | undefined
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path.resolve(journal.manifest.trackingPath), 'utf8'))
-    if (isValidTrackingData(parsed)) currentTracking = parsed as TrackingData
-  } catch { currentTracking = undefined }
-  const ownedPaths = new Set<string>([path.resolve(journal.manifest.trackingPath)])
-  if (currentTracking !== undefined) {
-    for (const skill of currentTracking.skills) {
-      for (const owned of [skill.path, ...Object.values(skill.paths ?? {})]) {
-        if (typeof owned === 'string') ownedPaths.add(path.resolve(owned))
-      }
-    }
-    for (const server of currentTracking.mcpServers) ownedPaths.add(path.resolve(server.configPath))
-  }
-  let recovered = true
-  // Planned-missing frontiers are never restored by next-run recovery: a
-  // live frontier (including any descendants the tracking file now names) is
-  // preserved and reported as incomplete, while an absent frontier satisfies
-  // the original missing state. Live presence is checked directly on the
-  // filesystem, never inferred from reporting fields.
-  const frontierPaths = new Set(journal.manifest.plannedMissingFrontiers.map((frontier) => path.resolve(frontier.frontierPath)))
   for (const entry of journal.entries) {
     const resolved = path.resolve(entry.path)
-    // A durable frontierRollbackPending entry blocks recovery entirely for
-    // that target: the ambiguous physical state is preserved and reported,
-    // never cleaned or restored-over (disk state is reporting/blocking only).
-    if (entry.frontierRollbackPending === true) {
-      preservedPaths.push(resolved)
-      if (entry.quarantine !== undefined) {
-        preservedArtifacts.push(path.dirname(path.resolve(entry.quarantine)))
-        preservedPaths.push(path.resolve(entry.quarantine))
-      }
-      recovered = false
-      continue
-    }
-    if (frontierPaths.has(resolved)) {
-      if (await pathKind(resolved) !== 'missing') {
-        preservedPaths.push(resolved)
-        recovered = false
-      }
-      continue
-    }
-    if (!ownedPaths.has(resolved)) {
-      if (entry.existed) preservedPaths.push(resolved)
-      continue
-    }
-    if (!entry.existed) continue
-    if (!entry.backup || await pathKind(entry.backup) !== entry.kind || await pathDigest(entry.backup) !== entry.digest) {
-      recovered = false
-      preservedPaths.push(resolved)
-      continue
-    }
-    // Ancestor-chain authentication BEFORE any filesystem mutation on this
-    // target: the complete live chain must be provable as real non-link
-    // directories, otherwise a substituted ancestor could redirect the
-    // rename/copy below to a foreign location. Fail closed and preserve.
-    const ancestorChain = await captureLiveAncestorChain(resolved)
-    if (ancestorChain === undefined) {
-      recovered = false
-      preservedPaths.push(resolved)
-      continue
-    }
+    const candidate = await inspectRecoveryEntry(entry, scope)
+    if (candidate === undefined) continue
+    const { backup, ancestorChain } = candidate
     try {
       const kind = await pathKind(resolved)
       if (kind === entry.kind && kind !== 'missing' && await pathDigest(resolved) === entry.digest) continue
@@ -2718,7 +2771,7 @@ export async function recoverFallbackJournal (trackingPath: string): Promise<{ p
           await rename(resolved, moved)
         }
         const temporary = path.join(storage, 'payload')
-        await cp(entry.backup, temporary, { recursive: true, verbatimSymlinks: true, dereference: false })
+        await cp(backup, temporary, { recursive: true, verbatimSymlinks: true, dereference: false })
         if (await pathDigest(temporary) !== entry.digest || await pathKind(temporary) !== entry.kind) throw new Error('recovery copy mismatch')
         // The install into the live tree must still traverse only the exact
         // proven ancestor identities: a mid-operation replacement aborts
@@ -2734,7 +2787,7 @@ export async function recoverFallbackJournal (trackingPath: string): Promise<{ p
         if (!await liveAncestorChainMatches(ancestorChain)) {
           storagePreserved = true
           preservedArtifacts.push(storage)
-          recovered = false
+          scope.recovered = false
           preservedPaths.push(resolved)
           continue
         }
@@ -2748,14 +2801,11 @@ export async function recoverFallbackJournal (trackingPath: string): Promise<{ p
         throw error
       }
     } catch {
-      recovered = false
+      scope.recovered = false
       preservedPaths.push(resolved)
     }
   }
-  // The journal and its snapshot always survive next-run recovery.
-  preservedArtifacts.push(journalPath)
-  if (journal.snapshotDirectory !== undefined) preservedArtifacts.push(path.resolve(journal.snapshotDirectory))
-  return { pending: true, recovered, restoredPaths: dedupePaths(restoredPaths), preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
+  return recoveryResult(scope, restoredPaths)
 }
 
 /**
@@ -2767,103 +2817,33 @@ export async function recoverFallbackJournal (trackingPath: string): Promise<{ p
  * matches next-run recovery, except `restoredPaths` is always empty: an
  * inspection never restores anything.
  */
-export async function inspectFallbackJournal (trackingPath: string): Promise<{ pending: boolean; recovered: boolean; restoredPaths: string[]; preservedArtifacts: string[]; preservedPaths: string[] }> {
-  const journalPath = fallbackJournalPath(trackingPath)
-  if (!existsSync(journalPath)) return { pending: false, recovered: true, restoredPaths: [], preservedArtifacts: [], preservedPaths: [] }
-  let journal: FallbackJournal
-  try {
-    journal = strictLoad(journalPath)
-  } catch {
-    return { pending: true, recovered: false, restoredPaths: [], preservedArtifacts: [journalPath], preservedPaths: [] }
-  }
-  // A live mutator still owns the transaction; report pending without
-  // touching anything.
-  if (journal.mutator !== undefined && !processMatches(journal.mutator) && processIsLive(journal.mutator)) {
-    return { pending: true, recovered: false, restoredPaths: [], preservedArtifacts: [], preservedPaths: [] }
-  }
-  if (!snapshotShapeIsValid(journal)) {
-    return { pending: true, recovered: false, restoredPaths: [], preservedArtifacts: [journalPath], preservedPaths: [] }
-  }
-  const preservedArtifacts = [journalPath]
-  if (journal.snapshotDirectory !== undefined) preservedArtifacts.push(path.resolve(journal.snapshotDirectory))
-  // Narrow the reported scope exactly like next-run recovery: what the
-  // CURRENT tracking file declares owned. Read-only; the file is never
-  // written.
-  let currentTracking: TrackingData | undefined
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path.resolve(journal.manifest.trackingPath), 'utf8'))
-    if (isValidTrackingData(parsed)) currentTracking = parsed as TrackingData
-  } catch { currentTracking = undefined }
-  const ownedPaths = new Set<string>([path.resolve(journal.manifest.trackingPath)])
-  if (currentTracking !== undefined) {
-    for (const skill of currentTracking.skills) {
-      for (const owned of [skill.path, ...Object.values(skill.paths ?? {})]) {
-        if (typeof owned === 'string') ownedPaths.add(path.resolve(owned))
-      }
-    }
-    for (const server of currentTracking.mcpServers) ownedPaths.add(path.resolve(server.configPath))
-  }
-  const preservedPaths: string[] = []
-  let recovered = true
-  // The same tracking preflight as next-run recovery, read-only: a tracking
-  // backup that disagrees with the planned manifest digest is reported
-  // pending without restoring anything.
-  const trackingResolved = path.resolve(journal.manifest.trackingPath)
-  const trackingEntry = journal.entries.find((entry) => path.resolve(entry.path) === trackingResolved)
-  if (trackingEntry?.existed === true && trackingEntry.backup !== undefined) {
-    if (trackingDigest(trackingEntry.backup) !== journal.manifest.trackingDigest) {
-      preservedPaths.push(trackingResolved)
-      return { pending: true, recovered: false, restoredPaths: [], preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
-    }
-  }
-  const frontierPaths = new Set(journal.manifest.plannedMissingFrontiers.map((frontier) => path.resolve(frontier.frontierPath)))
+export async function inspectFallbackJournal (trackingPath: string): Promise<FallbackRecoveryResult> {
+  const prepared = prepareFallbackRecovery(trackingPath)
+  if ('pending' in prepared) return prepared
+  const { journal, scope } = prepared
+  const { preservedPaths } = scope
   for (const entry of journal.entries) {
     const resolved = path.resolve(entry.path)
-    if (entry.frontierRollbackPending === true) {
-      preservedPaths.push(resolved)
-      if (entry.quarantine !== undefined) {
-        preservedArtifacts.push(path.dirname(path.resolve(entry.quarantine)))
-        preservedPaths.push(path.resolve(entry.quarantine))
-      }
-      recovered = false
-      continue
-    }
-    if (frontierPaths.has(resolved)) {
-      if (await pathKind(resolved) !== 'missing') {
-        preservedPaths.push(resolved)
-        recovered = false
-      }
-      continue
-    }
-    if (!ownedPaths.has(resolved)) {
-      if (entry.existed) preservedPaths.push(resolved)
-      continue
-    }
-    if (!entry.existed) continue
-    if (!entry.backup || await pathKind(entry.backup) !== entry.kind || await pathDigest(entry.backup) !== entry.digest) {
-      preservedPaths.push(resolved)
-      recovered = false
-      continue
-    }
-    // Ancestor-chain authentication BEFORE trusting live bytes: the complete
-    // live chain must be provable as real non-link directories, otherwise a
-    // substituted ancestor could present byte-identical content that next-run
-    // recovery would refuse to traverse. A byte-identical skill under a
-    // symlink-substituted parent is reported preserved for manual inspection,
-    // never as needing no restoration. Read-only; the chain is captured with
-    // lstat and never followed, mutated, or used for ownership classification.
-    const ancestorChain = await captureLiveAncestorChain(resolved)
-    if (ancestorChain === undefined) {
-      preservedPaths.push(resolved)
-      recovered = false
-      continue
-    }
+    if (await inspectRecoveryEntry(entry, scope) === undefined) continue
     const kind = await pathKind(resolved)
     if (kind === entry.kind && kind !== 'missing' && await pathDigest(resolved) === entry.digest) continue
     preservedPaths.push(resolved)
-    recovered = false
+    scope.recovered = false
   }
-  return { pending: true, recovered, restoredPaths: [], preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
+  return recoveryResult(scope)
+}
+
+type FallbackEntryUpdate = Partial<Pick<FallbackJournalEntry, 'stage' | 'stageDigest' | 'applied' | 'quarantine' | 'frontierRollbackPending'>>
+
+/** Build proposed state only. Callers retain capability checks, CAS writes and handle issuance. */
+function journalWithEntryUpdate (journal: FallbackJournal, target: FallbackJournalEntry | string, update: FallbackEntryUpdate): FallbackJournal {
+  return {
+    ...journal,
+    entries: journal.entries.map((candidate) => {
+      const matches = typeof target === 'string' ? path.resolve(candidate.path) === target : candidate === target
+      return matches ? { ...candidate, ...update } : candidate
+    }),
+  }
 }
 
 /** Strict reload for a handle: any missing, malformed, replaced, stale-revision, or mismatched disk state throws; the stale in-memory object is never returned. */
@@ -2875,6 +2855,48 @@ export async function reloadFallbackJournal (handle: FallbackJournalHandle): Pro
   if (!sameManifest(journal.manifest, handle.manifest)) throw new Error('Invalid fallback journal')
   if (journal.revision !== handle.revision) throw new Error('Invalid fallback journal')
   return journal
+}
+
+/** Owner-only completion: prove applied state, then optional caller postconditions, before commit.
+ * Mutable journal fields validate success; the genuine handle remains the authority for restore/commit.
+ */
+export async function finalizeFallbackJournal (
+  owner: FallbackJournalHandle,
+  validate?: () => Promise<boolean>
+): Promise<{ failure?: 'journal' | 'postconditions'; result: FallbackJournalOperationResult }> {
+  const journal = await reloadFallbackJournal(owner)
+  requireRole(journal, owner, 'owner')
+  const failure = !await journalProvesAppliedState(journal)
+    ? 'journal'
+    : validate !== undefined && !await validate() ? 'postconditions' : undefined
+  return { failure, result: failure === undefined ? await commitFallbackJournal(owner) : await restoreFallbackJournal(owner) }
+}
+
+/**
+ * Prove success against the strictly reloaded journal and live filesystem.
+ * Used independently by the local transaction and external parent. These
+ * mutable fields are validation evidence; they never authorize restore or commit.
+ */
+export async function journalProvesAppliedState (journal: FallbackJournal): Promise<boolean> {
+  for (const entry of journal.entries) {
+    const target = path.resolve(entry.path)
+    if (entry.stageDigest !== undefined) {
+      if (entry.applied !== true) return false
+      if (await pathDigest(target) !== entry.stageDigest) return false
+      continue
+    }
+    if (entry.applied === true) {
+      if (await pathKind(target) !== 'missing') return false
+      continue
+    }
+    const kind = await pathKind(target)
+    if (entry.existed === true) {
+      if (kind === 'missing' || entry.digest === undefined || await pathDigest(target) !== entry.digest) return false
+    } else if (kind !== 'missing') {
+      return false
+    }
+  }
+  return true
 }
 
 function strictLoad (journalPath: string): FallbackJournal {

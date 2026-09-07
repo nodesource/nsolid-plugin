@@ -1,7 +1,7 @@
 import path from 'node:path'
 import type { UpdateContext, UpdateInstallation, UpdatePlanItem, UpdateResult, UpdateStrategy } from '../types.js'
-import { DEFAULT_COMMAND_TIMEOUT_MS, resolveExecutableIdentity } from '../command-runner.js'
-import { managerArgsForIdentity } from '../package-manager.js'
+import { resolveExecutableIdentity } from '../command-runner.js'
+import { transactionCommand } from '../transaction-commands.js'
 import { nativeExecutionGuard } from '../native-evidence.js'
 import { executeCodexTransaction, resolveCodexPluginCachePath } from '../codex-transaction.js'
 import { failedResult, isMutableVersion, noMutationStatus, planItem, resultFromPlan } from './common.js'
@@ -25,20 +25,18 @@ export const codexStrategy: UpdateStrategy = {
     // Resolve the launcher once; all three commands share the same verified
     // identity. An unverifiable launcher degrades to an unsupported plan with
     // manual commands instead of failing at execution time.
+    const manualCommands = [
+      `codex plugin marketplace upgrade ${source.marketplace}`,
+      `codex plugin remove ${source.pluginId}`,
+      `codex plugin add ${source.pluginId}`,
+    ]
     const identity = resolveExecutableIdentity('codex')
     if (identity.kind === 'unsupported') {
       return {
         ...planItem(installation, [], [], undefined, { code: 'UNSAFE_HARNESS_LAUNCHER', message: 'Codex launcher cannot be verified as a safe executable identity' }),
-        manualCommands: [
-          `codex plugin marketplace upgrade ${source.marketplace}`,
-          `codex plugin remove ${source.pluginId}`,
-          `codex plugin add ${source.pluginId}`,
-        ],
+        manualCommands,
       }
     }
-    const upgrade = managerArgsForIdentity(identity, ['plugin', 'marketplace', 'upgrade', source.marketplace])
-    const remove = managerArgsForIdentity(identity, ['plugin', 'remove', source.pluginId])
-    const add = managerArgsForIdentity(identity, ['plugin', 'add', source.pluginId])
     const configPath = path.resolve(installation.metadata?.configPath ?? process.env.CODEX_CONFIG_PATH ?? resolveHome('~/.codex/config.toml'))
     const plannedInstallation = {
       ...installation,
@@ -48,33 +46,17 @@ export const codexStrategy: UpdateStrategy = {
     if (!cachePath) {
       return {
         ...planItem(plannedInstallation, [], [], undefined, { code: 'CODEX_CACHE_UNRESOLVED', message: 'The exact Codex plugin cache could not be identified safely' }),
-        manualCommands: [
-          `codex plugin marketplace upgrade ${source.marketplace}`,
-          `codex plugin remove ${source.pluginId}`,
-          `codex plugin add ${source.pluginId}`,
-        ],
+        manualCommands,
       }
     }
     return {
       ...planItem(
         plannedInstallation,
         [
-          {
-            kind: 'command',
-            description: `Refresh the detected Codex marketplace ${source.marketplace}`,
-            command: { executable: upgrade.executable, executableIdentity: identity, args: upgrade.args, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS },
-          },
+          transactionCommand(identity, ['plugin', 'marketplace', 'upgrade', source.marketplace], `Refresh the detected Codex marketplace ${source.marketplace}`),
           { kind: 'filesystem', description: 'Back up the exact Codex plugin registration and cached payload', operation: 'backup', paths: [configPath, cachePath] },
-          {
-            kind: 'command',
-            description: `Remove the detected plugin ${source.pluginId} before reinstalling the refreshed snapshot`,
-            command: { executable: remove.executable, executableIdentity: identity, args: remove.args, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS },
-          },
-          {
-            kind: 'command',
-            description: `Reinstall the detected plugin ${source.pluginId} from the refreshed marketplace`,
-            command: { executable: add.executable, executableIdentity: identity, args: add.args, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS },
-          },
+          transactionCommand(identity, ['plugin', 'remove', source.pluginId], `Remove the detected plugin ${source.pluginId} before reinstalling the refreshed snapshot`),
+          transactionCommand(identity, ['plugin', 'add', source.pluginId], `Reinstall the detected plugin ${source.pluginId} from the refreshed marketplace`),
           { kind: 'validation', description: 'Validate the reinstalled local Codex plugin version and preserved configuration', checks: [`${source.pluginId} matches refreshed version ${installation.version.latest}`, 'unrelated Codex configuration remains unchanged'] },
           { kind: 'filesystem', description: 'Remove the successful Codex transaction backup', operation: 'cleanup', paths: [configPath] },
         ],

@@ -6,7 +6,6 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   assertFallbackFrontierEvidenceList,
-  assertFallbackFrontierPlanMatches,
   compareUtf8,
   deriveFallbackFrontierLeafTargets,
   deriveFallbackFrontierPlan,
@@ -395,12 +394,10 @@ describe('fallback frontier strict parsing and revalidation', () => {
     extraRecord.applied = true
     assertErrorCode(() => assertFallbackFrontierEvidenceList(extraField), FALLBACK_FRONTIER_ERROR_CODES.INVALID_INPUT)
 
-    // Nested leaves must reject unknown fields through strict parsing AND
-    // through the graph matcher (wrapped as drift).
+    // Nested leaves must reject unknown fields through the production parser.
     const nestedExtraField = structuredCloneFrontiers(plan.frontiers)
     ;(nestedExtraField[0].leaves[0] as unknown as Record<string, unknown>).tampered = true
     assertErrorCode(() => assertFallbackFrontierEvidenceList(nestedExtraField), FALLBACK_FRONTIER_ERROR_CODES.INVALID_INPUT)
-    assertErrorCode(() => assertFallbackFrontierPlanMatches(plan.frontiers, nestedExtraField), FALLBACK_FRONTIER_ERROR_CODES.DRIFT)
 
     // Anchors must carry exactly the recorded directory identity fields.
     const anchorMissingType = structuredCloneFrontiers(plan.frontiers)
@@ -423,31 +420,6 @@ describe('fallback frontier strict parsing and revalidation', () => {
     const combined = [...structuredCloneFrontiers(second.frontiers), ...unsortedFrontiers]
     combined.sort((a, b) => compareUtf8(b.frontierPath, a.frontierPath))
     assertErrorCode(() => assertFallbackFrontierEvidenceList(combined), FALLBACK_FRONTIER_ERROR_CODES.INVALID_INPUT)
-
-    // Identity mismatches parse fine but must drift during revalidation.
-    const inodeSwap = structuredCloneFrontiers(plan.frontiers)
-    inodeSwap[0].anchor.inode = '999999'
-    assertErrorCode(() => assertFallbackFrontierPlanMatches(plan.frontiers, inodeSwap), FALLBACK_FRONTIER_ERROR_CODES.DRIFT)
-  })
-
-  it('detects graph drift exactly: equal passes, any content or membership change drifts', async () => {
-    const anchor = path.join(root, 'skills')
-    mkdirSync(anchor)
-    const expected = await deriveFallbackFrontierPlan([leaf(path.join(anchor, 'added')), leaf(path.join(anchor, 'other', 'x'), 'link', 'conditional')])
-    assertFallbackFrontierPlanMatches(expected.frontiers, structuredCloneFrontiers(expected.frontiers))
-
-    const roleSwap = structuredCloneFrontiers(expected.frontiers)
-    roleSwap[0].leaves[0].role = 'link'
-    assertErrorCode(() => assertFallbackFrontierPlanMatches(expected.frontiers, roleSwap), FALLBACK_FRONTIER_ERROR_CODES.DRIFT)
-
-    const removed = structuredCloneFrontiers(expected.frontiers).slice(1)
-    assertErrorCode(() => assertFallbackFrontierPlanMatches(expected.frontiers, removed), FALLBACK_FRONTIER_ERROR_CODES.DRIFT)
-
-    const added = [...structuredCloneFrontiers(expected.frontiers), ...structuredCloneFrontiers((await deriveFallbackFrontierPlan([leaf(path.join(root, 'elsewhere'))])).frontiers)]
-    added.sort((a, b) => compareUtf8(a.frontierPath, b.frontierPath))
-    assertErrorCode(() => assertFallbackFrontierPlanMatches(expected.frontiers, added), FALLBACK_FRONTIER_ERROR_CODES.DRIFT)
-
-    assertErrorCode(() => assertFallbackFrontierPlanMatches(expected.frontiers, [{ nope: true }]), FALLBACK_FRONTIER_ERROR_CODES.DRIFT)
   })
 
   it('rejects globally impossible graphs no derivation could ever produce', async () => {
