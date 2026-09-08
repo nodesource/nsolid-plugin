@@ -491,8 +491,9 @@ function binValueMatches (binValue: string, inPackageRelative: string, namesEqua
  * process group reaches one of our own ancestors (the reparenting target of an
  * escaped grandchild) cannot be proven unrelated, so the verdict fails closed.
  * On Linux the caller supplies the pre-spawn `/proc` identity snapshot that
- * makes that classification possible; without it the historical enumeration
- * semantics apply.
+ * makes that classification possible; without it (other platforms, or an
+ * unreadable /proc) termination can only be partially attributed, so the
+ * verdict refuses confirmation instead of claiming success.
  */
 async function terminateTree (
   pid: number,
@@ -579,22 +580,32 @@ function predatesSpawn (startSnapshot: ReadonlyMap<number, number>, childStartti
 }
 
 /**
- * Final termination verdict. Without a pre-spawn snapshot (non-Linux, or
- * /proc unreadable at spawn time) the historical enumeration semantics apply
- * and the observed-tree check above is the whole verdict. With one, an empty
+ * Final termination verdict for a timed-out command tree. Without pre-spawn
+ * identity evidence (non-Linux, or /proc unreadable at spawn time) there is
+ * no way to attribute a detached, token-stripped, reparented descendant:
+ * macOS PPID and token enumeration cannot connect it to the command once its
+ * intermediate exited. Missing evidence must refuse confirmation, mirroring
+ * the ordinary-exit standard in confirmExitedTree, never grant it — the
+ * historical default of treating the observed-tree check as the whole verdict
+ * claimed termination that could not be proven. With a snapshot, an empty
  * observed set is necessary but not sufficient: the verdict additionally
  * requires that no post-spawn process survives whose relation to the child
  * cannot be ruled out (see postSpawnSurvivorsUnrelated), and that /proc stayed
  * reliable from before the spawn through the verdict (fail closed otherwise).
+ *
+ * Exported as the deterministic decision seam for regression tests: the
+ * missing-evidence branch below is the exact macOS discrepancy (a detached,
+ * token-stripped, reparented descendant is unattributable there), and no
+ * Linux test run can reach it through `runCommand` alone.
  */
-function terminationVerdict (
+export function terminationVerdict (
   linuxSnapshot: ReadonlyMap<number, number> | undefined,
   preSignal: ProcStatTable | undefined,
   childPid: number,
   childStarttime: number | undefined,
   lineage: PosixLineage | undefined
 ): boolean {
-  if (linuxSnapshot === undefined || preSignal === undefined) return true
+  if (linuxSnapshot === undefined || preSignal === undefined) return false
   if (!preSignal.complete || lineage?.complete === false) return false
   if (lineage !== undefined && [...lineage.escaped.values()].some(({ pid, starttime }) => {
     const fields = preSignal.table.get(pid)

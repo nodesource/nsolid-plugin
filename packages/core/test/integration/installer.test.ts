@@ -1,9 +1,9 @@
 import { describe, it, beforeEach, afterEach, before, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, sep } from 'node:path'
-import { tmpdir } from 'node:os'
+import { createCanonicalTempRoot } from '../helpers/canonical-temp-root.js'
 import http from 'node:http'
 import type { BundleDescriptor, BrowserLauncher } from '../../src/types.js'
 import type { ProgressReporter } from '../../src/utils/progress.js'
@@ -121,7 +121,7 @@ let originalFetch: typeof globalThis.fetch
 let originalNpmExecpath: string | undefined
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'nsolid-installer-'))
+  tmpDir = createCanonicalTempRoot('nsolid-installer-')
   originalHome = process.env.HOME
   originalUserProfile = process.env.USERPROFILE
   originalProgressEnv = process.env.NSOLID_PLUGIN_PROGRESS

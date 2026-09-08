@@ -24,6 +24,7 @@ import { getAdapter } from '../../../src/harnesses/index.js'
 import type { BundleDescriptor } from '../../../src/types.js'
 
 import { createParentIdentity, refreshWithParent } from '../../helpers/fallback-refresh.js'
+import { createCanonicalTempRoot } from '../../helpers/canonical-temp-root.js'
 
 let home: string
 let previousHome: string | undefined
@@ -36,7 +37,7 @@ async function pathEvidence (target: string) {
 }
 
 beforeEach(() => {
-  home = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-transaction-'))
+  home = createCanonicalTempRoot('nsolid-plugin-fallback-transaction-')
   previousHome = process.env.HOME
   previousUserProfile = process.env.USERPROFILE
   process.env.HOME = home

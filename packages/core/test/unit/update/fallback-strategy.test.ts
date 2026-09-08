@@ -1,4 +1,5 @@
 import { tarEntry } from '../../helpers/tar.js'
+import { createCanonicalTempRoot } from '../../helpers/canonical-temp-root.js'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -74,7 +75,7 @@ describe('fallback update strategy', () => {
     const previousPath = process.env.PATH
     const previousHome = process.env.HOME
     const previousUserProfile = process.env.USERPROFILE
-    const home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-fallback-plan-'))
+    const home = createCanonicalTempRoot('nsolid-plugin-fallback-plan-')
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     const trackingPath = path.join(home, '.agents', '.nodesource-installed.json')
     mkdirSync(skillPath, { recursive: true })
@@ -115,7 +116,7 @@ describe('fallback strategy parent gate', () => {
   let restoreHome: () => void
 
   beforeEach(() => {
-    home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-fallback-strategy-'))
+    home = createCanonicalTempRoot('nsolid-plugin-fallback-strategy-')
     restoreHome = isolateHome(home)
   })
 
@@ -299,7 +300,7 @@ describe('fallback strategy structured child result', () => {
   let restoreHome: () => void
 
   beforeEach(() => {
-    home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-fallback-result-'))
+    home = createCanonicalTempRoot('nsolid-plugin-fallback-result-')
     restoreHome = isolateHome(home)
   })
 

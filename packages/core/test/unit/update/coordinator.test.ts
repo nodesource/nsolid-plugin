@@ -1,10 +1,10 @@
 import { tarEntry } from '../../helpers/tar.js'
+import { createCanonicalTempRoot } from '../../helpers/canonical-temp-root.js'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
-import os from 'node:os'
 import path from 'node:path'
 import { checkUpdates, executeUpdatePlan, planUpdates, update, withPinnedMarketplaceCommit } from '../../../src/update/coordinator.js'
 import { beginFallbackJournal, fallbackJournalPath, pathDigest, pathKind, trackingDigest } from '../../../src/update/fallback-journal.js'
@@ -20,7 +20,7 @@ let previousHome: string | undefined
 let previousUserProfile: string | undefined
 
 beforeEach(() => {
-  home = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-coordinator-'))
+  home = createCanonicalTempRoot('nsolid-plugin-coordinator-')
   previousHome = process.env.HOME
   previousUserProfile = process.env.USERPROFILE
   process.env.HOME = home

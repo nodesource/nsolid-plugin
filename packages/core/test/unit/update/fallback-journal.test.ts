@@ -10,6 +10,7 @@ import { applyFallbackEntry, beginFallbackJournal, canonicalJsonString, claimFal
 import { assertFallbackFrontierEvidenceList, compareUtf8, FallbackFrontierError } from '../../../src/update/fallback-frontier.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getSkillsDir, getTrackingFilePath } from '../../../src/utils/path.js'
+import { createCanonicalTempRoot } from '../../helpers/canonical-temp-root.js'
 import { FALLBACK_PROTOCOL_VERSION, type FallbackAnchorIdentity, type FallbackFrontierEvidence, type FallbackTransactionIdentity } from '../../../src/update/types.js'
 
 let home: string
@@ -17,7 +18,7 @@ let previousHome: string | undefined
 let previousUserProfile: string | undefined
 
 beforeEach(() => {
-  home = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-journal-'))
+  home = createCanonicalTempRoot('nsolid-plugin-journal-')
   previousHome = process.env.HOME
   previousUserProfile = process.env.USERPROFILE
   process.env.HOME = home
@@ -343,8 +344,13 @@ describe('fallback journal ownership validation', () => {
 
   it('rejects a changed frontier anchor inode through the real journal preflight', async () => {
     const fixture = await setupFrontierFixture()
+    // Replace the anchor's inode without deleting the original directory and
+    // without rename-over-existing (not permitted on every platform): rename
+    // the original aside preserving its inode, then move the freshly created
+    // replacement into the anchor path.
     const replacement = path.join(home, 'frontier-anchor-replacement')
     mkdirSync(replacement)
+    renameSync(fixture.anchorPath, `${fixture.anchorPath}-replaced`)
     renameSync(replacement, fixture.anchorPath)
 
     await assert.rejects(beginFallbackJournal(fixture.manifest), /FALLBACK_FRONTIER_DRIFT/)
@@ -1730,10 +1736,13 @@ describe('fallback journal frontier entries', () => {
     assert.equal(existsSync(fallbackJournalPath(fixture.trackingPath)), false)
     assert.deepEqual(readdirSync(trackingDir).filter((name) => name.startsWith('.nsolid-plugin-update-')), [])
     rmSync(fixture.frontierPath, { recursive: true, force: true })
-    // The anchor identity changed: rename a fresh directory over the anchor
-    // so the replacement is guaranteed to carry a new inode.
+    // The anchor identity changed: rename the original anchor aside
+    // (preserving its inode, avoiding rename-over-existing), then move a
+    // freshly created directory into the anchor path so the replacement is
+    // guaranteed to carry a new inode.
     const replacement = path.join(home, 'anchor-replacement')
     mkdirSync(replacement)
+    renameSync(fixture.anchorPath, `${fixture.anchorPath}-replaced`)
     renameSync(replacement, fixture.anchorPath)
     await assert.rejects(beginFallbackJournal(fixture.manifest), /FALLBACK_FRONTIER_DRIFT/)
     assert.equal(existsSync(fallbackJournalPath(fixture.trackingPath)), false)

@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import os from 'node:os'
+import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import {
   assertFallbackFrontierEvidenceList,
@@ -23,11 +22,12 @@ import {
 import type { FallbackAnchorIdentity, FallbackFrontierEvidence, FallbackLeafActivation, FallbackLeafRole, FallbackLeafTarget, FallbackPathEvidence, FallbackTransactionIdentity } from '../../../src/update/types.js'
 import type { HarnessType } from '../../../src/types.js'
 import { FALLBACK_PROTOCOL_VERSION } from '../../../src/update/types.js'
+import { createCanonicalTempRoot } from '../../helpers/canonical-temp-root.js'
 
 let root: string
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-frontier-'))
+  root = createCanonicalTempRoot('nsolid-plugin-frontier-')
 })
 
 afterEach(() => {
@@ -804,10 +804,14 @@ describe('fallback frontier journal revalidation', () => {
     mkdirSync(anchor)
     const frontierPath = path.join(anchor, 'new-root')
     const evidence = evidenceFor(anchor, frontierPath)
-    // Rename a freshly created directory over the anchor: both existed at
-    // the same time, so the replacement is guaranteed to carry a new inode.
+    // Replace the anchor's directory entry with a freshly created directory:
+    // both existed at the same time, so the replacement is guaranteed to
+    // carry a new inode. Rename the original aside first (preserving its
+    // inode and avoiding deletion/inode reuse): rename-over-existing is not
+    // permitted on every platform.
     const replacement = path.join(root, 'anchor-replacement')
     mkdirSync(replacement)
+    renameSync(anchor, `${anchor}-replaced`)
     renameSync(replacement, anchor)
     await assert.rejects(revalidateFallbackFrontierEvidence([evidence]), driftRejection)
   })
