@@ -12,7 +12,11 @@ import path from 'node:path'
  * non-canonical path components, so suites that derive HOME and ordinary
  * destination paths from a temp root must create that root canonically.
  * Hostile-path tests that build their own aliases or symlinks are unaffected.
+ *
+ * `realpathSync.native` is required: the JavaScript implementation resolves
+ * symlinks but leaves Windows 8.3 short-name components (`RUNNER~1`) intact,
+ * while the native call expands them to the final filesystem path.
  */
 export function createCanonicalTempRoot (prefix: string): string {
-  return realpathSync(mkdtempSync(path.join(tmpdir(), prefix)))
+  return realpathSync.native(mkdtempSync(path.join(tmpdir(), prefix)))
 }

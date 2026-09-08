@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   assertFallbackFrontierEvidenceList,
@@ -661,6 +662,11 @@ describe('fallback frontier shared leaf derivation', () => {
 })
 
 describe('fallback journal physical target derivation', () => {
+  // Synthetic fixture roots must satisfy the strict canonical-path validation
+  // on every platform: derive them from the host's canonical temp directory
+  // instead of a POSIX literal like `/home/u`, which win32 does not treat as
+  // an absolute path. No directory is created; anchor identity is faked.
+  const syntheticHome = path.join(realpathSync.native(tmpdir()), 'u')
   const fakeAnchorIdentity = (anchorPath: string): FallbackAnchorIdentity => ({
     path: anchorPath,
     realpath: anchorPath,
@@ -680,7 +686,7 @@ describe('fallback journal physical target derivation', () => {
   const manifestWith = (frontiers: readonly FallbackFrontierEvidence[], extra: Partial<FallbackTransactionIdentity> = {}): FallbackTransactionIdentity => ({
     installationId: 'opencode:fallback',
     harness: 'opencode',
-    trackingPath: '/home/u/.agents/.nodesource-installed.json',
+    trackingPath: path.join(syntheticHome, '.agents', '.nodesource-installed.json'),
     trackingDigest: 'a'.repeat(64),
     protocolVersion: FALLBACK_PROTOCOL_VERSION,
     nonce: 'nonce',
@@ -690,27 +696,27 @@ describe('fallback journal physical target derivation', () => {
     ownedMcpFields: [],
     ownedMcpConfigPaths: [],
     bundleDestinations: [],
-    approvedDestinationRoots: ['/home/u/.config/opencode/skills'],
+    approvedDestinationRoots: [path.join(syntheticHome, '.config', 'opencode', 'skills')],
     ...extra,
   })
 
   it('replaces every covered leaf with exactly one planned-missing frontier entry and retains uncovered targets', () => {
-    const frontierPath = '/home/u/.config/opencode/skills'
+    const frontierPath = path.join(syntheticHome, '.config', 'opencode', 'skills')
     const manifest = manifestWith([frontierEvidence(frontierPath, [path.join(frontierPath, 'alpha'), path.join(frontierPath, 'beta')])], {
       ownedSkills: [missingEvidence(path.join(frontierPath, 'alpha'))],
       bundleDestinations: [missingEvidence(path.join(frontierPath, 'alpha')), missingEvidence(path.join(frontierPath, 'beta'))],
-      ownedMcpConfigPaths: [missingEvidence('/home/u/opencode.json')],
+      ownedMcpConfigPaths: [missingEvidence(path.join(syntheticHome, 'opencode.json'))],
     })
     assert.deepEqual(deriveFallbackJournalPhysicalTargets(manifest), [
       { path: manifest.trackingPath, frontier: false },
-      { path: '/home/u/opencode.json', frontier: false },
+      { path: path.join(syntheticHome, 'opencode.json'), frontier: false },
       { path: frontierPath, frontier: true },
     ])
   })
 
   it('keeps separate frontiers as separate non-overlapping entries in UTF-8 byte order', () => {
-    const frontierA = '/home/u/one/skills'
-    const frontierB = '/home/u/two/skills'
+    const frontierA = path.join(syntheticHome, 'one', 'skills')
+    const frontierB = path.join(syntheticHome, 'two', 'skills')
     // Manifest evidence must already be strictly sorted; the helper keeps
     // that order instead of reordering it.
     const manifest = manifestWith(
@@ -725,7 +731,7 @@ describe('fallback journal physical target derivation', () => {
   })
 
   it('represents a self-referencing frontier leaf by the frontier entry alone and dedupes retained evidence', () => {
-    const frontierPath = '/home/u/.config/opencode/skills/added'
+    const frontierPath = path.join(syntheticHome, '.config', 'opencode', 'skills', 'added')
     const manifest = manifestWith([frontierEvidence(frontierPath, [frontierPath])], {
       ownedSkills: [missingEvidence(frontierPath)],
       bundleDestinations: [missingEvidence(frontierPath)],

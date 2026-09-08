@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fallbackStrategy } from '../../../src/update/strategies/fallback.js'
+import { resolveExecutableIdentity } from '../../../src/update/command-runner.js'
 import { applyFallbackEntry, claimFallbackJournalMutation, fallbackJournalPath, manifestDigestOf, pathDigest, pathKind, registerFallbackStage, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { valueDigest } from '../../../src/update/mcp-lookup.js'
 import { readTrackingFile, writeTrackingFile } from '../../../src/skills/skill-tracker.js'
@@ -1185,16 +1186,80 @@ describe('fallback strategy structured child result', () => {
 describe('fallback strategy frontier planning', () => {
   let home: string
   let restoreHome: () => void
+  let restoreNpmPath: (() => void) | undefined
   let previousOpenCodeSkillsDir: string | undefined
   const createdManifestDirectories: string[] = []
 
+  /**
+   * Deterministic npm launcher fixture: a resolver-verified npm identity so
+   * planning resolves `npm` from the fixture instead of the ambient runner
+   * PATH (whose launcher distribution differs across CI hosts and can be
+   * rejected as UNSAFE_FALLBACK_EXECUTOR for reasons unrelated to these
+   * destination-classification scenarios). Same pattern as
+   * package-manager.test.ts: a POSIX executable script on POSIX, and an
+   * npm-style `.CMD` shim plus its adjacent node_modules entrypoint with a
+   * matching package manifest on Windows, which `resolveExecutableIdentity`
+   * verifies through the production shim path before accepting.
+   */
+  function writeNpmIdentityFixture (binPath: string): void {
+    mkdirSync(binPath, { recursive: true })
+    if (process.platform === 'win32') {
+      const entrypoint = path.join(binPath, 'node_modules', 'npm', 'bin', 'npm-cli.js')
+      mkdirSync(path.dirname(entrypoint), { recursive: true })
+      writeFileSync(entrypoint, '#!/usr/bin/env node\n')
+      writeFileSync(path.join(binPath, 'node_modules', 'npm', 'package.json'), JSON.stringify({
+        name: 'npm',
+        bin: { npm: 'bin/npm-cli.js' },
+      }))
+      writeFileSync(path.join(binPath, 'npm.CMD'),
+        '@ECHO off\r\nSETLOCAL\r\nCALL :find_dp0\r\nIF EXIST "%dp0%\\node.exe" (SET "_prog=%dp0%\\node.exe") ELSE (SET "_prog=node")\r\n' +
+        '"%_prog%" "%dp0%\\node_modules\\npm\\bin\\npm-cli.js" %*\r\n' +
+        'exit /b %errorlevel%\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n')
+    } else {
+      const launcher = path.join(binPath, 'npm')
+      writeFileSync(launcher, '#!/bin/sh\n')
+      chmodSync(launcher, 0o755)
+    }
+  }
+
+  /**
+   * Isolate executable lookup to the fixture bin directory. Saves every
+   * case-variant of PATH (and PATHEXT on Windows) so the restore puts the
+   * environment back exactly, regardless of the host's key casing.
+   */
+  function isolateExecutableLookup (fixtureBin: string): () => void {
+    const saved = Object.entries(process.env).filter(([name]) => {
+      const lowered = name.toLowerCase()
+      return lowered === 'path' || (process.platform === 'win32' && lowered === 'pathext')
+    })
+    for (const [name] of saved) delete process.env[name]
+    process.env.PATH = fixtureBin
+    if (process.platform === 'win32') process.env.PATHEXT = '.CMD'
+    return () => {
+      // Delete every case-variant of the installed lookup keys — including
+      // ones that were initially absent — so the restore cannot leak the
+      // fixture state into the ambient environment.
+      for (const name of Object.keys(process.env)) {
+        const lowered = name.toLowerCase()
+        if (lowered === 'path' || (process.platform === 'win32' && lowered === 'pathext')) delete process.env[name]
+      }
+      for (const [name, value] of saved) {
+        if (value !== undefined) process.env[name] = value
+      }
+    }
+  }
+
   beforeEach(() => {
-    home = mkdtempSync(path.join(tmpdir(), 'nsolid-plugin-frontier-'))
+    home = createCanonicalTempRoot('nsolid-plugin-frontier-')
     previousOpenCodeSkillsDir = process.env.NSOLID_OPENCODE_SKILLS_DIR
     restoreHome = isolateHome(home)
+    const npmFixtureBin = path.join(home, 'npm-identity-fixture')
+    writeNpmIdentityFixture(npmFixtureBin)
+    restoreNpmPath = isolateExecutableLookup(npmFixtureBin)
   })
 
   afterEach(() => {
+    restoreNpmPath?.()
     restoreHome()
     if (previousOpenCodeSkillsDir === undefined) delete process.env.NSOLID_OPENCODE_SKILLS_DIR
     else process.env.NSOLID_OPENCODE_SKILLS_DIR = previousOpenCodeSkillsDir
@@ -1202,6 +1267,23 @@ describe('fallback strategy frontier planning', () => {
       rmSync(createdManifestDirectories.pop()!, { recursive: true, force: true })
     }
     rmSync(home, { recursive: true, force: true })
+  })
+
+  it('resolves npm through the isolated resolver-verified fixture, never the ambient PATH', () => {
+    const fixtureBin = path.join(home, 'npm-identity-fixture')
+    const identity = resolveExecutableIdentity('npm')
+    assert.ok(
+      identity.kind === 'native' || identity.kind === 'node',
+      `the resolver must accept the fixture npm identity, got: ${JSON.stringify(identity)}`
+    )
+    if (identity.kind === 'node') {
+      // Windows: the verified shim launches the immutable JS entrypoint
+      // through the parent's own node executable, never cmd.exe.
+      assert.equal(identity.executable, process.execPath)
+      assert.equal(identity.entrypoint, path.join(fixtureBin, 'node_modules', 'npm', 'bin', 'npm-cli.js'))
+    } else {
+      assert.equal(identity.executable, path.join(fixtureBin, 'npm'))
+    }
   })
 
   function writeBundleTarball (bundle: object): string {
@@ -1275,6 +1357,26 @@ describe('fallback strategy frontier planning', () => {
     return planned
   }
 
+  /**
+   * Active planned-missing frontiers only proceed to the manifest workspace
+   * on Linux (platform preflight). Non-linux hosts assert the fail-closed
+   * rejection instead of the manifest assertions that follow.
+   */
+  async function planOrRejectOnNonLinux (installation: UpdateInstallation): Promise<UpdatePlanItem> {
+    const planned = await planFixture(installation)
+    if (process.platform !== 'linux') {
+      assert.equal(planned.planningError?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+      assert.equal(planned.steps.length, 0)
+      assert.equal(planned.temporaryDirectories, undefined)
+    } else {
+      // Callers early-return on ANY planning error: on Linux the error must
+      // be asserted undefined here, otherwise a planner failure would
+      // silently skip every success/frontier assertion below.
+      assert.equal(planned.planningError, undefined)
+    }
+    return planned
+  }
+
   function anchorIdentityOfFixture (anchorPath: string): Record<string, unknown> {
     const stats = statSync(anchorPath, { bigint: true })
     return { path: anchorPath, realpath: anchorPath, type: 'directory', device: stats.dev.toString(), inode: stats.ino.toString() }
@@ -1301,11 +1403,13 @@ describe('fallback strategy frontier planning', () => {
       ],
       mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
     })
-    const planned = await planFixture(buildInstallation({
+    const planned = await planOrRejectOnNonLinux(buildInstallation({
       harness: 'opencode',
       tarball,
       trackedSkills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
     }))
+    // Non-linux hosts already asserted the fail-closed platform rejection.
+    if (planned.planningError !== undefined) return
 
     assert.equal(planned.planningError, undefined)
     assert.equal(planned.steps.length, 4)
@@ -1329,7 +1433,7 @@ describe('fallback strategy frontier planning', () => {
     assert.equal(command.args[digestArgumentIndex + 1], manifestDigestOf(manifest as never))
     // Derivation is deterministic: an identical planned state yields a
     // byte-identical frontier graph.
-    const replanned = await planFixture(buildInstallation({
+    const replanned = await planOrRejectOnNonLinux(buildInstallation({
       harness: 'opencode',
       tarball,
       trackedSkills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
@@ -1358,7 +1462,7 @@ describe('fallback strategy frontier planning', () => {
       ],
       mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
     })
-    const planned = await planFixture(buildInstallation({
+    const planned = await planOrRejectOnNonLinux(buildInstallation({
       harness: 'claude',
       tarball,
       trackedSkills: [
@@ -1366,6 +1470,8 @@ describe('fallback strategy frontier planning', () => {
         { name: 'dropped', path: path.join(skillsRoot, 'dropped') },
       ],
     }))
+    // Non-linux hosts already asserted the fail-closed platform rejection.
+    if (planned.planningError !== undefined) return
 
     assert.equal(planned.planningError, undefined)
     const manifest = readManifest(planned)
@@ -1427,11 +1533,13 @@ describe('fallback strategy frontier planning', () => {
       ],
       mcpServers: [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }],
     })
-    const planned = await planFixture(buildInstallation({
+    const planned = await planOrRejectOnNonLinux(buildInstallation({
       harness: 'claude',
       tarball,
       trackedSkills: [{ name: 'kept', path: path.join(skillsRoot, 'kept') }],
     }))
+    // Non-linux hosts already asserted the fail-closed platform rejection.
+    if (planned.planningError !== undefined) return
 
     assert.equal(planned.planningError, undefined)
     const manifest = readManifest(planned)
@@ -1569,8 +1677,11 @@ describe('fallback strategy frontier planning', () => {
 
     // Linux plans the conditional frontier: the parent cannot prove the
     // config render is a no-op, so the frontier is carried as conditional
-    // evidence and never marked inactive.
-    const linuxPlanned = await planFixture(installation)
+    // evidence and never marked inactive. Non-linux hosts already assert the
+    // fail-closed platform rejection in the forced-win32 phase below, so the
+    // manifest assertions here are Linux-only.
+    const linuxPlanned = await planOrRejectOnNonLinux(installation)
+    if (linuxPlanned.planningError !== undefined) return
     assert.equal(linuxPlanned.planningError, undefined)
     assert.deepEqual(readManifest(linuxPlanned).plannedMissingFrontiers, [{
       frontierPath: path.join(home, 'custom', 'deep'),

@@ -88,6 +88,42 @@ function writeCredentials (filePath: string, mcpUrl: string, lifetimeMs: number)
   })
 }
 
+/**
+ * Read-only state snapshot for the fail-closed no-mutation checks: the exact
+ * bytes of the relevant live files plus the journal/snapshot/stage artifact
+ * inventory under the tracking directory and the given artifact directories.
+ */
+function captureRunState (liveFiles: readonly string[], artifactDirs: readonly string[] = [path.join(home, '.agents')]): {
+  bytes: Record<string, string>
+  journal: string | undefined
+  artifactEntries: Record<string, string[]>
+} {
+  const journalPath = fallbackJournalPath(getTrackingFilePath())
+  const artifactEntries: Record<string, string[]> = {}
+  for (const dir of artifactDirs) {
+    artifactEntries[dir] = existsSync(dir) ? readdirSync(dir).filter((name) => name.startsWith('.nsolid-plugin-update-') || name.includes('.nsolid-stage-')) : []
+  }
+  return {
+    bytes: Object.fromEntries(liveFiles.map((filePath) => [filePath, readFileSync(filePath, 'utf8')])),
+    journal: existsSync(journalPath) ? readFileSync(journalPath, 'utf8') : undefined,
+    artifactEntries,
+  }
+}
+
+/** Every captured live file, the journal, and the artifact inventory must be untouched. */
+function assertRunStateUnchanged (state: ReturnType<typeof captureRunState>, label: string): void {
+  for (const [filePath, bytes] of Object.entries(state.bytes)) {
+    assert.equal(readFileSync(filePath, 'utf8'), bytes, `${label}: ${filePath} must keep its pre-run bytes`)
+  }
+  const journalPath = fallbackJournalPath(getTrackingFilePath())
+  const journal = existsSync(journalPath) ? readFileSync(journalPath, 'utf8') : undefined
+  assert.equal(journal, state.journal, `${label}: the rejected run must not create or rewrite the journal`)
+  for (const [dir, entries] of Object.entries(state.artifactEntries)) {
+    const current = existsSync(dir) ? readdirSync(dir).filter((name) => name.startsWith('.nsolid-plugin-update-') || name.includes('.nsolid-stage-')) : []
+    assert.deepEqual(current, entries, `${label}: the rejected run must not create journal snapshot or stage artifacts in ${dir}`)
+  }
+}
+
 describe('fallback refresh transaction', () => {
   it('rejects a missing parent manifest before reading or mutating owned state', async () => {
     const before = readdirSync(home)
@@ -99,6 +135,49 @@ describe('fallback refresh transaction', () => {
   })
 
   it('replaces owned directories, reconciles shared ownership, and recreates harness links', async () => {
+    // The bundle adds a brand-new skill directory: a planned-missing frontier
+    // that only Linux may publish (platform preflight), so non-linux fails
+    // closed before any mutation. The rich ownership assertions below need
+    // the frontier publication and are therefore Linux-only.
+    if (process.platform !== 'linux') {
+      const sourceRootProbe = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
+      try {
+        const retainedSource = path.join(sourceRootProbe, 'skills', 'retained')
+        const addedSource = path.join(sourceRootProbe, 'skills', 'added')
+        mkdirSync(retainedSource, { recursive: true })
+        mkdirSync(addedSource, { recursive: true })
+        writeFileSync(path.join(retainedSource, 'SKILL.md'), 'new retained')
+        writeFileSync(path.join(addedSource, 'SKILL.md'), 'new skill')
+        writeBundle(path.join(sourceRootProbe, 'bundle.json'), ['retained', 'added'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
+        writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://example.com/mcp', 60_000)
+        writeJson(path.join(home, '.agents', '.nodesource-installed.json'), {
+          version: '1.0.0',
+          installedAt: new Date().toISOString(),
+          harness: 'claude',
+          skills: [],
+          mcpServers: [],
+        })
+        // Capture the pre-run state BEFORE the operation: comparing a
+        // post-operation capture with itself would be vacuous.
+        const preRunState = captureRunState([
+          path.join(home, '.agents', '.nodesource-installed.json'),
+          path.join(home, '.agents', '.nodesource-auth.json'),
+        ])
+        const rejected = await refreshWithParent({ harness: 'claude', bundlePath: path.join(sourceRootProbe, 'bundle.json'), skillsSource: sourceRootProbe })
+        assert.equal(rejected.success, false)
+        assert.equal(rejected.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+        assert.equal(rejected.rollbackAttempted, false)
+        // Fail-closed proof: the rejected parent-creation run must keep the
+        // tracking/credentials bytes, leave no journal or snapshot artifacts,
+        // and create none of the planned-missing destinations.
+        assertRunStateUnchanged(preRunState, 'rejected parent-creation run')
+        assert.equal(existsSync(path.join(home, '.agents', 'skills')), false, 'the planned-missing frontier destination must stay absent')
+        assert.equal(existsSync(getHarnessSkillsPath('claude')), false, 'the harness link root must stay absent')
+      } finally {
+        rmSync(sourceRootProbe, { recursive: true, force: true })
+      }
+      return
+    }
     const sharedDir = path.join(home, '.agents', 'skills')
     const retainedDir = path.join(sharedDir, 'retained')
     const removedDir = path.join(sharedDir, 'removed')
@@ -235,6 +314,10 @@ describe('fallback refresh transaction', () => {
     const sharedDir = path.join(home, '.agents', 'skills')
     const skillPath = path.join(sharedDir, 'tracked')
     mkdirSync(skillPath, { recursive: true })
+    // A real installed claude harness owns an existing link root; without it
+    // the missing ancestor would become a planned frontier and the platform
+    // preflight would preempt the MCP reconciliation gate under test.
+    mkdirSync(path.join(home, '.claude', 'skills'), { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
     writeBundle(bundlePath, ['tracked'], [{ name: 'new-server', url: 'https://example.com/mcp', headers: {} }])
@@ -298,6 +381,10 @@ describe('fallback refresh transaction', () => {
   it('applies owned field updates and removals to an existing codex TOML server', async () => {
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
+    // A real installed codex harness owns an existing skills link root; the
+    // missing ancestor would otherwise become a planned frontier and the
+    // platform preflight would preempt the TOML edit under test.
+    mkdirSync(path.join(home, '.codex', 'skills'), { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
     writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }])
@@ -373,6 +460,10 @@ describe('fallback refresh transaction', () => {
     // fields so a foreign field survives both refreshes.
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
+    // A real installed codex harness owns an existing skills link root; the
+    // missing ancestor would otherwise become a planned frontier and the
+    // platform preflight would preempt the tracked-field assertions.
+    mkdirSync(path.join(home, '.codex', 'skills'), { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
     writeBundle(bundlePath, ['tracked'], [{ name: 'alpha-console', url: 'https://new.example.com/mcp', headers: {} }])
@@ -428,6 +519,10 @@ describe('fallback refresh transaction', () => {
   it('keeps tracking desired-field digests updated when a desired value changes between refreshes', async () => {
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
+    // A real installed codex harness owns an existing skills link root; the
+    // missing ancestor would otherwise become a planned frontier and the
+    // platform preflight would preempt the digest assertions.
+    mkdirSync(path.join(home, '.codex', 'skills'), { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-source-'))
     const bundleVersion = (url: string): unknown => ({
@@ -490,6 +585,10 @@ describe('fallback refresh transaction', () => {
   it('fails closed without mutating anything when the codex TOML configuration is malformed', async () => {
     const skillPath = path.join(home, '.agents', 'skills', 'tracked')
     mkdirSync(skillPath, { recursive: true })
+    // A real installed codex harness owns an existing skills link root; the
+    // missing ancestor would otherwise become a planned frontier and the
+    // platform preflight would preempt the malformed-TOML gate under test.
+    mkdirSync(path.join(home, '.codex', 'skills'), { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     const { sourceRoot, bundlePath } = setupSkillSource({ tracked: 'new' })
     writeBundle(bundlePath, ['tracked'], [{ name: 'fresh-server', url: 'https://example.com/mcp', headers: {} }])
@@ -582,6 +681,10 @@ describe('fallback refresh transaction', () => {
       mkdirSync(skillPath, { recursive: true })
       writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     }
+    // A real installed claude harness owns an existing link root; without it
+    // the missing ancestor would become a planned frontier and the platform
+    // preflight would preempt the legacy-path repoint under test.
+    mkdirSync(path.join(home, '.claude', 'skills'), { recursive: true })
     const { sourceRoot, bundlePath } = setupSkillSource({ retained: 'new' })
     writeBundle(bundlePath, ['retained'], [{ name: 'nsolid-console', url: 'https://example.com/mcp', headers: {} }])
     writeCredentials(path.join(home, '.agents', '.nodesource-auth.json'), 'https://example.com/mcp', 60_000)
@@ -1055,7 +1158,32 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       // bound to the registered staged skill payloads.
       rmSync(path.dirname(fixture.linkPath), { recursive: true, force: true })
       assert.equal(existsSync(fixture.linkPath), false)
+      const piPreState = captureRunState([
+        path.join(fixture.skillPath, 'SKILL.md'),
+        getTrackingFilePath(),
+        getAuthFilePath(),
+      // Production stages the link frontier beside the frontier root
+      // (fallback-transaction.ts: the stage container is a direct sibling of
+      // the frontier root), so the actual Pi stage parent ~/.pi/agent must
+      // be part of the pre-run artifact inventory for non-Linux too.
+      ], [path.join(home, '.agents'), path.join(home, '.agents', 'skills'), path.dirname(path.dirname(fixture.linkPath))])
       const result = await refreshWithParent({ harness: 'pi', bundlePath: fixture.bundlePath, skillsSource: fixture.sourceRoot })
+      if (process.platform !== 'linux') {
+        // The missing Pi link root is an active required frontier: the
+        // platform preflight fails closed before any journal or mutation.
+        assert.equal(result.success, false, JSON.stringify(result))
+        assert.equal(result.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+        assert.equal(result.rollbackAttempted, false)
+        assert.match(result.error?.message ?? '', /no files were changed/)
+        // Fail-closed proof: the shared skill bytes are untouched, the
+        // missing Pi link root stays absent, and no journal or snapshot
+        // survives the rejected run (the journal check below only covers
+        // the Linux success path).
+        assertRunStateUnchanged(piPreState, 'rejected Pi frontier run')
+        assert.equal(existsSync(fixture.linkPath), false, 'the missing Pi link root must stay absent')
+        assert.equal(existsSync(path.dirname(fixture.linkPath)), false, 'the removed Pi link-root parent must stay absent')
+        return
+      }
       assert.equal(result.success, true, JSON.stringify(result))
       assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'new tracked')
       assert.equal(existsSync(fixture.linkPath), true)
@@ -1299,8 +1427,29 @@ describe('fallback refresh journal-backed canonical MCP path', () => {
       assert.equal(existsSync(addedLink), false)
       assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'old tracked')
 
-      // The next update no longer sees an untracked destination.
+      // The next update no longer sees an untracked destination. On
+      // non-linux the restored-away destinations are missing directories
+      // again: an active planned frontier, so the platform preflight fails
+      // closed before any journal reservation or mutation.
+      const postRestoreState = captureRunState([
+        path.join(fixture.skillPath, 'SKILL.md'),
+        getTrackingFilePath(),
+        getAuthFilePath(),
+      ], [path.join(home, '.agents'), path.join(home, '.agents', 'skills'), getHarnessSkillsPath('claude')])
       const result = await refreshWithParent({ harness: 'claude', bundlePath: fixture.bundlePath, skillsSource: sourceRoot })
+      if (process.platform !== 'linux') {
+        assert.equal(result.success, false)
+        assert.equal(result.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+        assert.equal(result.rollbackAttempted, false)
+        // Fail-closed proof: the restored-away destinations stay absent, the
+        // owned skill bytes are untouched, and the pre-existing journal and
+        // snapshot state from the recovery phase is neither rewritten nor
+        // extended by the rejected run.
+        assertRunStateUnchanged(postRestoreState, 'rejected post-restore run')
+        assert.equal(existsSync(addedSkill), false, 'the restored-away skill destination must stay absent')
+        assert.equal(existsSync(addedLink), false, 'the restored-away link destination must stay absent')
+        return
+      }
       assert.equal(result.success, true)
       assert.equal(existsSync(addedSkill), true)
       assert.equal(readFileSync(path.join(addedSkill, 'SKILL.md'), 'utf8'), 'new skill')
@@ -1314,6 +1463,10 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
   it('fails and rolls back when an owned MCP field drifts between planning and apply', async () => {
     const configA = path.join(home, 'custom', 'claude-a.json')
     const alphaRecord = { url: 'https://old.example.com/mcp', headers: { AUTH: 'x' } }
+    // A real installed claude harness owns an existing link root; without it
+    // the missing ancestor would become a planned frontier and the platform
+    // preflight would preempt the drift gate under test.
+    mkdirSync(path.join(home, '.claude', 'skills'), { recursive: true })
     mkdirSync(path.dirname(configA), { recursive: true })
     writeFileSync(configA, [
       '{',
@@ -1380,6 +1533,10 @@ describe('fallback refresh multi-config MCP reconciliation', () => {
     const configB = path.join(home, 'custom', 'claude-b.json')
     const alphaRecord = { url: 'https://old.example.com/mcp', headers: { AUTH: 'x' } }
     const legacyRecord = { url: 'https://legacy.example.com/mcp', headers: {} }
+    // A real installed claude harness owns an existing link root; without it
+    // the missing ancestor would become a planned frontier and the platform
+    // preflight would preempt the multi-config reconciliation under test.
+    mkdirSync(path.join(home, '.claude', 'skills'), { recursive: true })
     // Config A: foreign server with comments plus the owned alpha-console.
     mkdirSync(path.dirname(configA), { recursive: true })
     writeFileSync(configA, [
@@ -1470,6 +1627,10 @@ describe('credentialless fallback reconciliation', () => {
     const sharedDir = path.join(home, '.agents', 'skills')
     const skillPath = path.join(sharedDir, 'tracked')
     mkdirSync(skillPath, { recursive: true })
+    // A real installed claude harness owns an existing link root; without it
+    // the missing ancestor would become a planned frontier and the platform
+    // preflight would preempt the reconciliation scenarios under test.
+    mkdirSync(path.join(home, '.claude', 'skills'), { recursive: true })
     writeFileSync(path.join(skillPath, 'SKILL.md'), 'old')
     const sourceRoot = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-fallback-credentialless-'))
     mkdirSync(path.join(sourceRoot, 'skills', 'tracked'), { recursive: true })
@@ -1809,6 +1970,27 @@ describe('fallback parent frontier planning', () => {
       return { plan: await deriveFallbackFrontierPlan(leaves), leaves }
     })
     try {
+      if (process.platform !== 'linux') {
+        // The new 'added' skill directory is an active required frontier:
+        // the platform preflight fails closed before any manifest workspace
+        // exists, so the manifest-parity assertions below are Linux-only.
+        const sharedPlannerState = captureRunState([
+          path.join(retainedDir, 'SKILL.md'),
+          path.join(removedDir, 'SKILL.md'),
+          getTrackingFilePath(),
+          getAuthFilePath(),
+        ], [path.join(home, '.agents'), sharedDir, claudeSkills])
+        const rejected = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest: observation.observeManifest })
+        assert.equal(rejected.success, false)
+        assert.equal(rejected.error?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
+        assert.equal(rejected.rollbackAttempted, false)
+        // Fail-closed proof: the owned skill bytes and tracking/auth stay
+        // untouched and no journal or snapshot workspace is created before
+        // the manifest-parity assertions run on Linux.
+        assertRunStateUnchanged(sharedPlannerState, 'rejected shared-planner run')
+        assert.equal(existsSync(path.join(getSkillsDir(), 'added')), false, 'the missing frontier destination must stay absent')
+        return
+      }
       const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest: observation.observeManifest })
       assert.equal(result.success, true, JSON.stringify(result))
       assert.ok(observation.manifest && observation.plan && observation.leaves)
@@ -1884,9 +2066,14 @@ describe('fallback parent frontier planning', () => {
       assert.equal(existsSync(destination), false)
       assert.equal(existsSync(claudeSkills), false)
       // On linux the same run passes the preflight and completes end-to-end.
-      const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest })
-      assert.equal(result.success, true, JSON.stringify(result))
-      assert.equal(readFileSync(path.join(destination, 'kept', 'SKILL.md'), 'utf8'), 'new kept')
+      // The forced-win32 phase above already covers non-linux hosts; the
+      // end-to-end phase requires the host platform to support frontier
+      // publication, which only Linux does.
+      if (process.platform === 'linux') {
+        const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot, observeManifest })
+        assert.equal(result.success, true, JSON.stringify(result))
+        assert.equal(readFileSync(path.join(destination, 'kept', 'SKILL.md'), 'utf8'), 'new kept')
+      }
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true })
     }
