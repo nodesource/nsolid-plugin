@@ -15,7 +15,7 @@ packages/pi-plugin/skills/
 # OpenCode
 .opencode/sessions/
 .opencode/logs/
-.codegraph/
 .opencode/plans
 .opencode/reviews
-
+.codegraph/
+.codegraph

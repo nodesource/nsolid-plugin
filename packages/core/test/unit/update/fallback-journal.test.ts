@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync, openSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
@@ -31,6 +31,155 @@ afterEach(() => {
   if (previousUserProfile === undefined) delete process.env.USERPROFILE
   else process.env.USERPROFILE = previousUserProfile
 })
+
+// --- Live-process fixture helpers -------------------------------------------------
+// The historical fixtures parsed the FIRST stdout chunk of a spawned child with
+// parseInt and then read /proc/<parsed>/stat. Whenever that chunk was not a
+// bare integer (banner text, fragmented output, runtime-specific formatting)
+// the parsed value was NaN or truncated and the /proc read failed with
+// ENOENT /proc/NaN/stat, failing fixture construction instead of exercising
+// the production behavior under test. The helpers below own a child's full
+// lifecycle instead: the pid comes from child.pid (validated after the spawn
+// event), the Linux starttime identity is read exactly once with no polling
+// or retries, and termination is awaited under a bounded deadline (a truthy
+// kill() return only means the signal was sent, not that the child exited).
+
+const MUTATOR_CHILD_TTL_MS = 30_000
+const CHILD_SPAWN_DEADLINE_MS = 10_000
+const CHILD_STOP_DEADLINE_MS = 5_000
+
+interface LiveProcessFixture {
+  child: ChildProcess
+  pid: number
+  startIdentity: string
+  stop: () => Promise<void>
+}
+
+function readStatStartIdentity (stat: string, expectedPid: number): string {
+  // Field 22 of /proc/<pid>/stat is starttime. comm may itself contain ') ',
+  // so split after the LAST ')': the remaining fields start at field 3 (state),
+  // which puts starttime at index 22 - 3 = 19. Read exactly once — no polling,
+  // no retries — so a vanished or malformed identity fails the fixture
+  // explicitly instead of silently sampling whatever process later reused the
+  // pid.
+  const closeParen = stat.lastIndexOf(')')
+  const afterComm = closeParen === -1 ? '' : stat.slice(closeParen + 1).trim()
+  const fields = afterComm.split(' ')
+  const recordedPid = Number.parseInt(stat, 10)
+  const starttime = fields[19]
+  if (!Number.isSafeInteger(recordedPid) || recordedPid !== expectedPid || starttime === undefined || !/^\d+$/.test(starttime)) {
+    throw new Error(`malformed or vanished /proc/${expectedPid}/stat identity: ${JSON.stringify(stat.slice(0, 64))}`)
+  }
+  return starttime
+}
+
+async function terminateFixtureChild (child: ChildProcess, onError: (error: Error) => void): Promise<void> {
+  // A failed spawn has no pid and nothing to terminate (some runtimes set a
+  // negative exitCode, others may leave it null); an already-exited child
+  // needs only listener disposal. Both resolve immediately instead of
+  // attempting a bogus kill or waiting out the stop deadline.
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+    child.removeListener('error', onError)
+    return
+  }
+  // Named listener references: only the listeners this helper attaches are
+  // removed — no broad removeAllListeners(), which would also strip unrelated
+  // runtime-installed stream listeners and does not express ownership.
+  let onExit: () => void = () => {}
+  let onStopError: (error: Error) => void = () => {}
+  const exited = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`fixture child ${String(child.pid)} did not exit within ${CHILD_STOP_DEADLINE_MS}ms of SIGKILL`)), CHILD_STOP_DEADLINE_MS)
+    onExit = () => { clearTimeout(timer); resolve() }
+    onStopError = (error: Error) => { clearTimeout(timer); reject(error) }
+    child.once('exit', onExit)
+    child.once('error', onStopError)
+  })
+  child.kill('SIGKILL')
+  try {
+    await exited
+  } finally {
+    child.removeListener('exit', onExit)
+    child.removeListener('error', onStopError)
+    child.removeListener('error', onError)
+  }
+}
+
+async function spawnLiveProcessFixture (childArgv?: string[], statPathFor?: (pid: number) => string): Promise<LiveProcessFixture> {
+  const argv = childArgv ?? [process.execPath, '-e', `setTimeout(() => {}, ${MUTATOR_CHILD_TTL_MS})`]
+  const statPath = statPathFor ?? ((pid: number) => `/proc/${pid}/stat`)
+  // No stdout pid protocol: the fixtures need a live process with a Linux
+  // starttime, not a JavaScript readiness handshake. 'spawn' confirms process
+  // creation, not execution of the child's code, and Linux starttime survives
+  // exec, so no extra handshake is required.
+  const child = spawn(argv[0], argv.slice(1), { stdio: 'ignore' })
+  // Persistent `on` error listener for the child's lifetime (removed in
+  // stop()) so a late error event is observed instead of crashing the test
+  // runner; a once-listener would stop observing after the first error.
+  let childError: Error | null = null
+  const onError = (error: Error) => { childError = error }
+  child.on('error', onError)
+  // Ownership starts at creation: stop() exists BEFORE the spawn event is
+  // awaited, so a spawn timeout or spawn error terminates (or disposes) the
+  // child instead of leaking it. Cached, so repeated and concurrent calls
+  // share one bounded termination.
+  let exitPromise: Promise<void> | null = null
+  const stop = (): Promise<void> => {
+    if (exitPromise === null) exitPromise = terminateFixtureChild(child, onError)
+    return exitPromise
+  }
+  // Every setup failure terminates the owned child and surfaces BOTH the
+  // original diagnostic and any cleanup failure — cleanup errors are never
+  // swallowed.
+  const failWithCleanup = async (setupError: Error): Promise<Error> => {
+    let cleanupNote = ''
+    try {
+      await stop()
+    } catch (cleanupError) {
+      cleanupNote = `; fixture cleanup also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+    }
+    const pidNote = child.pid === undefined ? 'child pid unknown (spawn failed)' : `child pid ${child.pid}`
+    return new Error(`fixture setup failed (${pidNote}): ${setupError.message}${cleanupNote}`)
+  }
+  const spawned = await new Promise<{ error: Error | null }>((resolve) => {
+    const cleanup = () => {
+      clearTimeout(timer)
+      child.removeListener('error', onChildError)
+      child.removeListener('spawn', onSpawn)
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve({ error: new Error(`fixture child did not spawn within ${CHILD_SPAWN_DEADLINE_MS}ms`) })
+    }, CHILD_SPAWN_DEADLINE_MS)
+    const onSpawn = () => { cleanup(); resolve({ error: null }) }
+    const onChildError = (error: Error) => { cleanup(); resolve({ error }) }
+    child.once('error', onChildError)
+    child.once('spawn', onSpawn)
+  })
+  if (spawned.error !== null) throw await failWithCleanup(spawned.error)
+  try {
+    const pid = child.pid
+    if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) {
+      throw new Error(`fixture child reported invalid pid: ${String(pid)}`)
+    }
+    if (childError !== null) throw childError
+    // Single /proc read through the stat seam: production fixtures read the
+    // real /proc/<pid>/stat; failure-path tests inject a controlled path.
+    const startIdentity = readStatStartIdentity(readFileSync(statPath(pid), 'utf8'), pid)
+    return { child, pid, startIdentity, stop }
+  } catch (error) {
+    throw await failWithCleanup(error instanceof Error ? error : new Error(String(error)))
+  }
+}
+
+// Bounded confirmation that a fixture child is really gone from /proc (a
+// truthy kill() only means the signal was sent, not that the process exited).
+async function assertProcGone (pid: number, context: string): Promise<void> {
+  for (let waited = 0; waited < 100; waited++) {
+    if (!existsSync(`/proc/${pid}`)) return
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.fail(`${context}: fixture child ${pid} still present in /proc after ${100 * 50}ms`)
+}
 
 describe('fallback journal canonical manifest digest', () => {
   it('is stable across object key order and sensitive to array order and content', async () => {
@@ -330,24 +479,22 @@ describe('fallback journal ownership validation', () => {
     const { handle } = await beginFallbackJournal(manifest)
     const owner = await markFallbackJournalMutating(handle)
 
-    // Craft a mutator record for a real live process (a sleeping child).
-    const child = spawn(process.execPath, ['-e', 'console.log(process.pid); setTimeout(() => {}, 20000)'], { stdio: ['ignore', 'pipe', 'ignore'] })
-    const childPid: number = await new Promise((resolve, reject) => {
-      child.stdout!.on('data', (chunk: Buffer) => resolve(Number.parseInt(chunk.toString().trim(), 10)))
-      child.on('error', reject)
-      setTimeout(() => reject(new Error('child did not report pid')), 10_000)
-    })
-    const startIdentity = readFileSync(`/proc/${childPid}/stat`, 'utf8').split(') ')[1].split(' ')[19]
-    const disk = JSON.parse(readFileSync(owner.journalPath, 'utf8'))
-    disk.mutator = { pid: childPid, startIdentity, claimedAt: new Date().toISOString() }
-    writeFileSync(owner.journalPath, JSON.stringify(disk))
+    // Craft a mutator record for a real live process (a sleeping child). The
+    // fixture helper owns the child lifecycle: no stdout pid protocol, a
+    // validated child.pid, and a single /proc starttime read.
+    const live = await spawnLiveProcessFixture()
+    const childPid: number = live.pid
+    try {
+      const disk = JSON.parse(readFileSync(owner.journalPath, 'utf8'))
+      disk.mutator = { pid: childPid, startIdentity: live.startIdentity, claimedAt: new Date().toISOString() }
+      writeFileSync(owner.journalPath, JSON.stringify(disk))
 
-    await assert.rejects(reclaimFallbackJournalMutation(owner), /FALLBACK_MUTATOR_LIVE/)
-    child.kill('SIGKILL')
-    // Wait until the process is really gone.
-    for (let waited = 0; waited < 100; waited++) {
-      if (!existsSync(`/proc/${childPid}`)) break
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await assert.rejects(reclaimFallbackJournalMutation(owner), /FALLBACK_MUTATOR_LIVE/)
+    } finally {
+      // Explicitly stop and await the child BEFORE the reclaim-success
+      // assertions: a truthy kill() return only means the signal was sent,
+      // not that the process exited. Idempotent if already stopped.
+      await live.stop()
     }
     const reclaimed = await reclaimFallbackJournalMutation(owner)
     assert.equal(reclaimed.role, 'owner')
@@ -366,6 +513,172 @@ describe('fallback journal ownership validation', () => {
     // disk state successfully.
     const again = await reclaimFallbackJournalMutation(reclaimed)
     assert.equal(again.role, 'owner')
+  })
+
+  it('live-process fixture helper uses the real pid and a valid starttime even when child stdout carries a banner and a numeric decoy', { skip: process.platform !== 'linux' }, async () => {
+    // Controlled parser-mechanism discrimination plus real-helper identity
+    // verification — NOT captured-output equivalence and NOT a reconstruction
+    // of the unknown historical trigger. The historical fixtures parsed the
+    // FIRST stdout chunk with Number.parseInt(chunk.trim(), 10) and then read
+    // /proc/<parsed>/stat. This regression feeds that exact expression a
+    // FIXED controlled first-chunk string beginning with a nonnumeric banner
+    // and shows the failure mechanism end to end: the parse yields NaN and
+    // the /proc/NaN/stat read fails with ENOENT. The real shared helper is
+    // then spawned with a child script configured to emit that same banner
+    // plus a numeric decoy before sleeping, proving the helper ignores
+    // hostile stdout entirely and uses the actual child pid with a real
+    // single-read starttime.
+    const bannerLine = 'fixture child banner: pid follows'
+    // Fixed controlled first-chunk payload: begins with a nonnumeric banner.
+    const controlledFirstChunk = `${bannerLine}\n`
+    // The exact legacy parser expression on the controlled parser input:
+    // NaN, then the historical ENOENT /proc/NaN/stat failure.
+    const legacyPid = Number.parseInt(controlledFirstChunk.trim(), 10)
+    assert.ok(Number.isNaN(legacyPid), `legacy first-chunk parser must yield NaN on a banner-led chunk, got ${String(legacyPid)}`)
+    assert.throws(() => readFileSync(`/proc/${legacyPid}/stat`, 'utf8'), /ENOENT/)
+
+    // Real helper against a child emitting the same fixed banner plus a
+    // numeric decoy (a truncated fragment of its own pid) and then sleeping.
+    const bannerScript = `console.log(${JSON.stringify(bannerLine)}); console.log(String(process.pid).slice(0, 2)); setTimeout(() => {}, ${MUTATOR_CHILD_TTL_MS})`
+    const live = await spawnLiveProcessFixture([process.execPath, '-e', bannerScript])
+    try {
+      // Authoritative identity: the helper pid must be the actual spawned
+      // child's pid, and the recorded identity must be that exact child's
+      // /proc starttime — not merely a well-formed number.
+      assert.ok(live.child.pid !== undefined, 'spawned child must expose its pid')
+      assert.equal(live.pid, live.child.pid)
+      assert.match(live.startIdentity, /^\d+$/)
+      assert.equal(live.startIdentity, readStatStartIdentity(readFileSync(`/proc/${live.child.pid}/stat`, 'utf8'), live.child.pid))
+    } finally {
+      await live.stop()
+    }
+  })
+
+  it('fixture helper terminates the owned child when setup fails after a successful spawn', { skip: process.platform !== 'linux' }, async () => {
+    // Deterministic setup failure: the stat-path seam makes the single
+    // identity read return a malformed record while the child is already
+    // alive. The helper must fail setup, terminate the child it owns, and
+    // surface the setup diagnostic — never leak the child or retry the read.
+    const malformedStatPath = path.join(os.tmpdir(), `nsolid-journal-fixture-stat-${randomUUID()}`)
+    writeFileSync(malformedStatPath, '999 (decoy) S 0 0 0')
+    let setupError: Error | null = null
+    try {
+      await spawnLiveProcessFixture(undefined, () => malformedStatPath)
+    } catch (error) {
+      setupError = error as Error
+    }
+    rmSync(malformedStatPath, { force: true })
+    assert.ok(setupError !== null, 'malformed identity must fail fixture setup')
+    assert.match(setupError.message, /malformed or vanished \/proc\/\d+\/stat identity/)
+    // The diagnostic must identify the owned child so termination can be
+    // confirmed — kill() alone is not confirmation.
+    const match = /child pid (\d+)/.exec(setupError.message)
+    assert.ok(match !== null, `setup failure must identify the owned child pid: ${setupError.message}`)
+    await assertProcGone(Number(match[1]), 'setup failure')
+  })
+
+  it('fixture helper rejects promptly on spawn failure with the setup diagnostic retained', { skip: process.platform !== 'linux' }, async () => {
+    const startedAt = Date.now()
+    await assert.rejects(
+      spawnLiveProcessFixture(['nonexistent-fixture-binary-9x7']),
+      (error: Error) => {
+        assert.match(error.message, /ENOENT/)
+        assert.match(error.message, /fixture setup failed/)
+        assert.match(error.message, /child pid unknown/)
+        return true
+      }
+    )
+    // Promptly: the rejection is the spawn error itself, not a waited-out
+    // spawn deadline.
+    assert.ok(Date.now() - startedAt < CHILD_SPAWN_DEADLINE_MS, 'spawn failure must reject without waiting out the spawn deadline')
+  })
+
+  it('fixture helper fails explicitly when the child vanishes before its identity is read', { skip: process.platform !== 'linux' }, async () => {
+    // Deterministic stand-in for an early-exiting child: by the time the
+    // single identity read happens, /proc/<pid>/stat is already gone. The
+    // helper must fail explicitly — no polling, no retry that could sample a
+    // reused pid — and still terminate the child it owns.
+    let setupError: Error | null = null
+    try {
+      await spawnLiveProcessFixture(undefined, () => '/proc/nonexistent-fixture-pid/stat')
+    } catch (error) {
+      setupError = error as Error
+    }
+    assert.ok(setupError !== null, 'vanished identity must fail fixture setup explicitly')
+    assert.match(setupError.message, /ENOENT/)
+    const match = /child pid (\d+)/.exec(setupError.message)
+    assert.ok(match !== null, `setup failure must identify the owned child pid: ${setupError.message}`)
+    await assertProcGone(Number(match[1]), 'vanished identity')
+  })
+
+  it('fixture helper stop is idempotent, confirms real termination, and disposes listeners', { skip: process.platform !== 'linux' }, async () => {
+    const live = await spawnLiveProcessFixture()
+    try {
+      const { child } = live
+      assert.ok(child.pid !== undefined)
+      assert.equal(live.pid, child.pid)
+      // Concurrent repeated stops share one bounded termination.
+      await Promise.all([live.stop(), live.stop(), live.stop()])
+      // Real termination, not merely a signalled child.
+      assert.ok(child.exitCode !== null || child.signalCode !== null, 'child must have really exited, not merely been signalled')
+      // Listener disposal: nothing stays attached after termination, so no
+      // late event work or deadline timer survives the stop.
+      assert.equal(child.listenerCount('error'), 0)
+      assert.equal(child.listenerCount('exit'), 0)
+      assert.equal(child.listenerCount('close'), 0)
+      // Stop after completion stays idempotent.
+      await live.stop()
+    } finally {
+      // An assertion failure before stop() must not leak the owned child;
+      // stop is cached and idempotent, so this joins the earlier termination.
+      await live.stop()
+    }
+  })
+
+  it('terminateFixtureChild resolves without killing an already-exited or failed-spawn child', async () => {
+    // Already-exited child: listener disposal only, no kill needed. The probe
+    // is owned from creation: the error listener is attached immediately, the
+    // close wait is bounded, and terminateFixtureChild runs in finally so an
+    // assertion failure cannot leak the child.
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' })
+    const deadOnError = () => {}
+    dead.once('error', deadOnError)
+    // Named reference for this probe's own error listener: it never fires on
+    // a clean exit, so the probe disposes it itself — helper removal is
+    // limited to listeners the helper owns.
+    let onDeadError: (error: Error) => void = () => {}
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`probe child did not close within ${CHILD_SPAWN_DEADLINE_MS}ms`)), CHILD_SPAWN_DEADLINE_MS)
+        dead.once('close', () => { clearTimeout(timer); resolve() })
+        onDeadError = (error: Error) => { clearTimeout(timer); reject(error) }
+        dead.once('error', onDeadError)
+      })
+      assert.equal(dead.exitCode, 0)
+    } finally {
+      dead.removeListener('error', onDeadError)
+      await terminateFixtureChild(dead, deadOnError)
+    }
+    assert.equal(dead.listenerCount('error'), 0)
+
+    // Failed spawn: no pid exists, so termination must resolve without a
+    // bogus kill and without waiting out the stop deadline. The error wait is
+    // bounded and terminateFixtureChild runs in finally for disposal.
+    const failed = spawn('nonexistent-fixture-binary-9x7', [], { stdio: 'ignore' })
+    const failures: Error[] = []
+    const failedOnError = (error: Error) => { failures.push(error) }
+    failed.once('error', failedOnError)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`failed-spawn probe reported no error within ${CHILD_SPAWN_DEADLINE_MS}ms`)), CHILD_SPAWN_DEADLINE_MS)
+        failed.once('error', () => { clearTimeout(timer); resolve() })
+      })
+    } finally {
+      await terminateFixtureChild(failed, failedOnError)
+    }
+    assert.equal(failures.length, 1)
+    assert.equal(failed.pid, undefined)
+    assert.equal(failed.listenerCount('error'), 0)
   })
 
   it('refuses spread or plain handles that were never issued for reload, reclaim, and commit', async () => {
@@ -912,21 +1225,20 @@ describe('fallback journal ownership validation', () => {
   it('keeps next-run recovery pending while the recorded mutator is a live different process', { skip: process.platform !== 'linux' }, async () => {
     const { trackingPath, manifest } = await setupValidFixture()
     const { handle } = await beginFallbackJournal(manifest)
-    const child = spawn(process.execPath, ['-e', 'console.log(process.pid); setTimeout(() => {}, 20000)'], { stdio: ['ignore', 'pipe', 'ignore'] })
-    const childPid: number = await new Promise((resolve, reject) => {
-      child.stdout!.on('data', (chunk: Buffer) => resolve(Number.parseInt(chunk.toString().trim(), 10)))
-      child.on('error', reject)
-      setTimeout(() => reject(new Error('child did not report pid')), 10_000)
-    })
-    const disk = JSON.parse(readFileSync(handle.journalPath, 'utf8'))
-    disk.phase = 'mutating'
-    disk.mutator = { pid: childPid, startIdentity: readFileSync(`/proc/${childPid}/stat`, 'utf8').split(') ')[1].split(' ')[19], claimedAt: new Date().toISOString() }
-    writeFileSync(handle.journalPath, JSON.stringify(disk))
+    const live = await spawnLiveProcessFixture()
+    const childPid: number = live.pid
+    try {
+      const disk = JSON.parse(readFileSync(handle.journalPath, 'utf8'))
+      disk.phase = 'mutating'
+      disk.mutator = { pid: childPid, startIdentity: live.startIdentity, claimedAt: new Date().toISOString() }
+      writeFileSync(handle.journalPath, JSON.stringify(disk))
 
-    const recovery = await recoverFallbackJournal(trackingPath)
-    assert.equal(recovery.pending, true)
-    assert.equal(recovery.recovered, false)
-    child.kill('SIGKILL')
+      const recovery = await recoverFallbackJournal(trackingPath)
+      assert.equal(recovery.pending, true)
+      assert.equal(recovery.recovered, false)
+    } finally {
+      await live.stop()
+    }
   })
 
   it('rejects begin for a manifest with a missing or unknown protocol version before creating anything', async () => {
@@ -1089,30 +1401,31 @@ describe('fallback journal ownership validation', () => {
     const { manifest } = await setupValidFixture()
     const { handle } = await beginFallbackJournal(manifest)
     await markFallbackJournalMutating(handle)
-    const child = spawn(process.execPath, ['-e', 'console.log(process.pid); setTimeout(() => {}, 20000)'], { stdio: ['ignore', 'pipe', 'ignore'] })
-    const childPid: number = await new Promise((resolve, reject) => {
-      child.stdout!.on('data', (chunk: Buffer) => resolve(Number.parseInt(chunk.toString().trim(), 10)))
-      child.on('error', reject)
-      setTimeout(() => reject(new Error('child did not report pid')), 10_000)
-    })
-    // Re-serialize the disk journal WITHOUT the frontier field and re-sign its
-    // manifest digest, with a dead mutator: every other recovery check would
-    // pass, so only the strict isSafeJournal frontier gate can refuse this
-    // journal as v3 transaction state.
-    const disk = JSON.parse(readFileSync(handle.journalPath, 'utf8')) as { manifest: Record<string, unknown>; manifestDigest: string; phase: string; mutator: unknown }
-    disk.phase = 'mutating'
-    disk.mutator = { pid: childPid, startIdentity: readFileSync(`/proc/${childPid}/stat`, 'utf8').split(') ')[1].split(' ')[19], claimedAt: new Date().toISOString() }
-    delete disk.manifest.plannedMissingFrontiers
-    disk.manifestDigest = manifestDigestOf(disk.manifest as unknown as FallbackTransactionIdentity)
-    writeFileSync(handle.journalPath, JSON.stringify(disk))
-    const recovery = await recoverFallbackJournal(manifest.trackingPath)
-    assert.equal(recovery.pending, true)
-    assert.equal(recovery.recovered, false)
-    // strictLoad fails before any snapshot evidence is trusted: only the
-    // unauthenticated journal artifact is reported preserved.
-    assert.deepEqual(recovery.preservedArtifacts, [handle.journalPath])
-    assert.deepEqual(recovery.preservedPaths, [])
-    child.kill('SIGKILL')
+    const live = await spawnLiveProcessFixture()
+    const childPid: number = live.pid
+    try {
+      // Re-serialize the disk journal WITHOUT the frontier field and re-sign
+      // its manifest digest, with a live mutator: every other recovery check
+      // would pass, so only the strict isSafeJournal frontier gate can refuse
+      // this journal as v3 transaction state. (The previous comment said
+      // "dead mutator", but the fixture child was alive the whole time; the
+      // refusal comes from the frontier gate, not from mutator liveness.)
+      const disk = JSON.parse(readFileSync(handle.journalPath, 'utf8')) as { manifest: Record<string, unknown>; manifestDigest: string; phase: string; mutator: unknown }
+      disk.phase = 'mutating'
+      disk.mutator = { pid: childPid, startIdentity: live.startIdentity, claimedAt: new Date().toISOString() }
+      delete disk.manifest.plannedMissingFrontiers
+      disk.manifestDigest = manifestDigestOf(disk.manifest as unknown as FallbackTransactionIdentity)
+      writeFileSync(handle.journalPath, JSON.stringify(disk))
+      const recovery = await recoverFallbackJournal(manifest.trackingPath)
+      assert.equal(recovery.pending, true)
+      assert.equal(recovery.recovered, false)
+      // strictLoad fails before any snapshot evidence is trusted: only the
+      // unauthenticated journal artifact is reported preserved.
+      assert.deepEqual(recovery.preservedArtifacts, [handle.journalPath])
+      assert.deepEqual(recovery.preservedPaths, [])
+    } finally {
+      await live.stop()
+    }
   })
 
   it('refuses a plain self-consistent journal as restore authority and preserves everything', async () => {
