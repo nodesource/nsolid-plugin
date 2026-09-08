@@ -2221,11 +2221,19 @@ describe('fallback journal frontier publication', () => {
     const owner = await beginMutatingFrontier(fixture)
     const staged = await buildStagedFrontier()
     const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
+    // The seam emits op.relative joined with the platform-native separator
+    // (walkFrontierTree), so match with the native separator: a POSIX literal
+    // never fires on Windows and the injected fault would be silently skipped.
+    let injectorReached = false
     setFallbackFrontierPublicationSeamForTests((event) => {
-      if (event.phase === 'before-leaf' && event.leaf === 'beta/SKILL.md') throw new Error('injected failure')
+      if (event.phase === 'before-leaf' && event.leaf === path.join('beta', 'SKILL.md')) {
+        injectorReached = true
+        throw new Error('injected failure')
+      }
     })
     try {
       await assert.rejects(applyFallbackEntry(registered, fixture.frontierPath), /FALLBACK_FRONTIER_PUBLICATION_INCOMPLETE/)
+      assert.equal(injectorReached, true)
       // The partial population is preserved, never rolled back or removed.
       assert.equal(existsSync(fixture.frontierPath), true)
       assert.equal(readFileSync(path.join(fixture.frontierPath, 'alpha', 'SKILL.md'), 'utf8'), '# alpha staged\n')
@@ -2247,13 +2255,18 @@ describe('fallback journal frontier publication', () => {
     const owner = await beginMutatingFrontier(fixture)
     const staged = await buildStagedFrontier()
     const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
+    // Native-separator leaf match as above; the stray write must actually be
+    // injected for the preservation assertions below to mean anything.
+    let injectorReached = false
     setFallbackFrontierPublicationSeamForTests((event) => {
-      if (event.phase === 'before-leaf' && event.leaf === 'beta/SKILL.md') {
+      if (event.phase === 'before-leaf' && event.leaf === path.join('beta', 'SKILL.md')) {
+        injectorReached = true
         writeFileSync(path.join(fixture.frontierPath, 'alpha', 'stray.txt'), 'FOREIGN')
       }
     })
     try {
       await assert.rejects(applyFallbackEntry(registered, fixture.frontierPath), /FALLBACK_FRONTIER_PUBLICATION_INCOMPLETE/)
+      assert.equal(injectorReached, true)
       // The foreign insertion is preserved, not deleted.
       assert.equal(readFileSync(path.join(fixture.frontierPath, 'alpha', 'stray.txt'), 'utf8'), 'FOREIGN')
       assert.equal(readFileSync(path.join(fixture.frontierPath, 'alpha', 'SKILL.md'), 'utf8'), '# alpha staged\n')
@@ -2417,8 +2430,12 @@ describe('fallback journal frontier publication', () => {
     const external = path.join(home, 'external-redirect')
     mkdirSync(external)
     const stashed = path.join(home, 'stashed-alpha')
+    // Native-separator leaf match as above; the ancestor replacement must
+    // actually be injected for the redirect-containment assertions to run.
+    let injectorReached = false
     setFallbackFrontierPublicationSeamForTests((event) => {
-      if (event.phase === 'before-leaf' && event.leaf === 'alpha/SKILL.md') {
+      if (event.phase === 'before-leaf' && event.leaf === path.join('alpha', 'SKILL.md')) {
+        injectorReached = true
         // Deterministically rename the created `alpha` directory aside and
         // replace its path with a symlink to an external directory.
         renameSync(path.join(fixture.frontierPath, 'alpha'), stashed)
@@ -2427,6 +2444,7 @@ describe('fallback journal frontier publication', () => {
     })
     try {
       await assert.rejects(applyFallbackEntry(registered, fixture.frontierPath), /destination directory alpha was replaced during publication/)
+      assert.equal(injectorReached, true)
       // The external redirect target was never written and nothing was deleted.
       assert.deepEqual(readdirSync(external), [])
       // `alpha` was stashed before its SKILL.md was copied: an empty managed dir.
@@ -2874,11 +2892,18 @@ describe('fallback journal frontier rollback authority', () => {
     const owner = await beginMutatingFrontier(fixture)
     const staged = await buildStagedFrontier()
     const registered = await registerFrontierStageWithBeta(owner, fixture.frontierPath, staged)
+    // Native-separator leaf match as above; the injected failure must fire
+    // for the unproven-restore assertions below to be exercised.
+    let injectorReached = false
     setFallbackFrontierPublicationSeamForTests((event) => {
-      if (event.phase === 'before-leaf' && event.leaf === 'beta/SKILL.md') throw new Error('injected failure')
+      if (event.phase === 'before-leaf' && event.leaf === path.join('beta', 'SKILL.md')) {
+        injectorReached = true
+        throw new Error('injected failure')
+      }
     })
     try {
       await assert.rejects(applyFallbackEntry(registered, fixture.frontierPath), /FALLBACK_FRONTIER_PUBLICATION_INCOMPLETE/)
+      assert.equal(injectorReached, true)
       // No completion record exists, so the restore can never quarantine it.
       const restore = await restoreFallbackJournal(registered)
       assert.equal(restore.succeeded, false)

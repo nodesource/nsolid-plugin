@@ -1611,6 +1611,10 @@ describe('fallback strategy frontier planning', () => {
       tarball,
       trackedSkills: [{ name: 'tracked', path: path.join(skillsRoot, 'tracked') }],
     })
+    // Capture the REAL host platform BEFORE the spoof: inside the try block
+    // below process.platform is faked to 'win32' on every host, so it can no
+    // longer distinguish a native Windows runner from a POSIX host faking it.
+    const realPlatform = process.platform
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
     Object.defineProperty(process, 'platform', { value: 'win32' })
     try {
@@ -1623,13 +1627,29 @@ describe('fallback strategy frontier planning', () => {
 
       // Once every parent and leaf exists, the frontier gate passes on the
       // same faked platform: the rejection is strictly frontier-conditional.
-      // (The subsequent UNSAFE_FALLBACK_EXECUTOR outcome, if any, is an
-      // artifact of faking win32 while resolving a POSIX npm path and is
-      // already covered by the real-platform existing-parent test above.)
       mkdirSync(path.join(skillsRoot, 'tracked'), { recursive: true })
       const pastGate = await planFixture(installation)
       assert.notEqual(pastGate.planningError?.code, 'FALLBACK_PARENT_CREATION_UNSUPPORTED')
-      assert.equal(pastGate.temporaryDirectories, undefined)
+      if (realPlatform === 'win32') {
+        // Native Windows: the beforeEach npm-identity fixture ships a verified
+        // npm.CMD shim, so planning legitimately proceeds into a real manifest
+        // workspace (CI evidence: run 34258873417 actual temporaryDirectories
+        // contained an nsolid-plugin-manifest-* directory created by this very
+        // call). Assert the full supported outcome; planFixture registers the
+        // workspace in createdManifestDirectories and afterEach disposes it.
+        assert.equal(pastGate.planningError, undefined)
+        assert.equal(pastGate.steps.length, 4)
+        assert.ok(Array.isArray(pastGate.temporaryDirectories) && pastGate.temporaryDirectories.length > 0)
+        assert.deepEqual(readManifest(pastGate).plannedMissingFrontiers, [])
+      } else {
+        // POSIX host faking win32: the isolated single-segment fixture PATH
+        // contains no Windows-extension candidates, so findExecutable('npm',
+        // env, 'win32') deterministically returns undefined (verified against
+        // the production resolver) and planning must reject with the exact
+        // executor reason BEFORE creating any manifest workspace.
+        assert.equal(pastGate.planningError?.code, 'UNSAFE_FALLBACK_EXECUTOR')
+        assert.equal(pastGate.temporaryDirectories, undefined)
+      }
     } finally {
       Object.defineProperty(process, 'platform', platformDescriptor)
     }

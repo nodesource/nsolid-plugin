@@ -260,7 +260,14 @@ describe('fallback refresh transaction', () => {
     const result = await refreshWithParent({ harness: 'claude', bundlePath, skillsSource: sourceRoot })
 
     assert.equal(result.success, false)
-    assert.equal(result.error?.code, 'FALLBACK_FRONTIER_LEAF_KIND_MISMATCH')
+    // POSIX: the strict symlink-only claude link policy rejects the existing
+    // user directory with FALLBACK_FRONTIER_LEAF_KIND_MISMATCH during
+    // derivation. Windows: the win32 link-materialization policy deliberately
+    // permits copied directories, so the existing directory is kind-valid and
+    // the missing terminal skill leaf makes a frontier active; the platform
+    // preflight then rejects fail-closed with FALLBACK_PARENT_CREATION_UNSUPPORTED,
+    // equally BEFORE journal reservation. Both outcomes are preserve-only.
+    assert.equal(result.error?.code, process.platform === 'win32' ? 'FALLBACK_PARENT_CREATION_UNSUPPORTED' : 'FALLBACK_FRONTIER_LEAF_KIND_MISMATCH')
     assert.equal(existsSync(path.join(harnessDir, 'added', 'user-owned.txt')), true)
     // Even if a caller bypasses the parent's leaf planner, the child keeps
     // its independent collision guard and rejects before claiming a journal.
