@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
-import { constants as fsPromisesConstants, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readlink, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { constants as fsPromisesConstants, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readlink, readdir, rename, rm, symlink, writeFile, type FileHandle } from 'node:fs/promises'
 import { existsSync, lstatSync, readFileSync, realpathSync, type BigIntStats, type Dirent, type Stats } from 'node:fs'
 import path from 'node:path'
 import { FALLBACK_PROTOCOL_VERSION, type FallbackAnchorIdentity, type FallbackFrontierEvidence, type FallbackLeafTarget, type FallbackPathEvidence, type FallbackTransactionIdentity } from './types.js'
@@ -106,6 +106,13 @@ export interface FallbackJournalOperationResult {
    * mutated and everything is preserved (surfaces as FALLBACK_STATE_UNPROVEN).
    */
   unproven?: boolean
+  /**
+   * Reporting-only diagnostic for a swallowed fail-closed error, e.g. the
+   * FALLBACK_JOURNAL_LOCK_BUSY message naming the exact mutation lock path
+   * that requires manual recovery. It never authorizes deletion of the lock,
+   * journal, or any preserved artifact.
+   */
+  diagnostic?: string
   preservedArtifacts: string[]
   preservedPaths: string[]
 }
@@ -155,6 +162,34 @@ const handleCapabilities = new Map<string, Map<string, ArtifactCapability>>()
 // tracking during rollback. Disk applied/stageDigest fields cannot grant this
 // authority, and an external parent without it must preserve concurrent bytes.
 const publishedTrackingDigests = new Map<string, string>()
+
+/**
+ * Process-local record of non-frontier planned-missing destinations this
+ * process actually published, keyed by transaction id and resolved path.
+ * Recorded ONLY inside the completed swap of `applyFallbackEntry`, after the
+ * published bytes have been proven on disk — never from register/stage
+ * bookkeeping, never from serialized journal fields. It holds the exact live
+ * kind and digest captured at publication time, so restore may
+ * quarantine-rename a live planned-missing destination only when these exact
+ * bytes are still what is live. A foreign process (including a recovering
+ * parent) has no record and always preserves, mirroring the frontier
+ * publication model (`completedFrontierPublications`).
+ */
+interface PublishedFallbackEntry {
+  kind: FallbackPathKind
+  digest: string
+}
+const publishedFallbackEntries = new Map<string, Map<string, PublishedFallbackEntry>>()
+
+/** Record one proven completed publication of a planned-missing destination. */
+function recordPublishedFallbackEntry (transactionId: string, resolved: string, kind: FallbackPathKind, digest: string): void {
+  let published = publishedFallbackEntries.get(transactionId)
+  if (published === undefined) {
+    published = new Map()
+    publishedFallbackEntries.set(transactionId, published)
+  }
+  published.set(resolved, { kind, digest })
+}
 
 /**
  * Object-identity authority registry: every handle object issued by a
@@ -326,13 +361,15 @@ export function setFallbackFrontierRollbackSeamForTests (seam?: FallbackFrontier
 }
 
 /**
- * Remove-only test reset: clears every process-local frontier stage plan and
- * completion record, simulating a process restart. It can never create
+ * Remove-only test reset: clears every process-local publication state —
+ * frontier stage plans and completion records AND planned-missing published
+ * entry records — simulating a process restart. It can never create
  * authority; a cleared registry only ever yields fail-closed preservation.
  */
 export function clearFallbackFrontierPublicationStateForTests (): void {
   completedFrontierPublications.clear()
   frontierStagePlans.clear()
+  publishedFallbackEntries.clear()
 }
 
 export function trackingDigest (trackingPath: string): string | undefined {
@@ -341,6 +378,106 @@ export function trackingDigest (trackingPath: string): string | undefined {
 
 export function fallbackJournalPath (trackingPath: string): string {
   return `${path.resolve(trackingPath)}.update-journal.json`
+}
+
+// --- Mutation transition lock -----------------------------------------------------
+//
+// The claim/reclaim read-check-casWrite sequence is the only journal
+// transition where two different processes can legitimately pass the same
+// liveness checks against the same on-disk prior state (the owner <-> mutator
+// authority handoff). Without inter-process exclusion, every claimant that
+// reads the journal before any of them writes passes the deep-equality CAS
+// (last-writer-wins with the SAME incremented revision) and multiple live
+// processes hold genuine mutator authority simultaneously. The lock below
+// serializes exactly these two authority transitions with an exclusive-create
+// lock file next to the journal.
+
+const FALLBACK_JOURNAL_TRANSITION_LOCK_POLL_MS = 5
+const FALLBACK_JOURNAL_TRANSITION_LOCK_TIMEOUT_MS = 10_000
+
+/** Test-only override of the transition lock contention deadline; production always uses the default. */
+let transitionLockTimeoutMsForTests: number | undefined
+
+export function setFallbackJournalTransitionLockTimeoutForTests (ms: number | undefined): void {
+  transitionLockTimeoutMsForTests = ms
+}
+
+interface FallbackJournalTransitionLockRecord {
+  kind: 'fallback-journal-transition-lock'
+  journalPath: string
+  /** Random value proving release deletes only the exact lock this invocation created. */
+  token: string
+  holder: ProcessIdentity
+  acquiredAt: string
+}
+
+function fallbackJournalTransitionLockPath (journalPath: string): string {
+  return `${journalPath}.mutation-lock`
+}
+
+export function isFallbackJournalLockBusyError (error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('FALLBACK_JOURNAL_LOCK_BUSY')
+}
+
+/**
+ * Run one journal authority-transition critical section under inter-process
+ * exclusion. The lock is an exclusive-create (`wx`) file next to the journal
+ * carrying the holder's process identity. Contention is retried on a bounded
+ * deadline and then FAILS CLOSED: an abandoned (crashed holder) or ambiguous
+ * lock is never deleted or taken over, because a check-then-delete stale
+ * recovery has a proven TOCTOU window (two reapers reading the same dead
+ * record; the second unlinks the first reaper's replacement). Such a lock
+ * must be resolved by manual recovery — the error names the exact path.
+ * Release verifies the on-disk record still token-matches the record this
+ * invocation wrote, so a replaced or tampered lock file is never deleted.
+ */
+async function withFallbackJournalTransitionLock<T> (journalPath: string, critical: () => Promise<T>): Promise<T> {
+  const lockPath = fallbackJournalTransitionLockPath(journalPath)
+  const deadline = Date.now() + (transitionLockTimeoutMsForTests ?? FALLBACK_JOURNAL_TRANSITION_LOCK_TIMEOUT_MS)
+  const record: FallbackJournalTransitionLockRecord = {
+    kind: 'fallback-journal-transition-lock',
+    journalPath,
+    token: randomUUID(),
+    holder: currentProcessIdentity(),
+    acquiredAt: new Date().toISOString(),
+  }
+  for (;;) {
+    let handle: FileHandle
+    try {
+      handle = await open(lockPath, 'wx', 0o600)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (Date.now() >= deadline) {
+        throw new Error(`FALLBACK_JOURNAL_LOCK_BUSY at ${lockPath}: the mutation transition lock is held by another live process, or was abandoned by a crashed process and requires manual recovery`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, FALLBACK_JOURNAL_TRANSITION_LOCK_POLL_MS))
+      continue
+    }
+    try {
+      await handle.writeFile(JSON.stringify(record, null, 2) + '\n')
+      await handle.sync()
+    } catch (error) {
+      // The record could not be stamped: an unidentifiable lock file is left
+      // in place (never deleted) and every later transition fails closed.
+      await handle.close().catch(() => {})
+      throw new Error(`FALLBACK_JOURNAL_LOCK_BUSY at ${lockPath}: the lock holder record could not be written; the unidentifiable lock requires manual recovery`, { cause: error })
+    }
+    await handle.close().catch(() => {})
+    try {
+      return await critical()
+    } finally {
+      await releaseFallbackJournalTransitionLock(lockPath, record)
+    }
+  }
+}
+
+/** Release ONLY the exact lock this invocation created; never a replaced, foreign, or unreadable record. */
+async function releaseFallbackJournalTransitionLock (lockPath: string, record: FallbackJournalTransitionLockRecord): Promise<void> {
+  try {
+    const disk = JSON.parse(await readFile(lockPath, 'utf8')) as Partial<FallbackJournalTransitionLockRecord>
+    if (disk?.kind !== record.kind || disk?.token !== record.token || disk?.journalPath !== record.journalPath) return
+    await rm(lockPath)
+  } catch { /* missing or unreadable record: nothing this invocation may delete */ }
 }
 
 /**
@@ -656,8 +793,13 @@ export async function markFallbackJournalMutating (handle: FallbackJournalHandle
  * Claim the right to mutate as the external child. The expected canonical
  * manifest digest must come from the trusted caller (the CLI recomputes it
  * from the transaction file it verified); it is never read back from the
- * journal. Returns a mutator handle, or null when the journal is missing,
- * mismatched, or held by another live process.
+ * journal. The whole read-check-casWrite handoff runs under the inter-process
+ * mutation transition lock and the journal state is fully revalidated while
+ * the lock is held, so exactly one live claimant can ever win. Returns a
+ * mutator handle, or null when the journal is missing, mismatched, held by
+ * another live process, or the mutation transition lock is contended or
+ * abandoned (abandoned locks are reported with their path by the parent's
+ * reclaim; they are never auto-deleted).
  */
 export async function claimFallbackJournalMutation (manifest: FallbackTransactionIdentity, expectedManifestDigest?: string): Promise<FallbackJournalHandle | null> {
   // Protocol gate BEFORE any journal read or mutation: an incompatible child
@@ -681,37 +823,48 @@ export async function claimFallbackJournalMutation (manifest: FallbackTransactio
     throw new Error('FALLBACK_FRONTIER_DRIFT', { cause: error })
   }
   const journalPath = fallbackJournalPath(manifest.trackingPath)
-  if (!existsSync(journalPath)) return null
-  let journal: FallbackJournal
   try {
-    journal = strictLoad(journalPath)
-  } catch {
-    return null
-  }
-  const expected = expectedManifestDigest ?? manifestDigestOf(manifest)
-  if (journal.manifestDigest !== expected || manifestDigestOf(journal.manifest) !== expected) return null
-  if (!sameManifest(journal.manifest, manifest)) return null
-  if (journal.manifest.nonce === undefined || journal.manifest.nonce !== manifest.nonce) return null
-  if (journal.phase !== 'mutating') return null
-  if (!await journalOwnershipIsValid(journal)) return null
-  if (journal.mutator !== undefined && !processMatches(journal.mutator) && processIsLive(journal.mutator)) return null
-  const mutator = currentProcessIdentity()
-  try {
-    const revision = await casWrite(journalPath, { ...journal, mutator: { ...mutator, claimedAt: new Date().toISOString() } }, journal)
-    const claimed: FallbackJournalHandle = {
-      kind: 'fallback-journal-handle',
-      journalPath,
-      transactionId: journal.transactionId,
-      manifestDigest: journal.manifestDigest,
-      manifest,
-      role: 'mutator',
-      actor: mutator,
-      revision,
-    }
-    issueGenuineHandle(claimed)
-    return claimed
-  } catch {
-    return null
+    return await withFallbackJournalTransitionLock(journalPath, async () => {
+      if (!existsSync(journalPath)) return null
+      let journal: FallbackJournal
+      try {
+        journal = strictLoad(journalPath)
+      } catch {
+        return null
+      }
+      const expected = expectedManifestDigest ?? manifestDigestOf(manifest)
+      if (journal.manifestDigest !== expected || manifestDigestOf(journal.manifest) !== expected) return null
+      if (!sameManifest(journal.manifest, manifest)) return null
+      if (journal.manifest.nonce === undefined || journal.manifest.nonce !== manifest.nonce) return null
+      if (journal.phase !== 'mutating') return null
+      if (!await journalOwnershipIsValid(journal)) return null
+      if (journal.mutator !== undefined && !processMatches(journal.mutator) && processIsLive(journal.mutator)) return null
+      const mutator = currentProcessIdentity()
+      try {
+        const revision = await casWrite(journalPath, { ...journal, mutator: { ...mutator, claimedAt: new Date().toISOString() } }, journal)
+        const claimed: FallbackJournalHandle = {
+          kind: 'fallback-journal-handle',
+          journalPath,
+          transactionId: journal.transactionId,
+          manifestDigest: journal.manifestDigest,
+          manifest,
+          role: 'mutator',
+          actor: mutator,
+          revision,
+        }
+        issueGenuineHandle(claimed)
+        return claimed
+      } catch {
+        return null
+      }
+    })
+  } catch (error) {
+    // A contended or abandoned transition lock fails closed exactly like a
+    // journal held by another live process: the claimant reports no authority.
+    // The parent's reclaim is the surface that names the actionable lock path
+    // (FALLBACK_JOURNAL_LOCK_BUSY) when a lock was abandoned by a crash.
+    if (isFallbackJournalLockBusyError(error)) return null
+    throw error
   }
 }
 
@@ -719,21 +872,27 @@ export async function claimFallbackJournalMutation (manifest: FallbackTransactio
  * Parent reclaim after the child command has completed (and NEVER while tree
  * termination is unconfirmed — enforcing that is caller policy). Refuses while
  * the recorded mutator is a live different process; same-process test harnesses
- * can reclaim their own mutator. The owner adopts
+ * can reclaim their own mutator. The whole read-check-casWrite handoff runs
+ * under the inter-process mutation transition lock, so a concurrent claimant
+ * can never slip past the mutator liveness check (claim and reclaim are
+ * serialized: whichever transition wins the lock revalidates the on-disk
+ * journal state while holding it). The owner adopts
  * the latest disk revision without adopting any dynamic journal field as
  * authority: restore decisions come only from the trusted in-memory manifest.
  */
 export async function reclaimFallbackJournalMutation (handle: FallbackJournalHandle): Promise<FallbackJournalHandle> {
   if (!handleMatchesIssuedMetadata(handle)) throw new Error('Invalid fallback journal')
-  const journal = strictLoad(handle.journalPath)
-  if (journal.transactionId !== handle.transactionId) throw new Error('Invalid fallback journal')
-  if (journal.manifestDigest !== handle.manifestDigest || manifestDigestOf(journal.manifest) !== handle.manifestDigest) throw new Error('Invalid fallback journal')
-  if (!sameManifest(journal.manifest, handle.manifest)) throw new Error('Invalid fallback journal')
-  if (!processMatches(journal.owner)) throw new Error('Invalid fallback journal')
-  if (journal.mutator !== undefined && !processMatches(journal.mutator) && processIsLive(journal.mutator)) {
-    throw new Error('FALLBACK_MUTATOR_LIVE')
-  }
-  const revision = await casWrite(handle.journalPath, { ...journal, mutator: undefined }, journal)
+  const { revision } = await withFallbackJournalTransitionLock(handle.journalPath, async () => {
+    const journal = strictLoad(handle.journalPath)
+    if (journal.transactionId !== handle.transactionId) throw new Error('Invalid fallback journal')
+    if (journal.manifestDigest !== handle.manifestDigest || manifestDigestOf(journal.manifest) !== handle.manifestDigest) throw new Error('Invalid fallback journal')
+    if (!sameManifest(journal.manifest, handle.manifest)) throw new Error('Invalid fallback journal')
+    if (!processMatches(journal.owner)) throw new Error('Invalid fallback journal')
+    if (journal.mutator !== undefined && !processMatches(journal.mutator) && processIsLive(journal.mutator)) {
+      throw new Error('FALLBACK_MUTATOR_LIVE')
+    }
+    return { revision: await casWrite(handle.journalPath, { ...journal, mutator: undefined }, journal) }
+  })
   const reclaimed: FallbackJournalHandle = { ...handle, role: 'owner', revision }
   issueGenuineHandle(reclaimed)
   return reclaimed
@@ -759,7 +918,12 @@ export async function recoverFallbackJournalMutation (
   let owner: FallbackJournalHandle
   try {
     owner = await reclaimFallbackJournalMutation(handle)
-  } catch {
+  } catch (error) {
+    // A fail-closed transition lock (FALLBACK_JOURNAL_LOCK_BUSY) is swallowed
+    // exactly like any other reclaim refusal, but its message — which names
+    // the exact lock path and states that manual recovery is required — is
+    // surfaced as reporting-only evidence instead of being lost entirely.
+    if (isFallbackJournalLockBusyError(error)) return { ...preserveOwnedArtifacts(), diagnostic: (error as Error).message }
     return preserveOwnedArtifacts()
   }
   try {
@@ -2140,6 +2304,10 @@ export async function applyFallbackEntry (handle: FallbackJournalHandle, target:
   stageCapability.children = new Map([[`.nsolid-stage-${stageCapability.token}`, 'file']])
   const appliedDigest = await pathDigest(resolved)
   if (!appliedDigest || appliedDigest !== entry.stageDigest) throw new Error(`Swap for ${resolved} did not produce the staged digest`)
+  // Completed publication proof, captured while the exact bytes are proven
+  // live: the process-local ownership evidence restore later requires for
+  // planned-missing destinations. Registering or staging alone never grants it.
+  recordPublishedFallbackEntry(active.transactionId, resolved, await pathKind(resolved), appliedDigest)
   if (resolved === path.resolve(active.manifest.trackingPath)) publishedTrackingDigests.set(active.transactionId, appliedDigest)
   // Post-swap proof for a copied link: the published path itself must still
   // satisfy the frozen binding (kind, digest/link text, final destination
@@ -2364,7 +2532,11 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
     // owner). An external parent or a next-run process without that
     // capability always preserves, even when every journal field matches.
     const frontierPaths = new Set(authority.plannedMissingFrontiers.map((frontier) => path.resolve(frontier.frontierPath)))
-    let frontierIncomplete = false
+    // Set when a live planned-missing destination had to be preserved because
+    // no process-local evidence proves this transaction published it: the
+    // rollback is then incomplete/unproven and the journal stays for manual
+    // resolution, exactly like a preserved live frontier.
+    let incomplete = false
     // ---- Durable pending preflight (R2 blockers 2+3): any journal entry
     // durably marked frontierRollbackPending makes the WHOLE restore
     // incomplete/unproven — the journal/quarantine/snapshot stay, the exact
@@ -2403,7 +2575,7 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
       })
       if (rollback === undefined) {
         preservedPaths.push(resolved)
-        frontierIncomplete = true
+        incomplete = true
         journal = await reloadFallbackJournal(handle).catch(() => journal)
         continue
       }
@@ -2503,16 +2675,33 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
           // A live planned-missing frontier is never moved by the parent:
           // preserve the path and mark the rollback incomplete.
           preservedPaths.push(resolved)
-          frontierIncomplete = true
+          incomplete = true
           continue
         }
         // Planned-missing destination that exists: preserve the bytes by
-        // quarantine-rename. A rollback never deletes what it did not prove
-        // this transaction wrote. Same-process published copied links also
-        // prove against their retained frozen binding before and after the
-        // move.
+        // quarantine-rename ONLY when this process's own completed
+        // publication proves the current bytes are exactly what this
+        // transaction put there. Same-process published copied links prove
+        // against their retained frozen binding; every other live destination
+        // proves against the process-local publication record (kind + digest
+        // captured at the completed swap). Anything else — a foreign file
+        // created after journaling, a published destination whose bytes were
+        // replaced afterwards, or any live path in a process without the
+        // record — is preserved in place and marks the rollback incomplete;
+        // it is never moved and never deleted. Serialized journal fields
+        // (applied/stageDigest) never grant this authority.
         const retainedMissingBinding = retainedAppliedCopiedLinkBinding(handle, resolved)
-        if (retainedMissingBinding !== undefined && !await livePathMatchesRetainedCopiedLinkBinding(resolved, retainedMissingBinding)) { preservedPaths.push(resolved); continue }
+        if (retainedMissingBinding !== undefined) {
+          if (!await livePathMatchesRetainedCopiedLinkBinding(resolved, retainedMissingBinding)) { preservedPaths.push(resolved); continue }
+        } else {
+          const published = publishedFallbackEntries.get(handle.transactionId)?.get(resolved)
+          const liveDigest = await pathDigest(resolved)
+          if (published === undefined || published.kind !== kind || published.digest !== liveDigest) {
+            preservedPaths.push(resolved)
+            incomplete = true
+            continue
+          }
+        }
         if (!await renameLiveToRestoreQuarantine(resolved, restoreCapabilities)) { preservedPaths.push(resolved); continue }
         if (retainedMissingBinding !== undefined) {
           const movedCapability = restoreCapabilities.get(resolved)
@@ -2534,11 +2723,13 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
       }
     }
     if (!valid) {
-      if (frontierIncomplete) {
-        // The rollback cannot complete while a planned-missing frontier
-        // lives: report every restore container this invocation created so
-        // the incomplete rollback stays fully discoverable; nothing is
-        // destroyed and the journal is preserved for manual resolution.
+      if (incomplete) {
+        // The rollback cannot complete while a planned-missing destination
+        // this transaction cannot prove ownership of stays live (frontier or
+        // plain planned-missing path): report every restore container this
+        // invocation created so the incomplete rollback stays fully
+        // discoverable; nothing is destroyed and the journal is preserved for
+        // manual resolution.
         for (const capability of restoreCapabilities.values()) preservedArtifacts.push(capability.container)
         return { succeeded: false, unproven: true, preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
       }
@@ -2551,6 +2742,7 @@ export async function restoreFallbackJournal (handle: FallbackJournalHandle): Pr
       // its owner.
       await rm(journalPath, { force: true }).catch(() => {})
       publishedTrackingDigests.delete(handle.transactionId)
+      publishedFallbackEntries.delete(handle.transactionId)
     }
     return { succeeded: true, preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
   } catch {
@@ -2610,6 +2802,7 @@ export async function commitFallbackJournal (handle: FallbackJournalHandle): Pro
   // discoverable and pending.
   await rm(journalPath, { force: true }).catch(() => {})
   publishedTrackingDigests.delete(handle.transactionId)
+  publishedFallbackEntries.delete(handle.transactionId)
   return { succeeded: true, preservedArtifacts: dedupePaths(preservedArtifacts), preservedPaths: dedupePaths(preservedPaths) }
 }
 

@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fallbackStrategy } from '../../../src/update/strategies/fallback.js'
 import { resolveExecutableIdentity } from '../../../src/update/command-runner.js'
-import { applyFallbackEntry, claimFallbackJournalMutation, fallbackJournalPath, manifestDigestOf, pathDigest, pathKind, registerFallbackStage, trackingDigest } from '../../../src/update/fallback-journal.js'
+import { applyFallbackEntry, claimFallbackJournalMutation, fallbackJournalPath, manifestDigestOf, pathDigest, pathKind, registerFallbackStage, setFallbackJournalTransitionLockTimeoutForTests, trackingDigest } from '../../../src/update/fallback-journal.js'
 import { valueDigest } from '../../../src/update/mcp-lookup.js'
 import { readTrackingFile, writeTrackingFile } from '../../../src/skills/skill-tracker.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
@@ -1045,6 +1045,75 @@ describe('fallback strategy structured child result', () => {
     assert.equal(readFileSync(path.join(fixture.skillPath, 'SKILL.md'), 'utf8'), 'mutated by child', 'unproven live bytes must be preserved, never silently restored or removed')
     assert.ok((result.preservedArtifacts ?? []).includes(journalPath), 'the corrupted journal location must be retained for manual guidance')
     assert.equal(existsSync(journalPath), true, 'the corrupted journal must survive for manual recovery')
+  })
+
+  it('names the abandoned transition lock when a successful child cannot be reclaimed, preserving journal and lock', async () => {
+    const fixture = await setupResultFixture()
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const lockPath = `${journalPath}.mutation-lock`
+    let journalInChild = ''
+    let lockContent = ''
+    setFallbackJournalTransitionLockTimeoutForTests(50)
+    try {
+      const result = await execute(fixture, () => {
+        // The child succeeded, but an abandoned mutation transition lock now
+        // blocks the parent's reclaim: the parent must fail closed and name
+        // the exact lock path instead of swallowing the refusal.
+        journalInChild = readFileSync(journalPath, 'utf8')
+        lockContent = 'held by an abandoned process'
+        writeFileSync(lockPath, lockContent, { mode: 0o600 })
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
+      })
+
+      assert.equal(result.status, 'failed')
+      assert.equal(result.error?.code, 'FALLBACK_STATE_UNPROVEN')
+      assert.ok(result.error?.message.includes(lockPath), `actual lock path expected in: ${result.error?.message}`)
+      assert.match(result.error?.message ?? '', /manual recovery/)
+      assert.deepEqual(result.rollback, { attempted: false })
+      // Fail-closed preservation: journal bytes and the foreign lock are untouched.
+      assert.equal(readFileSync(journalPath, 'utf8'), journalInChild)
+      assert.ok(existsSync(lockPath))
+      assert.equal(readFileSync(lockPath, 'utf8'), lockContent)
+    } finally {
+      setFallbackJournalTransitionLockTimeoutForTests(undefined)
+    }
+  })
+
+  it('names the abandoned transition lock when parent recovery cannot reclaim the journal, preserving journal and backup', async () => {
+    const fixture = await setupResultFixture()
+    const journalPath = fallbackJournalPath(fixture.identity.trackingPath)
+    const lockPath = `${journalPath}.mutation-lock`
+    let journalInChild = ''
+    let backupInChild = ''
+    setFallbackJournalTransitionLockTimeoutForTests(50)
+    try {
+      const result = await execute(fixture, () => {
+        // Failing child; the recovery reclaim then hits the abandoned lock and
+        // the projected user-facing failure must carry the actual lock path.
+        journalInChild = readFileSync(journalPath, 'utf8')
+        const journal = JSON.parse(journalInChild) as { entries: Array<{ backup?: string }> }
+        const backup = journal.entries.map((entry) => entry.backup).find((candidate) => candidate !== undefined && statSync(candidate).isFile())
+        assert.ok(backup !== undefined, 'the fixture journal must hold at least one file backup')
+        backupInChild = readFileSync(backup, 'utf8')
+        writeFileSync(lockPath, 'held by an abandoned process', { mode: 0o600 })
+        return { exitCode: 1, stdout: '', stderr: 'refresh failed\nrollback: not-attempted\n', timedOut: false, treeTerminated: true }
+      })
+
+      assert.equal(result.status, 'failed')
+      assert.equal(result.error?.code, 'FALLBACK_STATE_UNPROVEN')
+      assert.ok(result.error?.message.includes(lockPath), `actual lock path expected in: ${result.error?.message}`)
+      assert.match(result.error?.message ?? '', /manual recovery/)
+      assert.deepEqual(result.rollback, { attempted: true, succeeded: false })
+      assert.ok((result.preservedArtifacts ?? []).includes(journalPath), 'the journaled location must be retained for manual guidance')
+      // Fail-closed preservation: journal bytes, backup bytes, and the lock are untouched.
+      assert.equal(readFileSync(journalPath, 'utf8'), journalInChild)
+      const journal = JSON.parse(journalInChild) as { entries: Array<{ backup?: string }> }
+      const backup = journal.entries.map((entry) => entry.backup).find((candidate) => candidate !== undefined && statSync(candidate).isFile())!
+      assert.equal(readFileSync(backup, 'utf8'), backupInChild)
+      assert.ok(existsSync(lockPath))
+    } finally {
+      setFallbackJournalTransitionLockTimeoutForTests(undefined)
+    }
   })
 
   it('still reports a verified parent rollback when the journal survives a mutating failing child', async () => {

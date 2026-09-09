@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync, openSync } from 'node:fs'
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, openSync } from 'node:fs'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import path from 'node:path'
-import { applyFallbackEntry, beginFallbackJournal, canonicalJsonString, claimFallbackJournalMutation, clearFallbackFrontierPublicationStateForTests, commitFallbackJournal, fallbackJournalPath, inspectFallbackJournal, manifestDigestOf, markFallbackJournalMutating, pathDigest, pathKind, publishedFallbackFrontiers, reclaimFallbackJournalMutation, recoverFallbackJournal, recoverFallbackJournalMutation, registerFallbackFrontierStage, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, setFallbackArtifactSwapSeamForTests, setFallbackFrontierPublicationSeamForTests, setFallbackFrontierRollbackSeamForTests, trackingDigest, type FallbackJournalHandle } from '../../../src/update/fallback-journal.js'
+import { applyFallbackEntry, beginFallbackJournal, canonicalJsonString, claimFallbackJournalMutation, clearFallbackFrontierPublicationStateForTests, commitFallbackJournal, fallbackJournalPath, inspectFallbackJournal, manifestDigestOf, markFallbackJournalMutating, pathDigest, pathKind, publishedFallbackFrontiers, reclaimFallbackJournalMutation, recoverFallbackJournal, recoverFallbackJournalMutation, registerFallbackFrontierStage, registerFallbackStage, reloadFallbackJournal, restoreFallbackJournal, setFallbackArtifactSwapSeamForTests, setFallbackFrontierPublicationSeamForTests, setFallbackFrontierRollbackSeamForTests, setFallbackJournalTransitionLockTimeoutForTests, trackingDigest, type FallbackJournalHandle } from '../../../src/update/fallback-journal.js'
 import { assertFallbackFrontierEvidenceList, compareUtf8, FallbackFrontierError } from '../../../src/update/fallback-frontier.js'
 import { getHarnessSkillsPath } from '../../../src/skills/skill-linker.js'
 import { getSkillsDir, getTrackingFilePath } from '../../../src/utils/path.js'
@@ -421,6 +421,248 @@ describe('fallback journal ownership validation', () => {
     } finally {
       for (const child of children) child.kill('SIGKILL')
     }
+  })
+
+  // Discriminating cross-process regression for the claim/reclaim mutation
+  // authority race: the historical read-check-casWrite sequence has no
+  // inter-process exclusion, so N barrier-synced claimants that all read the
+  // same mutator-free journal before any of them writes ALL pass the CAS
+  // (last-writer-wins with the SAME incremented revision) and N children hold
+  // genuine mutator handles simultaneously. Exactly one live claimant may win.
+  it('serializes concurrent cross-process mutation claims: exactly one live claimant wins', async () => {
+    const { manifest } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    const mutating = await markFallbackJournalMutating(handle)
+    assert.equal(mutating.role, 'owner')
+
+    const journalModule = new URL('../../../src/update/fallback-journal.js', import.meta.url).href
+    const packageRoot = fileURLToPath(new URL('../../..', import.meta.url))
+    const readyPrefix = path.join(home, 'claim-ready.')
+    const goPath = path.join(home, 'claim-go')
+    const resultPrefix = path.join(home, 'claim-result.')
+    const racers = 8
+    const script = [
+      'const { writeFileSync, existsSync, readFileSync } = require(\'node:fs\')',
+      'const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)',
+      `writeFileSync(${JSON.stringify(readyPrefix)} + process.pid, '')`,
+      `while (!existsSync(${JSON.stringify(goPath)})) sleep(5)`,
+      `import(${JSON.stringify(journalModule)}).then(async (journal) => {`,
+      '  const manifest = JSON.parse(readFileSync(process.argv[1], \'utf8\'))',
+      '  let result',
+      '  try {',
+      '    const claimed = await journal.claimFallbackJournalMutation(manifest, journal.manifestDigestOf(manifest))',
+      '    result = { success: claimed !== null, pid: process.pid, revision: claimed === null ? null : claimed.revision }',
+      '  } catch (error) {',
+      '    result = { success: false, pid: process.pid, error: String(error instanceof Error ? error.message : error) }',
+      '  }',
+      `  writeFileSync(${JSON.stringify(resultPrefix)} + process.pid, JSON.stringify(result))`,
+      '  // A winner stays alive so every later claimant observes a live mutator.',
+      '  if (result.success) { while (true) sleep(50) }',
+      '})',
+    ].join('\n')
+    const manifestFile = path.join(home, 'claim-manifest.json')
+    writeFileSync(manifestFile, JSON.stringify(manifest))
+    const children = Array.from({ length: racers }, () => spawn(process.execPath, ['--import', 'tsx/esm', '-e', script, manifestFile], {
+      cwd: packageRoot,
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }))
+    try {
+      const deadline = Date.now() + 60_000
+      while (Date.now() < deadline && readdirSync(home).filter((name) => name.startsWith('claim-ready.')).length < racers) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      assert.equal(readdirSync(home).filter((name) => name.startsWith('claim-ready.')).length, racers, 'all racers must be parked at the barrier before the claims')
+      writeFileSync(goPath, 'go')
+
+      const resultDeadline = Date.now() + 60_000
+      while (Date.now() < resultDeadline && readdirSync(home).filter((name) => name.startsWith('claim-result.')).length < racers) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      const resultFiles = readdirSync(home).filter((name) => name.startsWith('claim-result.'))
+      assert.equal(resultFiles.length, racers, 'every racer must report a claim result')
+      interface ClaimResult { success: boolean; pid: number; revision: number | null; error?: string }
+      const results: ClaimResult[] = resultFiles.map((name) => JSON.parse(readFileSync(path.join(home, name), 'utf8')) as ClaimResult)
+      const winners = results.filter((result) => result.success)
+      assert.equal(winners.length, 1, `exactly one live claimant may win: ${JSON.stringify(results)}`)
+      assert.equal(results.filter((result) => !result.success && result.revision === null).length, racers - 1)
+      const winner = winners[0]!
+      assert.equal(winner.revision, 3, 'the winner must hold the revision it wrote (prepared=1, mutating=2, claimed=3)')
+      // The on-disk journal must name exactly the one live winner as mutator.
+      const disk = JSON.parse(readFileSync(mutating.journalPath, 'utf8')) as { revision: number; mutator?: { pid: number } }
+      assert.equal(disk.revision, 3)
+      assert.equal(disk.mutator?.pid, winner.pid)
+    } finally {
+      for (const child of children) child.kill('SIGKILL')
+    }
+  })
+
+  // Shared record writer mirroring the internal transition-lock record shape
+  // (white-box, like the crafted mutator records above): if the internal
+  // format changes, these tests are updated with it.
+  function writeTransitionLockFixture (lockPath: string, holder: { pid: number; startIdentity?: string }): string {
+    const content = JSON.stringify({
+      kind: 'fallback-journal-transition-lock',
+      journalPath: lockPath.replace(/\.mutation-lock$/, ''),
+      token: randomUUID(),
+      holder,
+      acquiredAt: new Date().toISOString(),
+    }, null, 2) + '\n'
+    writeFileSync(lockPath, content)
+    return content
+  }
+
+  it('fails closed while the mutation transition lock is held by a live foreign process, and reclaim names the lock path', { skip: process.platform !== 'linux' }, async () => {
+    const { manifest } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    const mutating = await markFallbackJournalMutating(handle)
+    const journalBefore = readFileSync(mutating.journalPath, 'utf8')
+    const lockPath = `${mutating.journalPath}.mutation-lock`
+    const live = await spawnLiveProcessFixture()
+    try {
+      const content = writeTransitionLockFixture(lockPath, { pid: live.pid, startIdentity: live.startIdentity })
+      setFallbackJournalTransitionLockTimeoutForTests(50)
+      try {
+        assert.equal(await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest)), null)
+        await assert.rejects(reclaimFallbackJournalMutation(mutating), (error: unknown) => {
+          assert.ok(error instanceof Error)
+          assert.match(error.message, /FALLBACK_JOURNAL_LOCK_BUSY/)
+          assert.ok(error.message.includes(lockPath), `actionable lock path expected in: ${error.message}`)
+          assert.match(error.message, /manual recovery/)
+          return true
+        })
+        // Fail-closed preservation: journal bytes identical, foreign lock untouched (no takeover).
+        assert.equal(readFileSync(mutating.journalPath, 'utf8'), journalBefore)
+        assert.ok(existsSync(lockPath))
+        assert.equal(readFileSync(lockPath, 'utf8'), content)
+      } finally {
+        setFallbackJournalTransitionLockTimeoutForTests(undefined)
+      }
+    } finally {
+      await live.stop()
+    }
+    // The documented MANUAL recovery (removing the abandoned/foreign lock)
+    // restores transitions; nothing else was changed.
+    rmSync(lockPath, { force: true })
+    const claimed = await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest))
+    assert.notEqual(claimed, null)
+  })
+
+  it('never deletes or takes over an abandoned or corrupt mutation transition lock: fail closed with the journal preserved', { skip: process.platform !== 'linux' }, async () => {
+    const { manifest } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    const mutating = await markFallbackJournalMutating(handle)
+    const journalBefore = readFileSync(mutating.journalPath, 'utf8')
+    const lockPath = `${mutating.journalPath}.mutation-lock`
+    // A real process that REALLY died: its recorded identity is provably stale,
+    // yet check-then-delete recovery stays forbidden (TOCTOU on replacement locks).
+    const dead = await spawnLiveProcessFixture()
+    const deadIdentity = { pid: dead.pid, startIdentity: dead.startIdentity }
+    await dead.stop()
+    const variants: string[] = [
+      writeTransitionLockFixture(lockPath, deadIdentity),
+      '',
+      'corrupt',
+      JSON.stringify({ kind: 'fallback-journal-transition-lock' }),
+    ]
+    setFallbackJournalTransitionLockTimeoutForTests(50)
+    try {
+      for (const content of variants) {
+        writeFileSync(lockPath, content)
+        assert.equal(await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest)), null, `claim must fail closed on lock content: ${content.slice(0, 40)}`)
+        await assert.rejects(reclaimFallbackJournalMutation(mutating), /FALLBACK_JOURNAL_LOCK_BUSY/)
+        assert.ok(existsSync(lockPath), 'a failed transition must never delete the lock (no auto recovery)')
+        assert.equal(readFileSync(lockPath, 'utf8'), content)
+        assert.equal(readFileSync(mutating.journalPath, 'utf8'), journalBefore)
+      }
+    } finally {
+      setFallbackJournalTransitionLockTimeoutForTests(undefined)
+      rmSync(lockPath, { force: true })
+    }
+  })
+
+  it('recoverFallbackJournalMutation surfaces an abandoned transition lock as a reporting-only diagnostic while preserving journal and backups', { skip: process.platform !== 'linux' }, async () => {
+    const { manifest } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    const mutating = await markFallbackJournalMutating(handle)
+    const journalBefore = readFileSync(mutating.journalPath, 'utf8')
+    const journal = JSON.parse(journalBefore) as { entries: Array<{ backup?: string }> }
+    const fileBackups = journal.entries.map((entry) => entry.backup).filter((backup): backup is string => backup !== undefined && statSync(backup).isFile())
+    const backupBefore = new Map(fileBackups.map((backup) => [backup, readFileSync(backup, 'utf8')]))
+    assert.ok(backupBefore.size > 0, 'the fixture journal must hold at least one file backup')
+    const lockPath = `${mutating.journalPath}.mutation-lock`
+    const lockContent = 'abandoned by a crashed process'
+    writeFileSync(lockPath, lockContent, { mode: 0o600 })
+    setFallbackJournalTransitionLockTimeoutForTests(50)
+    try {
+      const result = await recoverFallbackJournalMutation(mutating)
+      assert.equal(result.succeeded, false)
+      assert.equal(result.unproven, true)
+      assert.ok(result.diagnostic !== undefined, 'the swallowed lock-busy failure must surface a diagnostic')
+      assert.match(result.diagnostic, /FALLBACK_JOURNAL_LOCK_BUSY/)
+      assert.ok(result.diagnostic.includes(lockPath), `actionable lock path expected in: ${result.diagnostic}`)
+      assert.match(result.diagnostic, /manual recovery/)
+      // Fail-closed preservation: journal bytes, every file backup, and the
+      // foreign lock are all untouched; the diagnostic is reporting-only.
+      assert.equal(readFileSync(mutating.journalPath, 'utf8'), journalBefore)
+      for (const [backup, content] of backupBefore) assert.equal(readFileSync(backup, 'utf8'), content)
+      assert.ok(existsSync(lockPath))
+      assert.equal(readFileSync(lockPath, 'utf8'), lockContent)
+    } finally {
+      setFallbackJournalTransitionLockTimeoutForTests(undefined)
+      rmSync(lockPath, { force: true })
+    }
+  })
+
+  it('releases its mutation transition lock after success, after refused claims, and after errors inside the critical section', async () => {
+    const { manifest } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    const mutating = await markFallbackJournalMutating(handle)
+    const lockPath = `${mutating.journalPath}.mutation-lock`
+    // Successful claim releases the lock.
+    const claimed = await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest))
+    assert.notEqual(claimed, null)
+    assert.equal(existsSync(lockPath), false)
+    // Refused claim (wrong nonce) releases the lock.
+    assert.equal(await claimFallbackJournalMutation({ ...manifest, nonce: randomUUID() }), null)
+    assert.equal(existsSync(lockPath), false)
+    // Error inside the critical section (journal deleted under the claimant)
+    // releases the lock too: a crash-or-error path never leaves our own lock.
+    rmSync(claimed!.journalPath, { force: true })
+    await assert.rejects(reclaimFallbackJournalMutation(claimed!))
+    assert.equal(existsSync(lockPath), false)
+    // Successful reclaim releases the lock as well.
+    rmSync(mutating.journalPath, { force: true })
+    const fresh = await beginFallbackJournal(manifest)
+    const freshMutating = await markFallbackJournalMutating(fresh.handle)
+    const freshClaimed = await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest))
+    assert.notEqual(freshClaimed, null)
+    assert.equal(existsSync(lockPath), false)
+    const owner = await reclaimFallbackJournalMutation(freshClaimed!)
+    assert.equal(owner.role, 'owner')
+    assert.equal(existsSync(lockPath), false)
+    assert.equal(freshMutating.role, 'owner')
+  })
+
+  it('keeps owner and mutator authorities separate across a mutation claim handoff (stale handles fail closed)', async () => {
+    const { manifest, skillPath } = await setupValidFixture()
+    const { handle } = await beginFallbackJournal(manifest)
+    const ownerHandle = await markFallbackJournalMutating(handle)
+    const claimed = await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest))
+    assert.notEqual(claimed, null)
+    // The owner's stale pre-claim handle (old revision) can no longer advance
+    // the journal or register stages: every CAS reloads against the handle's
+    // revision and fails closed on the drifted disk state.
+    await assert.rejects(markFallbackJournalMutating(ownerHandle), /Invalid fallback journal/)
+    await assert.rejects(registerFallbackStage(ownerHandle, skillPath, { bytes: Buffer.from('x') }), /Invalid fallback journal/)
+    // The issued mutator handle is the only authority that can register.
+    const staged = await registerFallbackStage(claimed!, skillPath, { bytes: Buffer.from('staged') })
+    assert.equal(staged.role, 'mutator')
+    // The owner reclaims through its genuine handle (adopts the latest disk
+    // revision by design); the child's now-stale mutator handle is dead authority.
+    const reclaimed = await reclaimFallbackJournalMutation(ownerHandle)
+    assert.equal(reclaimed.role, 'owner')
+    await assert.rejects(registerFallbackStage(claimed!, skillPath, { bytes: Buffer.from('x') }), /Invalid fallback journal/)
   })
 
   it('reserves the journal path before any snapshot work: an existing reservation is busy', async () => {
@@ -3845,6 +4087,135 @@ describe('fallback journal copied-link bindings', () => {
     assert.equal(readFileSync(path.join(fixture.linkGammaPath, 'SKILL.md'), 'utf8'), '# tampered\n')
     assert.equal(existsSync(fixture.destRoot), false)
     assert.equal(existsSync(owner.journalPath), true)
+  })
+})
+
+describe('fallback journal planned-missing publication ownership', () => {
+  const mcpConfigPath = (): string => path.join(home, '.claude.json')
+
+  async function beginClaimed (manifest: FallbackTransactionIdentity): Promise<FallbackJournalHandle> {
+    const { handle } = await beginFallbackJournal(manifest)
+    await markFallbackJournalMutating(handle)
+    const claimed = await claimFallbackJournalMutation(manifest, manifestDigestOf(manifest))
+    if (!claimed) throw new Error('mutation claim failed')
+    return claimed
+  }
+
+  async function publishMcpConfig (manifest: FallbackTransactionIdentity, bytes: string): Promise<FallbackJournalHandle> {
+    const claimed = await beginClaimed(manifest)
+    const staged = await registerFallbackStage(claimed, mcpConfigPath(), { bytes: Buffer.from(bytes) })
+    return await applyFallbackEntry(staged, mcpConfigPath())
+  }
+
+  function quarantineContainers (dir: string, basename: string): string[] {
+    return readdirSync(dir).filter((name) => name.startsWith(`.${basename}.nsolid-quarantine-`))
+  }
+
+  it('preserves a foreign MCP config created after journaling, unproven, through child restore and parent recovery', async () => {
+    const { manifest } = await setupValidFixture()
+    const mcpPath = mcpConfigPath()
+    const claimed = await beginClaimed(manifest)
+    // The foreign writer (Claude Code itself, or the user) creates the live
+    // config AFTER the journal recorded the path as missing. This transaction
+    // never published anything.
+    const foreignBytes = JSON.stringify({ mcpServers: { 'user-tool': { type: 'stdio', command: 'uvx', args: ['user-tool'] } }, userState: 'precious' }, null, 2)
+    writeFileSync(mcpPath, foreignBytes)
+
+    // Child-owned rollback (mutator role): must NOT move the foreign file.
+    const childRestore = await restoreFallbackJournal(claimed)
+    assert.equal(childRestore.succeeded, false)
+    assert.equal(childRestore.unproven, true)
+    assert.ok(childRestore.preservedPaths.includes(path.resolve(mcpPath)))
+    assert.equal(readFileSync(mcpPath, 'utf8'), foreignBytes)
+    assert.deepEqual(quarantineContainers(home, 'claude.json'), [])
+    assert.equal(existsSync(claimed.journalPath), true)
+
+    // Parent recovery (strategies/fallback.ts reclaim + owner-role restore):
+    // still no publication evidence in this process, still preserved.
+    const owner = await reclaimFallbackJournalMutation(claimed)
+    const parentRestore = await restoreFallbackJournal(owner)
+    assert.equal(parentRestore.succeeded, false)
+    assert.equal(parentRestore.unproven, true)
+    assert.ok(parentRestore.preservedPaths.includes(path.resolve(mcpPath)))
+    assert.equal(readFileSync(mcpPath, 'utf8'), foreignBytes)
+    assert.deepEqual(quarantineContainers(home, 'claude.json'), [])
+    assert.equal(existsSync(owner.journalPath), true)
+  })
+
+  it('rolls a genuine same-process published MCP config back into a preserved quarantine', async () => {
+    const { manifest } = await setupValidFixture()
+    const mcpPath = mcpConfigPath()
+    const publishedBytes = JSON.stringify({ mcpServers: { 'nsolid-console': { type: 'http', url: 'https://example.com/mcp' } } }, null, 2)
+    const applied = await publishMcpConfig(manifest, publishedBytes)
+    assert.equal(readFileSync(mcpPath, 'utf8'), publishedBytes)
+
+    const restore = await restoreFallbackJournal(applied)
+    assert.equal(restore.succeeded, true)
+    assert.equal(existsSync(mcpPath), false)
+    const quarantines = quarantineContainers(home, 'claude.json')
+    assert.equal(quarantines.length, 1)
+    assert.equal(readFileSync(path.join(home, quarantines[0], '.claude.json'), 'utf8'), publishedBytes)
+    assert.ok(restore.preservedArtifacts.some((artifact) => artifact.includes('.nsolid-quarantine-')))
+    assert.equal(existsSync(applied.journalPath), true, 'a mutator leaves journal disposition to its owner')
+  })
+
+  it('preserves a same-process published MCP config whose live bytes were replaced afterwards', async () => {
+    const { manifest } = await setupValidFixture()
+    const mcpPath = mcpConfigPath()
+    const publishedBytes = JSON.stringify({ mcpServers: { 'nsolid-console': { type: 'http', url: 'https://example.com/mcp' } } }, null, 2)
+    const applied = await publishMcpConfig(manifest, publishedBytes)
+    const replacementBytes = '{"foreign":true}'
+    writeFileSync(mcpPath, replacementBytes)
+
+    const restore = await restoreFallbackJournal(applied)
+    assert.equal(restore.succeeded, false)
+    assert.equal(restore.unproven, true)
+    assert.ok(restore.preservedPaths.includes(path.resolve(mcpPath)))
+    assert.equal(readFileSync(mcpPath, 'utf8'), replacementBytes)
+    assert.deepEqual(quarantineContainers(home, 'claude.json'), [])
+    assert.equal(existsSync(applied.journalPath), true)
+  })
+
+  it('preserves a live planned-missing destination when a stage was registered but never published', async () => {
+    const { manifest } = await setupValidFixture()
+    const mcpPath = mcpConfigPath()
+    const claimed = await beginClaimed(manifest)
+    const staged = await registerFallbackStage(claimed, mcpPath, { bytes: Buffer.from('{"nsolid":"staged"}') })
+    // The journal now carries stage/stageDigest for the entry, but the swap
+    // never ran: a concurrent foreign writer lands on the live path.
+    const foreignBytes = '{"foreign":true}'
+    writeFileSync(mcpPath, foreignBytes)
+
+    const restore = await restoreFallbackJournal(staged)
+    assert.equal(restore.succeeded, false)
+    assert.equal(restore.unproven, true)
+    assert.ok(restore.preservedPaths.includes(path.resolve(mcpPath)))
+    assert.equal(readFileSync(mcpPath, 'utf8'), foreignBytes)
+    assert.equal(existsSync(staged.journalPath), true)
+  })
+
+  it('never infers ownership from serialized applied/stageDigest fields after the publication records are gone', async () => {
+    const { manifest } = await setupValidFixture()
+    const mcpPath = mcpConfigPath()
+    const publishedBytes = JSON.stringify({ mcpServers: {} }, null, 2)
+    const applied = await publishMcpConfig(manifest, publishedBytes)
+    // Simulated process restart: every process-local publication record is
+    // cleared. The disk journal still says applied:true with the exact
+    // stage digest, and the live bytes are exactly what the transaction
+    // published — none of that serialized state may authorize the move.
+    clearFallbackFrontierPublicationStateForTests()
+    const disk = JSON.parse(readFileSync(applied.journalPath, 'utf8')) as { entries: Array<{ path: string; applied?: boolean; stageDigest?: string }> }
+    const entry = disk.entries.find((candidate) => path.resolve(candidate.path) === path.resolve(mcpPath))
+    assert.equal(entry?.applied, true)
+    assert.ok(entry?.stageDigest)
+
+    const restore = await restoreFallbackJournal(applied)
+    assert.equal(restore.succeeded, false)
+    assert.equal(restore.unproven, true)
+    assert.ok(restore.preservedPaths.includes(path.resolve(mcpPath)))
+    assert.equal(readFileSync(mcpPath, 'utf8'), publishedBytes)
+    assert.deepEqual(quarantineContainers(home, 'claude.json'), [])
+    assert.equal(existsSync(applied.journalPath), true)
   })
 })
 

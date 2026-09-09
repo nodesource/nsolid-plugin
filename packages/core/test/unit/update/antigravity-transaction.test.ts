@@ -35,7 +35,7 @@ describe('Antigravity staged plugin validation', () => {
       writeFileSync(path.join(root, 'bundle.json'), JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
       writeFileSync(path.join(root, 'skills', 'example', 'SKILL.md'), '# example')
       const manifest = path.join(root, 'import_manifest.json')
-      writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin' }] }))
+      writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin', source: 'antigravity' }] }))
       const digest = nativePayloadDigest(root)
 
       assert.equal(validateStagedPlugin(root, manifest, '1.0.0'), false)
@@ -56,7 +56,7 @@ describe('Antigravity staged plugin validation', () => {
       writeFileSync(bundleJson, JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
       writeFileSync(path.join(root, 'skills', 'example', 'SKILL.md'), '# example')
       const manifest = path.join(root, 'import_manifest.json')
-      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin' } } }))
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin', source: 'antigravity' } } }))
 
       // plugin.json without the canonical identity.
       writeFileSync(pluginJson, JSON.stringify({ description: 'no name' }))
@@ -96,13 +96,67 @@ describe('Antigravity staged plugin validation', () => {
       // An object value without identity fields proves nothing either.
       writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { path: '/plugin' } } }))
       assert.equal(validateStagedPlugin(root, manifest), false)
-      // The value itself must declare the identity; array form unchanged.
-      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin' } } }))
+      // A value carrying the canonical identity under a foreign object key is
+      // rejected too: key and value must agree, matching the inventory contract.
+      writeFileSync(manifest, JSON.stringify({ imports: { 'my-nsolid-plugin-helper': { name: 'nsolid-plugin', source: 'antigravity' } } }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // The value itself must declare the identity with an accepted source,
+      // under the canonical key (object form) or as an array entry.
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin', source: 'antigravity' } } }))
       assert.equal(validateStagedPlugin(root, manifest), true)
+      writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin', source: 'antigravity' }] }))
+      assert.equal(validateStagedPlugin(root, manifest), true)
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { plugin: 'nsolid-plugin', source: 'antigravity' } } }))
+      assert.equal(validateStagedPlugin(root, manifest), true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects imports with missing or foreign registration source provenance', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-agy-provenance-source-'))
+    try {
+      mkdirSync(path.join(root, 'skills', 'example'), { recursive: true })
+      writeFileSync(path.join(root, 'plugin.json'), JSON.stringify({ name: 'nsolid-plugin' }))
+      writeFileSync(path.join(root, 'bundle.json'), JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
+      writeFileSync(path.join(root, 'skills', 'example', 'SKILL.md'), '# example')
+      const manifest = path.join(root, 'import_manifest.json')
+
+      // A correct name with no source proves nothing (previously accepted).
       writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin' }] }))
-      assert.equal(validateStagedPlugin(root, manifest), true)
-      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { plugin: 'nsolid-plugin' } } }))
-      assert.equal(validateStagedPlugin(root, manifest), true)
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // A foreign registration source is rejected even under the canonical name.
+      writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin', source: 'https://github.com/Evil/nsolid-plugin.git' }] }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // The exact NodeSource root with an extra suffix is not the fixed root.
+      writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin', source: 'https://github.com/NodeSource/nsolid-plugin.git/' }] }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // SSH shorthand is not the accepted HTTPS provenance.
+      writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin', source: 'git@github.com:NodeSource/nsolid-plugin.git' }] }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+      // The same rejections apply to the object form.
+      writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin', source: 'https://github.com/Evil/nsolid-plugin.git' } } }))
+      assert.equal(validateStagedPlugin(root, manifest), false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts exactly the canonical registration provenance sources', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'nsolid-plugin-agy-provenance-accept-'))
+    try {
+      mkdirSync(path.join(root, 'skills', 'example'), { recursive: true })
+      writeFileSync(path.join(root, 'plugin.json'), JSON.stringify({ name: 'nsolid-plugin' }))
+      writeFileSync(path.join(root, 'bundle.json'), JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
+      writeFileSync(path.join(root, 'skills', 'example', 'SKILL.md'), '# example')
+      const manifest = path.join(root, 'import_manifest.json')
+
+      for (const source of ['antigravity', 'https://github.com/NodeSource/nsolid-plugin', 'https://github.com/NodeSource/nsolid-plugin.git', 'HTTPS://GITHUB.COM/NodeSource/nsolid-plugin.GIT']) {
+        writeFileSync(manifest, JSON.stringify({ imports: [{ name: 'nsolid-plugin', source }] }))
+        assert.equal(validateStagedPlugin(root, manifest), true, `array form with source ${source}`)
+        writeFileSync(manifest, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin', source } } }))
+        assert.equal(validateStagedPlugin(root, manifest), true, `object form with source ${source}`)
+      }
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -182,7 +236,7 @@ describe('Antigravity staged plugin validation', () => {
       writeFileSync(path.join(pluginRoot, 'plugin.json'), JSON.stringify({ name: 'nsolid-plugin' }))
       writeFileSync(path.join(pluginRoot, 'bundle.json'), JSON.stringify({ version: '1.0.1', skills: [{ name: 'example', path: 'skills/example' }] }))
       writeFileSync(path.join(pluginRoot, 'skills', 'example', 'SKILL.md'), '# v1.0.0\n')
-      writeFileSync(manifestPath, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin' } } }))
+      writeFileSync(manifestPath, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin', source: 'antigravity' } } }))
       return { home, pluginRoot, manifestPath, previousHome, previousUserProfile }
     }
 
@@ -268,6 +322,36 @@ describe('Antigravity staged plugin validation', () => {
         const containers = backupContainers(path.join(fixture.home, '.gemini', 'config'))
         assert.equal(containers.root.length, 1)
         assert.equal(containers.manifest.length, 1)
+      } finally {
+        restoreHome(fixture)
+      }
+    })
+
+    it('triggers a guarded rollback when the staged manifest claims a foreign source', async () => {
+      const fixture = setupInstalledFixture()
+      try {
+        const item = {
+          ...agyItem(),
+          steps: [{ kind: 'command' as const, description: 'agy sync', command: { executable: 'agy', args: ['sync'], timeoutMs: 1_000 } }],
+        }
+        const result = await executeAntigravityTransaction(item, {
+          run: async () => {
+            // The replacement commands succeed and restage a structurally valid
+            // plugin, but the manifest import now carries a foreign source:
+            // provenance validation must fail the transaction and restore.
+            writeFileSync(fixture.manifestPath, JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin', source: 'https://github.com/Evil/nsolid-plugin.git' } } }))
+            return { exitCode: 0, stdout: '', stderr: '', timedOut: false, treeTerminated: true }
+          },
+        })
+
+        assert.equal(result.success, false)
+        assert.equal(result.error?.code, 'ANTIGRAVITY_VALIDATION_FAILED')
+        assert.equal(result.rollbackAttempted, true)
+        assert.equal(result.rollbackSucceeded, true)
+        assert.equal(readFileSync(fixture.manifestPath, 'utf8'), JSON.stringify({ imports: { 'nsolid-plugin': { name: 'nsolid-plugin', source: 'antigravity' } } }))
+        const containers = backupContainers(path.join(fixture.home, '.gemini', 'config'))
+        assert.deepEqual([...containers.root, ...containers.manifest], [])
+        assert.equal(readFileSync(path.join(fixture.pluginRoot, 'skills/example/SKILL.md'), 'utf8'), '# v1.0.0\n')
       } finally {
         restoreHome(fixture)
       }

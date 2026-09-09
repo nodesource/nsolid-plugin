@@ -14,7 +14,7 @@ import { getTrackingFilePath } from '../../utils/path.js'
 import { captureFallbackPathEvidence, fallbackBundlePaths, resolveFallbackDestinations } from '../fallback-planning.js'
 import { getAdapter } from '../../harnesses/index.js'
 import { getHarnessSkillsPath } from '../../skills/skill-linker.js'
-import { finalizeFallbackJournal, beginFallbackJournal, manifestDigestOf, markFallbackJournalMutating, pathDigest, pathKind, reclaimFallbackJournalMutation, recoverFallbackJournalMutation, recoverFallbackJournal, trackingDigest, type FallbackJournalHandle } from '../fallback-journal.js'
+import { finalizeFallbackJournal, beginFallbackJournal, manifestDigestOf, markFallbackJournalMutating, isFallbackJournalLockBusyError, pathDigest, pathKind, reclaimFallbackJournalMutation, recoverFallbackJournalMutation, recoverFallbackJournal, trackingDigest, type FallbackJournalHandle } from '../fallback-journal.js'
 import { managerArgsForIdentity, verifyLocalArtifact } from '../package-manager.js'
 import { readTrackingFile } from '../../skills/skill-tracker.js'
 import { harnessMcpKey, readMcpFieldDigests } from '../mcp-lookup.js'
@@ -330,8 +330,12 @@ export const fallbackStrategy: UpdateStrategy & InternalUpdateExecutor = {
         try {
           ownerHandle = await reclaimFallbackJournalMutation(journal)
           journal = ownerHandle
-        } catch {
-          return complete(failedResult(item, { code: 'FALLBACK_STATE_UNPROVEN', message: 'Fallback child completed but the parent journal could not be reclaimed safely; its state was left untouched for manual recovery' }, { attempted: false }), 'preserve')
+        } catch (error) {
+          // The journal API fails closed on an abandoned or contended
+          // transition lock; surface its message (lock path + manual recovery)
+          // instead of swallowing it. Reporting only: nothing is deleted.
+          const lockDiagnostic = isFallbackJournalLockBusyError(error) ? ` ${(error as Error).message}` : ''
+          return complete(failedResult(item, { code: 'FALLBACK_STATE_UNPROVEN', message: `Fallback child completed but the parent journal could not be reclaimed safely; its state was left untouched for manual recovery.${lockDiagnostic}` }, { attempted: false }), 'preserve')
         }
         const completion = await finalizeFallbackJournal(ownerHandle, async () => {
           const tracking = await readTrackingFile()
@@ -547,7 +551,7 @@ type FallbackRecoveryOutcome =
   | { kind: 'original-state-verified'; preservation: PreservationEvidence }
   | { kind: 'authority-unreclaimable'; preservation: PreservationEvidence }
   | { kind: 'restore-verified'; preservation: PreservationEvidence }
-  | { kind: 'restore-incomplete'; reason: 'unproven' | 'incomplete' | 'journal-finalization-pending'; preservation: PreservationEvidence }
+  | { kind: 'restore-incomplete'; reason: 'unproven' | 'incomplete' | 'journal-finalization-pending'; preservation: PreservationEvidence; diagnostic?: string }
 
 /** The outcome, not a child claim, determines the public rollback projection. */
 function publicRollback (outcome: FallbackRecoveryOutcome): UpdateResult['rollback'] {
@@ -597,9 +601,10 @@ function fallbackFailureError (
   if (result.spawnErrorCode === 'ENOENT') return { code: 'MISSING_EXECUTABLE', message: `${command.executable} executable was not found on PATH` }
   if (result.timedOut) return { code: 'FALLBACK_COMMAND_TIMEOUT', message: 'Fallback refresh command timed out' }
   if (outcome.kind === 'restore-incomplete' && outcome.reason === 'unproven') {
+    const message = 'The fallback transaction could not prove the state of its owned files, so the automatic rollback was refused. Its journal, snapshot, and preserved artifacts were left untouched for manual recovery.'
     return {
       code: 'FALLBACK_STATE_UNPROVEN',
-      message: 'The fallback transaction could not prove the state of its owned files, so the automatic rollback was refused. Its journal, snapshot, and preserved artifacts were left untouched for manual recovery.',
+      message: outcome.diagnostic === undefined ? message : `${message} ${outcome.diagnostic}`,
     }
   }
   if (outcome.kind === 'restore-incomplete') {
@@ -626,6 +631,7 @@ async function recoverFallbackFailure (
         // remains incomplete; durable finalization is a separate proof.
         kind: 'restore-incomplete',
         reason: restored.unproven === true ? 'unproven' : restored.frontierJournalPending === true ? 'journal-finalization-pending' : 'incomplete',
+        diagnostic: restored.diagnostic,
         preservation,
       }
 }

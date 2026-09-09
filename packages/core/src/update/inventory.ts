@@ -19,6 +19,7 @@ import type { CommandRunner } from './types.js'
 import { readClaudePluginScope } from './claude-record.js'
 import { detectGlobalPackageOwnership, readPackageVersion as readNamedPackageVersion } from './package-manager.js'
 import { readCodexPayloadVersion, resolveCodexPluginCachePath } from './codex-transaction.js'
+import { isNsolidPluginImport, isNsolidPluginImportKey } from './antigravity-provenance.js'
 import { classifyVersionSet, classifyVersions, isStableVersion, readRunningVersionInfo, resolvePackageRoot } from './version.js'
 import { nativePayloadTreeDigest } from './native-payload.js'
 import { isSafeDirectChild } from './fallback-ownership.js'
@@ -907,12 +908,12 @@ function manifestContainsPlugin (manifestPath: string, pluginRoot: string): bool
   if (plugin?.name !== 'nsolid-plugin') return false
   const data = safeReadJson(manifestPath)
   const imports = data?.imports
-  const hasExactIdentity = (entry: unknown): boolean => isRecord(entry) &&
-    (entry.name === 'nsolid-plugin' || entry.plugin === 'nsolid-plugin') &&
-    (entry.source === 'antigravity' || (typeof entry.source === 'string' && /^https:\/\/github\.com\/NodeSource\/nsolid-plugin(?:\.git)?$/i.test(entry.source)))
-  if (Array.isArray(imports)) return imports.some(hasExactIdentity)
+  // Shared provenance predicate: canonical identity plus an accepted
+  // registration source (antigravity marker or the exact NodeSource GitHub
+  // root), identical to the staged-plugin validation contract.
+  if (Array.isArray(imports)) return imports.some((entry) => isNsolidPluginImport(entry))
   if (isRecord(imports)) {
-    return Object.entries(imports).some(([key, value]) => key === 'nsolid-plugin' && hasExactIdentity(value))
+    return Object.entries(imports).some(([key, value]) => isNsolidPluginImportKey(key) && isNsolidPluginImport(value))
   }
   return false
 }

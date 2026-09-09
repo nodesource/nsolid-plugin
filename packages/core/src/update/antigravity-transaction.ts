@@ -10,6 +10,7 @@ import { copyOwnedPath, createSiblingBackupPath, ownedPathKind, ownedTreeDigest,
 import type { SiblingBackupPath } from './owned-fs.js'
 import { runTransactionCommands } from './transaction-commands.js'
 import { nativePayloadTreeDigest, sha256Hex } from './native-payload.js'
+import { isNsolidPluginImport, isNsolidPluginImportKey } from './antigravity-provenance.js'
 
 export interface AntigravityTransactionResult {
   success: boolean
@@ -202,12 +203,13 @@ export function validateStagedPlugin (pluginRoot: string, manifestPath: string, 
       if (!existsSync(path.join(pluginRoot, skill.path, 'SKILL.md'))) return false
     }
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { imports?: unknown }
-    if (Array.isArray(manifest.imports)) return manifest.imports.some((entry) => isPluginImport(entry))
+    if (Array.isArray(manifest.imports)) return manifest.imports.some((entry) => isNsolidPluginImport(entry))
     if (manifest.imports && typeof manifest.imports === 'object') {
-      // The key alone never proves ownership: `{ 'nsolid-plugin': true }` is
-      // rejected even under the canonical key. The value itself must declare
-      // the plugin identity, exactly like the array form.
-      return Object.entries(manifest.imports as Record<string, unknown>).some(([, value]) => isPluginImport(value))
+      // The canonical key and the value must agree, exactly like the inventory
+      // contract: the value must declare the plugin identity with an accepted
+      // registration source, and only under the canonical object key.
+      return Object.entries(manifest.imports as Record<string, unknown>).some(([key, value]) =>
+        isNsolidPluginImportKey(key) && isNsolidPluginImport(value))
     }
     return false
   } catch {
@@ -267,7 +269,7 @@ function locateOwnImportRanges (text: string): ByteRange[] {
   const ranges: ByteRange[] = []
   if (imports.type === 'array') {
     for (const item of imports.children ?? []) {
-      if (isPluginImport(getNodeValue(item))) ranges.push({ start: item.offset, end: item.offset + item.length })
+      if (declaresPluginIdentity(getNodeValue(item))) ranges.push({ start: item.offset, end: item.offset + item.length })
     }
   } else if (imports.type === 'object') {
     for (const property of imports.children ?? []) {
@@ -275,10 +277,10 @@ function locateOwnImportRanges (text: string): ByteRange[] {
       const valueNode: Node | undefined = property.children?.[1]
       if (!keyNode || !valueNode) continue
       const key = getNodeValue(keyNode)
-      // Unlike validateStagedPlugin, edit ownership deliberately matches the
-      // canonical key alone: a malformed entry must stay removable during
-      // rollback even when its value proves no identity.
-      if (key === 'nsolid-plugin' || isPluginImport(getNodeValue(valueNode))) {
+      // Edit ownership deliberately stays broader than the shared provenance
+      // predicate (see declaresPluginIdentity below): a malformed entry must
+      // stay removable during rollback even when its value proves no identity.
+      if (key === 'nsolid-plugin' || declaresPluginIdentity(getNodeValue(valueNode))) {
         ranges.push({ start: property.offset, end: property.offset + property.length })
       }
     }
@@ -286,7 +288,13 @@ function locateOwnImportRanges (text: string): ByteRange[] {
   return ranges.sort((left, right) => left.start - right.start)
 }
 
-function isPluginImport (entry: unknown): boolean {
+/**
+ * Edit-ownership matcher for rollback byte-splicing only: broader than the
+ * shared `isNsolidPluginImport` provenance predicate. Validation never uses
+ * this — an import validated for staging or restoration must additionally
+ * carry an accepted registration source.
+ */
+function declaresPluginIdentity (entry: unknown): boolean {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false
   const value = entry as { name?: unknown; plugin?: unknown }
   return value.name === 'nsolid-plugin' || value.plugin === 'nsolid-plugin'
