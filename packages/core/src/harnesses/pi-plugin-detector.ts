@@ -31,7 +31,7 @@ function readPiPackageSourceEntries (settingsPath: string): string[] {
     .filter((source): source is string => typeof source === 'string' && source.length > 0)
 }
 
-function packageNameFromNpmSource (source: string): string | null {
+export function packageNameFromNpmSource (source: string): string | null {
   if (!source.startsWith('npm:')) return null
   const spec = source.slice('npm:'.length)
   if (spec.startsWith('@')) {

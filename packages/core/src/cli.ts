@@ -5,21 +5,24 @@ import { createInterface } from 'node:readline/promises'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { installWithRuntime, setup, uninstall, logout, doctor, restore, loadCredentials } from './index.js'
+import { installWithRuntime, setup, uninstall, logout, doctor, restore, loadCredentials, executeUpdatePlan, getVersionInfo, planUpdates } from './index.js'
 import type { AuthConfirmation, HarnessType } from './types.js'
 import { HARNESS_VALUES, PLUGIN_OWNED_HARNESSES } from './types.js'
+import type { UpdateConfirmationContext } from './update/types.js'
+import { printUpdatePlan, printUpdateSummary, shouldDisplayUpdatePlan } from './update/render.js'
 import { formatPluginError } from './errors.js'
 import { listConfigBackups } from './utils/backup.js'
 import { C, supportsColor } from './utils/format.js'
 import { createConsoleProgress, silentProgress } from './utils/progress.js'
+import { resolvePackageRoot } from './update/version.js'
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set<HarnessType>(['pi'])
 const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set<HarnessType>(['opencode'])
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-// At runtime the bin is dist/src/cli.js, so __dirname is <pkgroot>/dist/src.
-// bundle.json and skills/ ship at the package root (per package.json "files"),
-// not under dist/ — resolve up two levels to reach the package root.
-const CORE_PKG_ROOT = path.resolve(__dirname, '..', '..')
+// At runtime the bin is dist/src/cli.js and source execution is src/cli.ts.
+// Resolve the nearest directory containing the package and bundle manifests so
+// both layouts use the same package root.
+const CORE_PKG_ROOT = resolvePackageRoot(__dirname)
 const REPO_ROOT = path.resolve(CORE_PKG_ROOT, '..', '..')
 const DEFAULT_SOURCE_ROOT = existsSync(path.join(REPO_ROOT, 'bundle.json')) && existsSync(path.join(REPO_ROOT, 'skills'))
   ? REPO_ROOT
@@ -54,36 +57,60 @@ function printUsage (): void {
   console.log(`Usage: nsolid-plugin <command> [options]
 
 Commands:
-  setup      Authenticate with NodeSource and prepare the MCP bridge runtime (may open a browser; first run needs npm access)
-  install    Install N|Solid Plugin skills/MCP for a harness (fallback direct installer; prepares the MCP bridge runtime first; does not open a browser)
-  uninstall  Remove N|Solid Plugin skills for a harness
-  logout     Forget your stored NodeSource login (removes credentials only)
-  switch-org Force re-authentication to switch NodeSource organizations (opens a browser; affects all harnesses)
-  doctor     Check installation health for a harness
-  restore    Restore a harness MCP config from the latest backup
+  setup       Authenticate with NodeSource and prepare the MCP bridge (may open a browser)
+  install     Install skills/MCP for a harness without opening a browser
+  uninstall   Remove skills for a harness
+  logout      Forget the stored NodeSource login
+  switch-org  Re-authenticate to switch NodeSource organizations (opens a browser)
+  doctor      Check installation health for a harness
+  restore     Restore a harness MCP config from the latest backup
+  version     Report CLI and bundled plugin versions
+  update      Check or update the CLI and detected harness installations
 
 Options:
-  --harness <harness>    Target harness (required in non-interactive mode): ${HARNESS_VALUES.join(', ')}
-  --keep-credentials     Do not remove credentials even if this was the last harness (uninstall only)
-  --bundle <path>        Path to bundle.json (default: core package bundle.json)
-  --skills-source <path> Path to skills source directory (default: core package root)
-  --backup <path>       Restore a specific backup file (restore command only)
-  --list                List available backups (restore command only)
-  --verbose             Enable detailed logging to stderr
-  --json                Output doctor report as JSON (machine-readable)
+  --harness <harness>   Target harness (required without a TTY): ${HARNESS_VALUES.join(', ')}
+  --yes                 Apply updates without interactive confirmation
+  --check               Only report update status; never mutate
+  --all                 Include every detected installation (cannot combine with --harness)
+  --json                Machine-readable output
   --no-color            Disable colored output
-  --quiet               Suppress step-by-step progress output (setup/install/switch-org)
-  --yes                 Skip interactive confirmation prompts
-  --accounts-url <url>  Explicit origin-only accounts URL override for setup/switch-org
+  --quiet               Suppress step-by-step progress (setup/install/switch-org)
+  --verbose             Detailed logging to stderr; shows the full technical update plan
+  --bundle <path>       Path to bundle.json
+  --skills-source <p>   Path to skills source directory
+  --backup <file>       Restore a specific backup file (restore only)
+  --list                List available backups (restore only)
+  --keep-credentials    Do not remove credentials on last-harness uninstall
+  --accounts-url <url>  Accounts URL override for setup/switch-org
+  --version             Print CLI and bundled plugin versions
   --help                Show this help message
 
-Distribution notes:
-  Claude/Codex/Antigravity: install from the GitHub plugin root; setup authenticates and prepares the MCP bridge runtime.
-  Pi: use pi install for package-owned skills; CLI install/setup only writes MCP config.
-  OpenCode: run setup --harness opencode — it authenticates, prepares the MCP bridge runtime, and installs skills + MCP config in one step.
-  Install: the fallback direct installer provisions the MCP bridge runtime first, then installs assets; it never opens a browser.
-  After switch-org, a direct-config harness passed to --harness (OpenCode, Pi, fallback CLI installs) has its MCP config refreshed on the spot; Claude/Codex/Antigravity native plugins must be reconnected, and other direct-config harnesses need a later setup/install to re-bake the new org's token.
-  Auth: only setup/switch-org may open a browser.`)
+Notes:
+  Claude/Codex/Antigravity: install from the GitHub plugin root, then run setup.
+  Pi: use pi install for skills; setup only writes MCP config.
+  OpenCode: setup --harness opencode installs everything in one step.
+  After switch-org, re-run setup/install per harness to re-bake the new org token.
+  Only setup and switch-org may open a browser.`)
+}
+
+function printVersion (json: boolean): void {
+  const info = getVersionInfo(CORE_PKG_ROOT)
+  if (json) {
+    console.log(JSON.stringify(info))
+    return
+  }
+  console.log(`nsolid-plugin CLI ${info.cliVersion}`)
+  console.log(`bundled plugin ${info.bundleVersion}`)
+}
+
+async function confirmUpdatePlan (_context: UpdateConfirmationContext, _color: boolean): Promise<boolean> {
+  const rl = createPrompt()
+  try {
+    const answer = (await rl.question('Apply this update plan? [y/N]: ')).trim().toLowerCase()
+    return answer === 'y' || answer === 'yes'
+  } finally {
+    rl.close()
+  }
 }
 
 function isInteractive (): boolean {
@@ -243,9 +270,17 @@ async function main (): Promise<void> {
       'keep-credentials': { type: 'boolean' },
       quiet: { type: 'boolean' },
       yes: { type: 'boolean' },
+      check: { type: 'boolean' },
+      all: { type: 'boolean' },
+      version: { type: 'boolean', short: 'v' },
       help: { type: 'boolean', short: 'H' },
     },
   })
+
+  if (values.version === true) {
+    printVersion(values.json === true)
+    return
+  }
 
   if (values.help || positionals.length === 0) {
     printUsage()
@@ -254,6 +289,11 @@ async function main (): Promise<void> {
 
   const command = positionals[0]
   const harness = values.harness as HarnessType | undefined
+
+  if (values.all === true && harness) {
+    console.error('Error: --all cannot be combined with --harness')
+    process.exit(1)
+  }
 
   const resolveHarnesses = async (multiple: boolean): Promise<HarnessType[]> => {
     if (harness && HARNESS_VALUES.includes(harness)) return [harness]
@@ -283,6 +323,49 @@ async function main (): Promise<void> {
   }
 
   switch (command) {
+    case 'version': {
+      printVersion(values.json === true)
+      break
+    }
+    case 'update': {
+      if (harness && !HARNESS_VALUES.includes(harness)) {
+        console.error(`Error: --harness must be one of: ${HARNESS_VALUES.join(', ')}`)
+        process.exit(1)
+      }
+      const updateOptions = {
+        harness,
+        all: values.all === true,
+        check: values.check === true,
+        yes: values.yes === true,
+        json: values.json === true,
+        verbose: values.verbose === true,
+        noColor: values['no-color'] === true,
+        packageRoot: CORE_PKG_ROOT,
+        confirm: isInteractive() && values.yes !== true
+          ? (context: UpdateConfirmationContext) => confirmUpdatePlan(context, values['no-color'] !== true && supportsColor(process.stderr))
+          : undefined,
+      }
+      const plan = await planUpdates(updateOptions)
+      const willConfirm = isInteractive() && values.yes !== true
+      // Human surface: --check and every interactive confirmation show the
+      // plan — including mutable items whose version is unknown — while
+      // machine runs (--json) and approved runs (--yes) stay quiet.
+      if (shouldDisplayUpdatePlan(plan, { json: values.json === true, check: values.check === true, willConfirm })) {
+        printUpdatePlan(plan, color, values.verbose === true)
+      }
+      if (values.json !== true && !values.check && values.yes === true) {
+        for (const item of plan.items) {
+          if (item.version.status === 'update-available' && item.version.current && item.version.latest) {
+            process.stderr.write(`→ Updating ${item.installationId} (${item.version.current} → ${item.version.latest})…\n`)
+          }
+        }
+      }
+      const summary = await executeUpdatePlan(plan, updateOptions)
+      if (values.json === true) console.log(JSON.stringify(summary))
+      else if (!values.check) printUpdateSummary(summary, color)
+      process.exitCode = summary.exitCode
+      break
+    }
     case 'setup': {
       if (values['accounts-url']) {
         process.env.NSOLID_ACCOUNTS_URL = values['accounts-url']

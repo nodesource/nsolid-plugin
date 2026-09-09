@@ -181,3 +181,107 @@ describe('assertSafeSkillName', () => {
     assert.strictEqual(assertSafeSkillName('my-skill_v2'), 'my-skill_v2')
   })
 })
+
+describe('materializeSkillLink', () => {
+  interface RecordingFs {
+    symlinkCalls: Array<{ linkSource: string, target: string, type?: 'dir' | 'junction' }>
+    copyCalls: Array<{ source: string, destination: string }>
+    fs: {
+      symlink: (linkSource: string, target: string, type?: 'dir' | 'junction') => Promise<void>
+      cp: (source: string, destination: string) => Promise<void>
+    }
+  }
+
+  function recordingFs (options: { symlinkError?: Error } = {}): RecordingFs {
+    const symlinkCalls: RecordingFs['symlinkCalls'] = []
+    const copyCalls: RecordingFs['copyCalls'] = []
+    return {
+      symlinkCalls,
+      copyCalls,
+      fs: {
+        symlink: async (linkSource, target, type) => {
+          symlinkCalls.push({ linkSource, target, type })
+          if (options.symlinkError !== undefined) throw options.symlinkError
+        },
+        cp: async (source, destination) => {
+          copyCalls.push({ source, destination })
+        },
+      },
+    }
+  }
+
+  it('falls back to copying copySource when junction creation fails on simulated win32', async () => {
+    const { materializeSkillLink } = await import('../../../src/skills/skill-linker.js')
+    const { fs, symlinkCalls, copyCalls } = recordingFs({ symlinkError: Object.assign(new Error('EPERM: operation not permitted, symlink'), { code: 'EPERM' }) })
+
+    await materializeSkillLink({
+      linkSource: '/live/shared/nskill',
+      copySource: '/staged/new/nskill',
+      target: '/harness/skills/nskill',
+      platform: 'win32',
+      fs,
+    })
+
+    // The copy comes from the newly prepared staged bytes, not from the link
+    // source that a Windows junction would have referenced.
+    assert.deepEqual(copyCalls, [{ source: '/staged/new/nskill', destination: '/harness/skills/nskill' }])
+    assert.equal(symlinkCalls.length, 1)
+  })
+
+  it('attempts a junction whose source is the final live destination', async () => {
+    const { materializeSkillLink } = await import('../../../src/skills/skill-linker.js')
+    const { fs, symlinkCalls } = recordingFs({ symlinkError: Object.assign(new Error('EPERM: operation not permitted, symlink'), { code: 'EPERM' }) })
+
+    await materializeSkillLink({
+      linkSource: '/live/shared/nskill',
+      copySource: '/staged/new/nskill',
+      target: '/harness/skills/nskill',
+      platform: 'win32',
+      fs,
+    })
+
+    assert.deepEqual(symlinkCalls, [{ linkSource: '/live/shared/nskill', target: '/harness/skills/nskill', type: 'junction' }])
+  })
+
+  it('always copies for Pi without attempting a link', async () => {
+    const { materializeSkillLink } = await import('../../../src/skills/skill-linker.js')
+    const { fs, symlinkCalls, copyCalls } = recordingFs()
+
+    await materializeSkillLink({
+      linkSource: '/live/shared/nskill',
+      copySource: '/staged/new/nskill',
+      target: '/harness/skills/nskill',
+      alwaysCopy: true,
+      platform: 'win32',
+      fs,
+    })
+
+    assert.deepEqual(copyCalls, [{ source: '/staged/new/nskill', destination: '/harness/skills/nskill' }])
+    assert.deepEqual(symlinkCalls, [])
+  })
+
+  it('creates a dir symlink on other platforms and does not silently copy on unrelated Unix errors', async () => {
+    const { materializeSkillLink } = await import('../../../src/skills/skill-linker.js')
+    const { fs, symlinkCalls, copyCalls } = recordingFs()
+
+    await materializeSkillLink({
+      linkSource: '/live/shared/nskill',
+      target: '/harness/skills/nskill',
+      platform: 'linux',
+      fs,
+    })
+
+    assert.deepEqual(symlinkCalls, [{ linkSource: '/live/shared/nskill', target: '/harness/skills/nskill', type: 'dir' }])
+    assert.deepEqual(copyCalls, [])
+
+    await assert.rejects(
+      materializeSkillLink({
+        linkSource: '/live/shared/nskill',
+        target: '/harness/skills/nskill',
+        platform: 'linux',
+        fs: recordingFs({ symlinkError: Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }) }).fs,
+      }),
+      (error: NodeJS.ErrnoException) => error.code === 'EACCES'
+    )
+  })
+})

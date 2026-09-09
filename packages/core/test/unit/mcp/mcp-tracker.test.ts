@@ -99,6 +99,49 @@ describe('addTrackedMcps', () => {
   })
 })
 
+describe('addTrackedMcps ownedFields', () => {
+  it('excludes fields outside the owned set from the digest snapshot', async () => {
+    const { addTrackedMcps } = await import('../../../src/mcp/mcp-tracker.js')
+    const { readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+    const { valueDigest } = await import('../../../src/update/mcp-lookup.js')
+
+    const configPath = join(tmpDir, '.claude.json')
+    // The user added user_token to our server record: it survives in the
+    // bytes but must never become tracking evidence.
+    writeFileSync(configPath, JSON.stringify({
+      mcpServers: {
+        'ns-benchmark': { name: 'ns-benchmark', type: 'http', url: 'https://example.com/mcp', user_token: 'user-secret' },
+      },
+    }))
+
+    await addTrackedMcps([{ name: 'ns-benchmark', configPath, ownedFields: ['name', 'type', 'url'] }], 'claude')
+
+    const tracking = await readTrackingFile()
+    const entry = tracking!.mcpServers[0]
+    assert.deepEqual(Object.keys(entry.fields ?? {}).sort(), ['name', 'type', 'url'])
+    assert.equal(entry.fields?.url, valueDigest('https://example.com/mcp'))
+    assert.equal(entry.fields?.user_token, undefined)
+  })
+
+  it('does not record owned fields that are absent from the record', async () => {
+    const { addTrackedMcps } = await import('../../../src/mcp/mcp-tracker.js')
+    const { readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+
+    const configPath = join(tmpDir, '.claude.json')
+    writeFileSync(configPath, JSON.stringify({
+      mcpServers: {
+        'ns-benchmark': { url: 'https://example.com/mcp' },
+      },
+    }))
+
+    await addTrackedMcps([{ name: 'ns-benchmark', configPath, ownedFields: ['name', 'type', 'url'] }], 'claude')
+
+    const tracking = await readTrackingFile()
+    const entry = tracking!.mcpServers[0]
+    assert.deepEqual(Object.keys(entry.fields ?? {}).sort(), ['url'])
+  })
+})
+
 describe('removeTrackedMcps', () => {
   it('removes MCP entry for specific harness', async () => {
     const { addTrackedMcps, removeTrackedMcps, listTrackedMcps } = await import('../../../src/mcp/mcp-tracker.js')
@@ -191,5 +234,78 @@ describe('listTrackedMcps', () => {
     const codexEntries = await listTrackedMcps('codex')
     assert.strictEqual(codexEntries.length, 1)
     assert.strictEqual(codexEntries[0].name, 'nsolid-console')
+  })
+})
+
+describe('addTrackedMcps field digests', () => {
+  it('routes field digests through the field-digests module using the harness-preferred container', async () => {
+    const { addTrackedMcps } = await import('../../../src/mcp/mcp-tracker.js')
+    const { readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+    const { harnessMcpKey, readMcpFieldDigests, valueDigest } = await import('../../../src/update/mcp-lookup.js')
+
+    // A Claude stdio server lives under "mcpServers"; an OpenCode remote
+    // server lives under "mcp". Tracking must describe the same container
+    // the transaction reads and writes for the harness.
+    const configPath = join(tmpDir, '.claude.json')
+    writeFileSync(configPath, JSON.stringify({
+      mcpServers: {
+        'ns-benchmark': { type: 'http', url: 'https://example.com/mcp', headers: { 'x-a': '1', 'x-b': '2' } },
+      },
+    }))
+
+    await addTrackedMcps([{ name: 'ns-benchmark', configPath }], 'claude')
+
+    const tracking = await readTrackingFile()
+    const entry = tracking!.mcpServers[0]
+    const expected = readMcpFieldDigests(configPath, 'ns-benchmark', { preferredKey: harnessMcpKey('claude') })
+    assert.deepStrictEqual(entry.fields, expected)
+    assert.strictEqual(entry.fields?.url, valueDigest('https://example.com/mcp'))
+    assert.strictEqual(Object.hasOwn(entry.fields ?? {}, 'headers'), true)
+  })
+
+  it('reads the opencode "mcp" container, not a legacy "mcpServers" sibling', async () => {
+    const { addTrackedMcps } = await import('../../../src/mcp/mcp-tracker.js')
+    const { readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+    const { valueDigest } = await import('../../../src/update/mcp-lookup.js')
+
+    const configPath = join(tmpDir, 'opencode.jsonc')
+    writeFileSync(configPath, JSON.stringify({
+      mcpServers: { 'ns-benchmark': { url: 'https://legacy.example/mcp' } },
+      mcp: { 'ns-benchmark': { type: 'remote', url: 'https://current.example/mcp' } },
+    }))
+
+    await addTrackedMcps([{ name: 'ns-benchmark', configPath }], 'opencode')
+
+    const tracking = await readTrackingFile()
+    const entry = tracking!.mcpServers[0]
+    assert.strictEqual(entry.fields?.url, valueDigest('https://current.example/mcp'))
+  })
+
+  it('stores no fields for a server missing from the config', async () => {
+    const { addTrackedMcps } = await import('../../../src/mcp/mcp-tracker.js')
+    const { readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+
+    const configPath = join(tmpDir, '.claude.json')
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }))
+
+    await addTrackedMcps([{ name: 'ns-benchmark', configPath }], 'claude')
+
+    const tracking = await readTrackingFile()
+    assert.strictEqual(tracking!.mcpServers[0].fields, undefined)
+  })
+
+  it('supports toml configs via the field-digests module', async () => {
+    const { addTrackedMcps } = await import('../../../src/mcp/mcp-tracker.js')
+    const { readTrackingFile } = await import('../../../src/skills/skill-tracker.js')
+    const { valueDigest } = await import('../../../src/update/mcp-lookup.js')
+
+    const configPath = join(tmpDir, 'config.toml')
+    writeFileSync(configPath, '[mcp_servers.ns-benchmark]\nurl = "https://codex.example/mcp"\n')
+
+    await addTrackedMcps([{ name: 'ns-benchmark', configPath }], 'codex')
+
+    const tracking = await readTrackingFile()
+    const entry = tracking!.mcpServers[0]
+    assert.strictEqual(entry.fields?.url, valueDigest('https://codex.example/mcp'))
   })
 })

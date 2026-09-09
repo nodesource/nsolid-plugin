@@ -3,9 +3,10 @@ import path from 'node:path'
 import type { HarnessType, McpServerRef } from '../types.js'
 import { resolveHome } from '../utils/path.js'
 import { readJsonFile, readTomlFile, readJsoncFile, writeTomlFileSync } from '../utils/config.js'
-import { writeJsonFileSync, atomicWriteSync, ensureDir } from '../utils/fs.js'
+import { atomicWriteSync, ensureDir } from '../utils/fs.js'
 import { mergeMcpConfig, removeMcpServers, expandVariables } from './mcp-config-merger.js'
 import type { NormalizedMcpConfig } from './mcp-config-merger.js'
+import { editMcpJsonBytes } from '../update/mcp-edit.js'
 import { createConfigBackup } from '../utils/backup.js'
 import type { Logger } from '../types.js'
 
@@ -118,18 +119,39 @@ function writeConfigFile (
   ensureDir(path.dirname(configPath))
 
   switch (format) {
-    case 'json': {
-      const existingFull = readJsonObjectAllowEmpty(configPath) ?? {}
-      existingFull[jsonMcpKey] = config.mcpServers
-      if (jsonMcpKey === 'mcp') delete existingFull.mcpServers
-      writeJsonFileSync(configPath, existingFull)
+    case 'json':
+    case 'jsonc': {
+      // Localized AST edits: only servers whose value actually changes are
+      // rewritten, so comments, CRLF endings, indentation, and foreign
+      // servers survive byte-for-byte.
+      const raw = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : ''
+      const existingRaw = raw
+      const existingParsed = format === 'jsonc' ? readJsoncObjectAllowEmpty(configPath) : readJsonObjectAllowEmpty(configPath)
+      const existingServers = (existingParsed?.[jsonMcpKey] && typeof existingParsed[jsonMcpKey] === 'object' && !Array.isArray(existingParsed[jsonMcpKey])
+        ? existingParsed[jsonMcpKey]
+        : {}) as Record<string, unknown>
+      const upsertServers: Record<string, unknown> = {}
+      for (const [name, value] of Object.entries(config.mcpServers)) {
+        if (JSON.stringify(existingServers[name]) !== JSON.stringify(value)) upsertServers[name] = value
+      }
+      const removeServers = Object.keys(existingServers).filter((name) => !(name in config.mcpServers))
+      // The OpenCode harness stores servers under "mcp"; a legacy
+      // "mcpServers" container from older versions is migrated away
+      // wholesale, exactly as the previous block-rewriting writer did.
+      const legacyKey = jsonMcpKey === 'mcp' && existingParsed && existingParsed.mcpServers !== undefined
+        ? 'mcpServers'
+        : undefined
+      const next = editMcpJsonBytes(existingRaw, {
+        upsertServers,
+        removeServers,
+        removeBlock: format === 'jsonc' && Object.keys(config.mcpServers).length === 0,
+        removeKeys: legacyKey ? [legacyKey] : undefined,
+      }, { mcpKey: jsonMcpKey })
+      atomicWriteSync(configPath, next.endsWith('\n') ? next : next + '\n')
       break
     }
     case 'toml':
       writeTomlConfig(configPath, config)
-      break
-    case 'jsonc':
-      writeJsoncConfig(configPath, config, jsonMcpKey)
       break
   }
 }
@@ -154,173 +176,24 @@ function writeTomlConfig (configPath: string, config: NormalizedMcpConfig): void
   writeTomlFileSync(configPath, tomlData)
 }
 
-// --- JSONC comment-preserving write ---
-
-function writeJsoncConfig (
-  configPath: string,
-  config: NormalizedMcpConfig,
-  jsonMcpKey: 'mcpServers' | 'mcp'
-): void {
-  if (!existsSync(configPath)) {
-    atomicWriteSync(configPath, JSON.stringify({ [jsonMcpKey]: config.mcpServers }, null, 2) + '\n')
-    return
-  }
-
-  let raw = readFileSync(configPath, 'utf-8')
-  if (jsonMcpKey === 'mcp') {
-    raw = removeMcpServersBlockFromRaw(raw, 'mcpServers')
-  }
-  const serverNames = Object.keys(config.mcpServers)
-  const mcpBlock = findMcpServersBlock(raw, jsonMcpKey)
-
-  if (serverNames.length === 0) {
-    atomicWriteSync(configPath, removeMcpServersBlockFromRaw(raw, jsonMcpKey))
-    return
-  }
-
-  if (mcpBlock) {
-    const indent = detectIndent(raw, mcpBlock.openBrace)
-    const innerIndent = indent.repeat(2)
-
-    const innerContent = serverNames
-      .map((name) => innerIndent + JSON.stringify(name) + ': ' + JSON.stringify(config.mcpServers[name]))
-      .join(',\n')
-
-    const before = raw.slice(0, mcpBlock.openBrace + 1)
-    const after = raw.slice(mcpBlock.closeBrace)
-    const updated = before + '\n' + innerContent + '\n' + indent + after
-    atomicWriteSync(configPath, updated)
-    return
-  }
-
-  // No MCP key in existing file — insert before outer closing brace
-  atomicWriteSync(configPath, insertMcpBlockBeforeClosing(raw, config.mcpServers, jsonMcpKey))
-}
-
-function findMcpServersBlock (
-  raw: string,
-  jsonMcpKey: 'mcpServers' | 'mcp'
-): { start: number; openBrace: number; closeBrace: number } | null {
-  const escapedKey = jsonMcpKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const keyMatch = raw.match(new RegExp(`"${escapedKey}"\\s*:\\s*\\{`))
-  if (!keyMatch || keyMatch.index === undefined) return null
-
-  const start = keyMatch.index
-  const openBrace = keyMatch.index + keyMatch[0].length - 1
-  const closeBrace = findMatchingBrace(raw, openBrace)
-  if (closeBrace === -1) return null
-
-  return { start, openBrace, closeBrace }
-}
-
-function findMatchingBrace (str: string, openIndex: number): number {
-  let depth = 0
-  let inString = false
-  let escaped = false
-
-  for (let i = openIndex; i < str.length; i++) {
-    const ch = str[i]
-
-    if (ch === '"' && !escaped) inString = !inString
-
-    if (!inString) {
-      if (ch === '{') depth++
-      if (ch === '}') {
-        depth--
-        if (depth === 0) return i
-      }
-    }
-
-    escaped = ch === '\\' && !escaped
-    if (ch !== '\\') escaped = false
-  }
-
-  return -1
-}
-
-function detectIndent (raw: string, bracePos: number): string {
-  const lineStart = raw.lastIndexOf('\n', bracePos)
-  if (lineStart === -1) return '  '
-
-  const line = raw.slice(lineStart + 1, bracePos)
-  const match = line.match(/^(\s+)/)
-  return match ? match[1] : '  '
-}
-
-function insertMcpBlockBeforeClosing (
-  raw: string,
-  mcpServers: NormalizedMcpConfig['mcpServers'],
-  jsonMcpKey: 'mcpServers' | 'mcp'
-): string {
-  const outerCloseBrace = findOuterClosingBrace(raw)
-  if (outerCloseBrace === -1) {
-    return JSON.stringify({ [jsonMcpKey]: mcpServers }, null, 2) + '\n'
-  }
-
-  const indent = detectIndent(raw, outerCloseBrace)
-  const innerIndent = indent.repeat(2)
-  const serverNames = Object.keys(mcpServers)
-
-  const innerContent = serverNames
-    .map((name) => innerIndent + JSON.stringify(name) + ': ' + JSON.stringify(mcpServers[name]))
-    .join(',\n')
-
-  const mcpServersBlock = JSON.stringify(jsonMcpKey) + ': {\n' + innerContent + '\n' + indent + '}'
-
-  const before = raw.slice(0, outerCloseBrace)
-  const after = raw.slice(outerCloseBrace)
-  const beforeTrimmed = before.trimEnd()
-  const hasContentAfterOpen = raw.slice(raw.indexOf('{') + 1, outerCloseBrace).trim().length > 0
-  const separator = (hasContentAfterOpen && !beforeTrimmed.endsWith(',')) ? ',\n' : '\n'
-
-  return before + separator + indent + mcpServersBlock + '\n' + after
-}
-
-function findOuterClosingBrace (raw: string): number {
-  let depth = 0
-  let lastCloseBrace = -1
-  let inString = false
-  let escaped = false
-
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i]
-
-    if (ch === '"' && !escaped) inString = !inString
-
-    if (!inString) {
-      if (ch === '{') depth++
-      if (ch === '}') {
-        depth--
-        if (depth === 0) lastCloseBrace = i
-      }
-    }
-
-    escaped = ch === '\\' && !escaped
-    if (ch !== '\\') escaped = false
-  }
-
-  return lastCloseBrace
-}
-
-function removeMcpServersBlockFromRaw (raw: string, jsonMcpKey: 'mcpServers' | 'mcp'): string {
-  const block = findMcpServersBlock(raw, jsonMcpKey)
-  if (!block) return raw
-
-  const before = raw.slice(0, block.start).trimEnd()
-  const after = raw.slice(block.closeBrace + 1)
-
-  // Remove trailing comma before the block if present
-  if (before.endsWith(',')) {
-    return before.slice(0, -1) + '\n' + after.trimStart()
-  }
-
-  // Otherwise, remove leading comma from after if present
-  const trimmedAfter = after.trimStart()
-  if (trimmedAfter.startsWith(',')) {
-    return before + '\n' + trimmedAfter.slice(1).trimStart()
-  }
-
-  return before + after
+/**
+ * The field names NodeSource renders for each server, computed through the
+ * same pipeline `writeMcpConfig` applies before bytes reach disk (variable
+ * expansion plus the harness write format, which may add or rename fields).
+ * Field names do not depend on variable values, so this is safe to use as
+ * ownership evidence: the tracking snapshot must never describe fields that
+ * exist only because the user put them in the config.
+ */
+export function renderedMcpFieldNames (
+  harness: HarnessType,
+  servers: McpServerRef[],
+  variables?: Record<string, string>
+): Record<string, string[]> {
+  const resolved = variables !== undefined ? expandVariables(servers, variables) : servers
+  // The ref's `name` is only the map key metadata: it is never rendered as a
+  // field inside the entry, so it must never enter ownership evidence either.
+  const rendered = applyHarnessWriteFormat(harness, { mcpServers: Object.fromEntries(resolved.map(({ name, ...entry }) => [name, entry])) })
+  return Object.fromEntries(Object.entries(rendered.mcpServers).map(([name, server]) => [name, Object.keys(server)]))
 }
 
 /**
@@ -347,7 +220,8 @@ function backupMcpConfig (
   }
 }
 
-function applyHarnessWriteFormat (
+/** Harness-specific server schema applied before bytes reach a config file. */
+export function applyHarnessWriteFormat (
   harness: HarnessType,
   config: NormalizedMcpConfig
 ): NormalizedMcpConfig {

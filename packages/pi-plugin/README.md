@@ -20,6 +20,15 @@ pi install npm:pi-mcp-adapter
 /reload
 ```
 
+To update the package-owned skills through Pi, use the N|Solid updater after the canonical unpinned package is installed:
+
+```bash
+nsolid-plugin update --harness pi
+nsolid-plugin update --harness pi --check --json
+```
+
+The updater coalesces matching user and project entries into one `pi update npm:nsolid-pi-plugin` operation. User-only updates use `--no-approve`; a detected project scope is disclosed and uses `--approve` after confirmation. Source entries, filters, trust settings, MCP configuration, and credentials are left to Pi/the user and are not rewritten by the updater.
+
 After local packaging tests, run `pnpm plugin:clean` to remove materialized skills from the source tree.
 
 Then verify:

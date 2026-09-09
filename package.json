@@ -21,7 +21,9 @@
     "plugin:materialize": "node scripts/sync-plugin-assets.mjs --materialize-skills",
     "plugin:clean": "node scripts/sync-plugin-assets.mjs",
     "plugin:root": "node scripts/materialize-github-marketplace.mjs",
-    "plugin:root:check": "node scripts/materialize-github-marketplace.mjs --check"
+    "plugin:root:check": "node scripts/materialize-github-marketplace.mjs --check",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release:check": "node scripts/check-release-version.mjs"
   },
   "engines": {
     "node": ">=22.3.0"

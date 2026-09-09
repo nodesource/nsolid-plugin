@@ -19,19 +19,30 @@ export interface McpTrackingEntry {
   configPath: string;
   harness: string;
   configuredAt: string;
+  /** SHA-256 evidence for each NodeSource-owned field in the server object. */
+  fields?: Record<string, string>;
 }
 
 export interface TrackingData {
   version: string;
   installedAt: string;
   harness: string;
+  /** Version of the bundle used by the last owned refresh, when known. */
+  bundleVersion?: string;
+  /** Version evidence keyed by the fallback harness that was refreshed. */
+  bundleVersions?: Partial<Record<HarnessType, string>>;
   skills: SkillTrackingEntry[];
   mcpServers: McpTrackingEntry[];
 }
 
 export async function readTrackingFile (logger?: Logger): Promise<TrackingData | null> {
   try {
-    return readJsonFile<TrackingData>(getTrackingFilePath())
+    const value = readJsonFile<unknown>(getTrackingFilePath())
+    if (!isValidTrackingData(value)) {
+      logger?.warn('tracking.read.invalid', { path: getTrackingFilePath() })
+      return null
+    }
+    return value
   } catch (err) {
     logger?.warn('tracking.read.failed', { error: (err as Error).message })
     return null
@@ -48,6 +59,25 @@ export async function writeTrackingFile (data: TrackingData, logger?: Logger): P
     const pluginErr = toPluginError(err, 'TRACKING_UPDATE_FAILED', { path: filePath })
     throw new Error(formatPluginError(pluginErr), { cause: pluginErr })
   }
+}
+
+export async function setTrackingBundleVersion (bundleVersion: string, logger?: Logger, harness?: HarnessType): Promise<void> {
+  const tracking = await readTrackingFile(logger)
+  if (!tracking) return
+  tracking.bundleVersion = bundleVersion
+  if (harness) tracking.bundleVersions = { ...(tracking.bundleVersions ?? {}), [harness]: bundleVersion }
+  await writeTrackingFile(tracking, logger)
+}
+
+export function isValidTrackingData (value: unknown): value is TrackingData {
+  if (!isRecord(value) || typeof value.version !== 'string' || typeof value.installedAt !== 'string' || typeof value.harness !== 'string') return false
+  if (!Array.isArray(value.skills) || !Array.isArray(value.mcpServers)) return false
+  if (value.bundleVersion !== undefined && typeof value.bundleVersion !== 'string') return false
+  if (value.bundleVersions !== undefined) {
+    if (!isRecord(value.bundleVersions) || Object.values(value.bundleVersions).some((version) => typeof version !== 'string')) return false
+  }
+  if (value.skills.some((entry) => !isValidSkillTrackingEntry(entry))) return false
+  return !value.mcpServers.some((entry) => !isValidMcpTrackingEntry(entry))
 }
 
 export async function addTrackedSkills (
@@ -144,4 +174,19 @@ function createEmptyTracking (harness: HarnessType): TrackingData {
     skills: [],
     mcpServers: [],
   }
+}
+
+function isValidSkillTrackingEntry (value: unknown): value is SkillTrackingEntry {
+  if (!isRecord(value) || typeof value.name !== 'string' || typeof value.path !== 'string' || typeof value.installedAt !== 'string' || !Array.isArray(value.harnesses)) return false
+  if (value.harnesses.some((harness) => typeof harness !== 'string')) return false
+  if (value.paths !== undefined && (!isRecord(value.paths) || Object.values(value.paths).some((entry) => typeof entry !== 'string'))) return false
+  return true
+}
+
+function isValidMcpTrackingEntry (value: unknown): value is McpTrackingEntry {
+  return isRecord(value) && typeof value.name === 'string' && typeof value.configPath === 'string' && typeof value.harness === 'string' && typeof value.configuredAt === 'string' && (value.fields === undefined || (isRecord(value.fields) && Object.values(value.fields).every((field) => typeof field === 'string')))
+}
+
+function isRecord (value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
 }
