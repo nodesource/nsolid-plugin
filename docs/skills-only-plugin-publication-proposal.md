@@ -1,203 +1,282 @@
-# Proposal: publish N|Solid as a skills-only community plugin
+# Proposal: a phased N|Solid skills-only publication experiment
 
-## Decision requested
+**Status:** proposed; research completed, implementation and submission pending.
 
-Approve a short, reversible experiment: publish the N|Solid **skills** as the community plugin and move the CLI source into a separate public repository. The CLI continues to perform its existing interactive setup: it authenticates with Accounts when necessary and registers the three existing MCP wrappers in the selected harness. The marketplace plugin does not declare or start an MCP server.
+**Evidence checked:** September 10, 2026.
 
-This is deliberately not an OAuth-MCP migration. It is a way to remove the remote-MCP authentication path from the package submitted for marketplace review while preserving local, token-based MCP use after a user explicitly runs setup.
+**Decision requested:** approve a minimal Claude Community submission first; evaluate optional CLI/MCP integration separately.
 
-The primary target is the Claude Community Marketplace. Codex and Antigravity compatibility are secondary: the same CLI-managed setup remains available for them, but neither MCP configuration is part of the submitted skills package.
+## 1. Executive summary — discussion points
 
-The success metric for this experiment is concrete: prepare and submit a skills-only artifact, then determine whether it is approved into Anthropic's mirrored [`claude-plugins-community`](https://github.com/anthropics/claude-plugins-community) listing. Codex, Antigravity, OpenCode and Pi compatibility must not delay that submission.
+1. **The distribution pattern already exists.** Approved Community plugins deliver skills while users install or configure external MCP servers and authenticated CLIs separately. jambonz is the clearest separate-MCP-registration example; You.com, Preset, CodeRabbit, and Endor Labs provide complementary authentication/CLI evidence.
+2. **Test the smallest useful package, not a repository migration.** Produce one self-contained Claude skills artifact in this repository. A separate CLI repository, OAuth changes, and other harnesses are not prerequisites.
+3. **Separate two questions.** Can a useful N|Solid skills-only artifact be listed? Can that listing also support optional authenticated MCP access through a separately installed CLI? The first can be tested before implementing the second.
+4. **The boundary is explicit installation, not hidden dependencies.** The plugin must not register or start MCP servers automatically. Skills may openly describe external servers, URLs, authentication, and setup instructions. This is not an exemption from security review.
+5. **Publish evidence, not promises.** Validate the exact artifact, test a clean installation, submit through the documented form, and capture the response. Approval is not guaranteed, and the original rejection reason still needs to be attached verbatim.
 
-## What is known
+**Recommended meeting decision:** approve Phases 0–2 below, appoint an implementation owner and a submission owner, and agree that a useful non-authenticated first release is acceptable. Phase 3 is a separately estimated extension, not a blocker for the first submission.
 
-### Community plugin versus connector
+## 2. Objective, hypotheses, and limits
 
-These are different distribution and review paths:
+The objective is inclusion in Anthropic's [Claude Community catalog](https://github.com/anthropics/claude-plugins-community), not merely publishing a company marketplace or submitting a remote connector to a different directory.
 
-* A Claude Code plugin is a directory that may contain skills and *optionally* an `.mcp.json` file. When present, plugin MCP servers start automatically when the plugin is enabled. [Claude plugin structure](https://code.claude.com/docs/en/plugins) and [plugin MCP behaviour](https://code.claude.com/docs/en/mcp) document that optional relationship.
-* A remote MCP connector is an authenticated server integration. Claude Code can complete an OAuth flow for a remote server, but it also documents `headersHelper` specifically for non-OAuth schemes such as short-lived tokens or internal SSO. [Claude MCP authentication](https://code.claude.com/docs/en/mcp)
+| Question | Experiment | What a positive result establishes |
+| --- | --- | --- |
+| **H1: listing feasibility** | Submit a useful N|Solid skills-only artifact with no bundled authenticated runtime. | This particular skills artifact can be listed. |
+| **H2: optional live integration** | Add transparent instructions for a separately installed CLI that authenticates and registers external MCP wrappers; test and submit that update. | This particular external-CLI/MCP arrangement can be distributed with the skills. |
 
-Therefore, removing `mcpServers` from the published plugin is a material scope change: it avoids claiming that the N|Solid plugin itself provides a remote connector. It does **not** make a claim about whether an external marketplace will accept the listing; that remains a screening hypothesis to test.
+H1 acceptance does **not** prove H2, explain the previous rejection, or establish that OAuth is unnecessary for every future integration. The original submission, artifact SHA, date, validation results, and exact reviewer feedback should be collected before drawing causal conclusions. Missing historical feedback need not block a clean H1 experiment, but the uncertainty must remain explicit.
 
-### The AccelByte precedent
+The Community repository serves **Claude Cowork and Claude Code**. Initial functional validation targets **local Claude Code**. Neither catalog presence nor a local CLI setup proves that credentials, executables, or MCP access work in Cowork or cloud-hosted sessions. Do not advertise untested runtime support.
 
-AccelByte's public [`ai-plugins`](https://github.com/AccelByte/ai-plugins) repository is the primary structural precedent selected for this proposal. It contains separate per-harness artifacts and is the example under review by this team.
+## 3. Evidence supporting the experiment
 
-Facts directly observable in that repository:
+The examples below were checked at the **commits pinned in the official Community catalog**, not merely their current default branches. Presence in that catalog is evidence of approved distribution; it does not reveal the private review rationale.
 
-* Its [Codex marketplace manifest](https://github.com/AccelByte/ai-plugins/blob/main/.agents/plugins/marketplace.json) points the Codex source to `./.codex-temp`. That artifact's [`.codex-plugin/plugin.json`](https://github.com/AccelByte/ai-plugins/blob/main/.codex-temp/.codex-plugin/plugin.json) declares `skills` but no `mcpServers` field.
-* The adjacent [`codex.mcp.json`](https://github.com/AccelByte/ai-plugins/blob/main/.codex-temp/codex.mcp.json) is explicitly empty: `{ "mcpServers": {} }`.
-* Its README says skills can configure MCP servers on a **per-project** basis when the user is ready, rather than requiring a live environment at plugin installation time. The concrete [AGS install-MCP skill](https://github.com/AccelByte/ai-plugins/blob/main/.codex-temp/skills/ags/subskills/install-mcp.md) guides an agent to preserve unrelated configuration and edit the relevant client configuration; for Codex it identifies `.codex/config.toml` and `mcp_servers.*`.
-* The same repository does choose a different Claude-specific design: [`.claude-plugin/plugin.json`](https://github.com/AccelByte/ai-plugins/blob/main/.claude-plugin/plugin.json) declares `userConfig`, and [`mcp.json`](https://github.com/AccelByte/ai-plugins/blob/main/mcp.json) uses the configured URL values to declare remote MCP servers.
+| Approved example | Verified pattern | Relevance and limit |
+| --- | --- | --- |
+| **[jambonz-skills](https://github.com/jambonz/skills/blob/82ee0b69c88854ab7980b9042d78a3086e6b9176/skills/jambonz-setup-mcp/SKILL.md)** | Skills and documentation, no bundled MCP registration. Setup skill explicitly uses `claude mcp add jambonz -- npx -y @jambonz/mcp-schema-server`. | Closest packaging precedent: install skills and MCP separately. Does not demonstrate N|Solid-style authenticated wrappers. |
+| **[You.com](https://github.com/youdotcom-oss/agent-skills/blob/2ed83558991da7d09e5880fe2d119002bbcf060b/skills/you-web/SKILL.md)** | No Claude plugin MCP registration; skill requires an externally connected MCP, describes API-key/OAuth options, and requires approval before configuration changes. | Supports transparent authenticated MCP prerequisites. Not a vendor-CLI/stdio registration example. |
+| **[Preset CLI Skills](https://github.com/preset-io/agent-skills/blob/8387ac0f0538271c79a2e227c7ddec084e8a5da3/plugins/preset-cli-skills/skills/preset-cli/references/install-and-auth.md)** | Separate `superset-sup` installation and interactive `sup config auth`; optional local credential storage. Plugin is a catalog-listed monorepo subdirectory. | Supports external authenticated CLI workflows and avoiding an immediate repository split. Does not install MCP. |
+| **[CodeRabbit](https://github.com/coderabbitai/skills/blob/bbb4ab25a7f1d426062d83fe8fdf406beeecd0cb/skills/code-review/SKILL.md)** | Metadata-only Claude manifest; skill checks CLI/auth readiness and uses `coderabbit review --agent`. | Supports separately authenticated CLI dependencies. Not an MCP installer. |
+| **[Endor Labs](https://github.com/endorlabs/ai-plugins/blob/975f0ce422b1f2677681ffd085aef34ea1826b70/README.md)** | Metadata-only Claude manifest; setup uses `endorctl` with browser OAuth or API key and secret. | Supports authenticated external tooling, not acceptance of N|Solid's exact service-token model. |
+| **[Pencil community skill](https://github.com/Nisus74/pencil-skill/blob/28ec61cefe3000a59bdac6b98b83168dbacca9c8/skills/pencil-design/references/pencil-cli.md)** | No plugin MCP registration or startup hooks; reference describes external CLI installation, login, and an interactive MCP runtime. | Close conceptual analogy, but CLI behavior was verified as published instructions, not executed or independently certified against the vendor binary. |
 
-Inference: AccelByte demonstrates that a single public skills repository can emit a clean Codex skills-only artifact while preserving a richer, harness-specific integration elsewhere. For N|Solid, the lowest-risk first attempt is more conservative than AccelByte's Claude configuration: **do not declare MCPs in the Claude plugin either**. That keeps the community-plugin submission unambiguously skills-only and avoids making `userConfig`, templates, `headersHelper`, or remote-MCP authentication part of the screening surface.
+AccelByte remains a packaging comparison, **not** the principal skills-only Claude precedent: its [approved Claude manifest](https://github.com/AccelByte/ai-plugins/blob/81c40c3edff1c292c60a100a7a15badb65eaf731/.claude-plugin/plugin.json) includes inline HTTP MCP registration.
 
-### Additional verified Claude Community Marketplace precedents
+### What official documentation establishes
 
-The [Claude Community Marketplace repository](https://github.com/anthropics/claude-plugins-community) states that listed plugins pass automated security scanning and approval. Its current mirror includes AccelByte, CodeRabbit, and Endor Labs; these examples are relevant because the target here is that screening path, not a generic GitHub plugin directory.
+- [Plugin documentation](https://code.claude.com/docs/en/plugins) documents community submission, local validation, automated safety screening, and approved commit pins.
+- [Marketplace documentation](https://code.claude.com/docs/en/plugin-marketplaces) supports self-contained plugin subdirectories and `git-subdir` sources. A separate source repository is not a technical prerequisite; confirm the intended artifact path in the submission form.
+- [MCP documentation](https://code.claude.com/docs/en/mcp) supports non-OAuth authentication through `headersHelper`. That is a client capability, **not a marketplace policy waiver**.
+- No inspected official page establishes a blanket OAuth requirement for every community plugin, or a blanket review exemption for skills using external authenticated tools. The internal screening rubric was not available in full.
 
-* [CodeRabbit](https://github.com/coderabbitai/skills) has a [Claude manifest](https://github.com/coderabbitai/skills/blob/main/.claude-plugin/plugin.json) with metadata only, not an MCP declaration. Its skill checks that the `coderabbit` CLI exists and is authenticated, directs `coderabbit auth login` when needed, then uses `coderabbit review --agent`. This is the closest listed precedent for *skills plugin + separately authenticated CLI*.
-* [Endor Labs](https://github.com/endorlabs/ai-plugins) likewise ships a metadata-only [Claude manifest](https://github.com/endorlabs/ai-plugins/blob/main/.claude-plugin/plugin.json). Its setup workflow uses `endorctl` and authentication configuration, while MCP use remains opt-in at workflow level. This is a second listed precedent for deferring live-service access to a tool-specific setup path.
+**Appendix A** records the supporting evidence in detail: how the examples were verified, their pinned commits, exact setup commands, and the candidates that were screened and excluded.
 
-Neither example proves that N|Solid's particular service-token scheme will be accepted. They demonstrate that a Community Marketplace plugin can deliver skills while leaving authenticated external capability to an independently installed CLI.
+## 4. Minimum viable submission
 
-### Current N|Solid constraints
+### Recommended first artifact
 
-Facts from this repository:
+Ship **one useful, read-only Node.js upgrade-readiness skill**, working name `ns-node-upgrade-readiness`, plus its references, Claude manifest, and concise installation/support documentation.
 
-* The current Codex and Claude manifests both declare MCP configuration files, respectively [`.codex-plugin/plugin.json`](../.codex-plugin/plugin.json) and [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json).
-* The shared `nsolid-plugin setup --harness <harness>` flow already authenticates through Accounts and stores one shared credential record at `~/.agents/.nodesource-auth.json`; its documented lifecycle includes missing/expired credential recovery and organization switching. [Core CLI README](../packages/core/README.md).
-* Current runtime wrappers use that credential record to resolve the Console URL and inject N|Solid service-token and organization headers before connecting to `nsolid-console`, `ns-benchmark`, or `ncm`. [`scripts/mcp-wrapper.js`](../scripts/mcp-wrapper.js).
-* The core package already owns harness adapters, config writing, backups and removal. `setup()` authenticates; for the existing plugin-owned harnesses (Claude, Codex, Antigravity) it currently completes as an auth-only operation. `install()` already has a `packageOwnedSkills` mode that skips copying skills while writing MCP configuration. [Core CLI README](../packages/core/README.md).
+This is a **new reduced-scope workflow to implement**, not a claim that an existing skill already works unchanged without dependencies. Reuse relevant guidance from `ns-node-upgrade`, but do not copy its complete workflow: the current skill runs a release-data helper and requests NCM dependency information.
 
-These facts make this a packaging/refactoring change, not a required protocol change to `nsolid-console-ng`, `ns-benchmark`, `ncm-mcp`, or Accounts.
+The first skill should inspect user-provided/local project files and produce:
 
-## Proposed two-repository architecture
+- declared Node.js versions from `package.json`, `.nvmrc`, and `.node-version`, including conflicts;
+- package-manager and lockfile evidence;
+- an inventory of declared direct dependencies and an upgrade-readiness checklist;
+- a clear list of facts not verified, including current release lifecycle and target-version dependency compatibility.
 
-```text
-github.com/NodeSource/nsolid-plugin              github.com/NodeSource/nsolid-plugin-cli
-public marketplace source                         public npm package source
-────────────────────────────────────              ───────────────────────────────────
-skills/       canonical skill source              Accounts login and credential storage
-Claude/Codex/Antigravity manifests                current MCP wrapper/proxy behaviour
-generated marketplace bundles                     harness adapters and config writers
-docs and marketplace metadata                     setup, status, doctor, uninstall
-no mcpServers declarations                         package published to npm
-```
+It must not claim the latest supported Node version or dependency compatibility without evidence. It should not run installation, application code, tests, or migrations; modify files; access Accounts; read credentials; or call NCM/MCP. A useful result is a concrete readiness report, not only “install our CLI.”
 
-The skills repository is the single source of truth for skills, references, assets and marketplace metadata. It does not vendor the CLI package or a second copy of skills. The CLI repository is the source of the publicly published executable. A release compatibility contract links them:
+**If the team considers this scope insufficiently valuable, choose another bounded workflow before implementation.** Do not ship an empty setup-only placeholder just to obtain a listing. This usefulness requirement is our product choice, not a proven universal marketplace rule.
 
-* skills state a minimum CLI version only where an online operation needs setup;
-* the CLI exposes a stable `setup --harness …` contract and tests each supported harness;
-* the plugin never contains credentials, wrappers, MCP registration, or a remote MCP URL.
+### Artifact boundary
 
-The current monorepo may be used as the migration starting point, but the end state has no bidirectional skill copying. If a convenience command installs a plugin, it should install a released plugin artifact or direct the user to the marketplace; it must not embed another skill fork inside the CLI.
+| Included in H1 | Excluded from H1 |
+| --- | --- |
+| One canonical skill and required static references | Plugin MCP registrations, wrappers, or remote connection helpers |
+| Claude metadata, README, license, supported-runtime statement | Startup hooks, automatic dependency installation, credential reads |
+| Honest explanation that live N|Solid access is not provided in this version | Accounts login, tokens, API calls, or unimplemented setup commands presented as available |
 
-## User flow and setup state machine
+The README may describe the planned optional integration, explicitly labeled as future work. Do not omit material dependencies from reviewer-facing documentation. For H2, endpoint and setup references are allowed; actual credentials and automatic plugin-owned registration are not.
 
-The public plugin installs skills only. A skill may explain that live N|Solid data requires the separately installed CLI, but it must not silently modify configuration.
+### Keep the repository intact
 
-```text
-plugin installed (skills only)
-          |
-          v
-user requests live N|Solid data
-          |
-          +-- CLI absent --------> show install command and stop
-          |
-          v
-user runs: nsolid-plugin setup --harness <name>
-          |
-          +-- valid shared auth --> retain org and credentials
-          |
-          +-- absent/expired ----> Accounts login --> write shared credentials
-          |
-          v
-ask registration scope: this project | global
-          |
-          v
-merge only N|Solid MCP registrations into target harness configuration
-          |
-          v
-validate / report restart-or-reload instruction
-```
-
-### Scope prompt
-
-The existing `setup --harness` command remains the only user-facing setup entry point. Add an interactive scope question after authentication (or after confirming reusable credentials):
+Proposed layout, to be created during implementation:
 
 ```text
-Where should N|Solid MCPs be available?
-  1. This project (recommended): only the current trusted workspace
-  2. Global: all projects for this user
+skills/ns-node-upgrade-readiness/          canonical new skill
+plugins/nsolid-skills/                    generated, self-contained Claude artifact
+  .claude-plugin/plugin.json
+  skills/ns-node-upgrade-readiness/
+  README.md
+  LICENSE
+packages/core/                           existing CLI remains here
 ```
 
-Non-interactive equivalents should be explicit, for example `--scope project` and `--scope global`; no default should silently write global configuration. If the harness has no safe project scope, setup must say so and request confirmation before global installation.
+Use the existing generation approach where practical; maintain one canonical source, not two hand-edited skill copies. The artifact must work from the plugin cache without reaching outside its own directory. Leave the current root integration and secondary-harness manifests unchanged. Confirm the final catalog/plugin name and selected source path before submission, including how it relates to the existing submission.
 
-The registration uses the current three stdio wrappers. Each wrapper continues to read `~/.agents/.nodesource-auth.json` at connection time, so a previously completed login for any harness can be reused for another harness without placing tokens in a project file. The selected scope stores only the command/arguments that launch the wrapper.
+## 5. Phased plan — fastest useful evidence first
 
-Today the config writer uses user/global locations (for example `~/.claude.json`, `~/.codex/config.toml`, and `~/.gemini/config/mcp_config.json`). Project scope is therefore new work, not a claim about current behavior. Expected final destinations, to be finalized against each adapter's existing tests:
+Timeboxes below are **planning limits for focused work, not delivery promises**. Marketplace review time is external. If a phase exceeds its budget, reduce scope or return with a blocker; do not silently expand the experiment.
 
-| Harness | Project scope | Global scope | Notes |
+| Phase | Work and deliverable | Exit gate | Initial timebox |
 | --- | --- | --- | --- |
-| Claude Code | project MCP config (`.mcp.json`) | user MCP configuration | Claude documents local/project/user configuration scopes for `claude mcp add`. [Claude MCP scopes](https://code.claude.com/docs/en/mcp) |
-| Codex | `.codex/config.toml` | `~/.codex/config.toml` | Codex documents both locations and only loads project configuration in trusted projects. [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) |
-| Antigravity | `.agents/mcp_config.json` | `~/.gemini/config/mcp_config.json` | Antigravity documents both workspace and global MCP configuration. [Antigravity MCP configuration](https://antigravity.google/docs/mcp) |
-| OpenCode / Pi | existing adapter-defined target | existing adapter-defined target | Preserve current adapter behavior; this proposal does not broaden their support contract. |
+| **0 — Confirm the experiment** | Collect prior feedback if available; agree H1 scope, plugin identity, source path, owners, and submission access. | H1/H2 distinction and unresolved rejection cause recorded; one workflow selected. | 30–60 minutes |
+| **1 — Build and test H1** | Implement the reduced skill, isolated artifact, representative project fixtures, and an artifact inventory. | Local validation and clean-install checks below pass; no live-service dependency. | One focused engineering day, reassess if exceeded |
+| **2 — Submit H1** | Submit exact candidate; capture submission ID, SHA, validator version/output, supported runtime, and reviewer-facing description. | Submission acknowledged; follow-up owner assigned. | Same-day submission once Phase 1 passes; review duration unknown |
+| **3 — Optional live-data experiment** | Estimate and implement the minimum external-CLI setup path, then test and submit the H2 update transparently. | Live integration matrix passes and change is explicitly submitted for review. | Estimate after a bounded CLI/package inspection; not included in Phase 1 |
+| **4 — Expand only with evidence** | Additional skills, cross-harness parity, release automation, or repository separation if justified. | Separate scope/ownership decision using screening and usage feedback. | Outside this experiment |
 
-## Minimal implementation plan (one to two engineering days)
+Do not overwrite the submitted H1 candidate with H2 changes while waiting for feedback. Preserve an identifiable H1 artifact and SHA. Phase 3 discovery may run in parallel with review, but shipping it requires its own gate.
 
-### Day 1 — package boundary and skills-only artifacts
+### Phase 1: minimal validation matrix
 
-1. Create the standalone public CLI repository by moving the existing core/setup/wrapper package without changing Accounts protocol, token schema, or the three server wrappers.
-2. In the public `nsolid-plugin` repository, retain canonical `skills/` and marketplace manifests, then remove `mcpServers` from the Claude and Codex plugin manifests. Do not ship plugin-owned `.claude-mcp.json`, `.mcp.json`, or Antigravity `mcp_config.json` with server entries. An empty Codex MCP file is acceptable but omission is simpler.
-3. Generate and validate harness-specific skills artifacts from the single canonical source. Update descriptions to say “N|Solid skills,” not “skills and MCP servers.”
-4. Make skills use an actionable, provider-neutral setup instruction when live data is unavailable: install the CLI, run `setup --harness <detected harness>`, then reload/restart as required.
+1. **Package validation:** run `claude plugin validate <artifact> --strict`; record Claude version and output. Inspect the complete installable tree for MCP files, hooks, executables, package lifecycle scripts, secrets, and accidental dependencies. A clean manifest alone is insufficient.
+2. **Distribution test:** install from the intended marketplace/source path into an isolated Claude profile and trusted fixture workspace, not only through a development `--plugin-dir` load. Verify all references resolve from the installed cache.
+3. **Useful result:** test a project with consistent Node declarations, one with conflicting declarations, and one without a declared version. Check the report against the fixture facts, not just whether the skill loads.
+4. **No integration side effects:** with no N|Solid CLI, credentials, or MCP configuration, verify the workflow completes without requesting Accounts access or registering servers. Compare relevant configuration and workspace files before/after; do not mistake ordinary Claude client network activity for a plugin API call.
+5. **Honest limitations and cleanup:** verify unconfirmed release/compatibility facts are labeled, no live access is promised, and removing the candidate leaves existing integrations untouched.
 
-### Day 2 — reuse setup and prove the Claude path
+These are planned checks; none is claimed to have passed yet. A documentation-only proposal update does not constitute a validated plugin.
 
-1. Extend the current interactive `setup --harness claude` flow with project/global scope selection and explicit non-interactive flags. Follow successful authentication with the existing MCP-only registration machinery instead of stopping auth-only.
-2. Reuse the existing config writer/backups/idempotent merge logic. Register only `nsolid-console`, `ns-benchmark`, and `ncm`; never overwrite non-N|Solid entries.
-3. Test fresh login, valid reused credentials, expired credentials, Claude project setup, Claude global setup, repeated setup, removal, and one secondary-harness setup using the same credential record.
-4. Run marketplace/package validation and submit the skills-only artifact. Record exact screening feedback before undertaking any OAuth work.
+## 6. Phase 3: external CLI/MCP integration, without backend authentication changes
 
-The two-day timebox does not require project/global parity for every secondary harness. Existing global setup behaviour may remain for Codex, Antigravity, OpenCode and Pi as long as it does not regress. Scope parity becomes follow-up work after the Claude submission unless it is already covered by the shared writer with minimal additional changes.
+### Proposed user flow
 
-## Explicit non-goals
+```text
+skills installed -> useful non-authenticated workflow available
+user explicitly requests live N|Solid data
+  -> check required MCP tools
+  -> if unavailable, explain external CLI dependency and request consent
+  -> user installs the documented CLI release and runs setup
+  -> reuse valid Accounts credentials or authenticate explicitly
+  -> select registration scope and confirm configuration changes
+  -> register CLI-owned stdio wrappers; verify tools after reload
+```
 
-* No OAuth 2.1 / DCR / PKCE / refresh-token implementation in Accounts or any MCP server.
-* No changes to token authentication in the VS Code extension or the Console Copilot agent.
-* No OAuth gateway, proxy service, or new backend deployment.
-* No migration of the three current MCP servers from their existing service-token headers.
-* No auto-installation of MCPs as a side effect of enabling a marketplace plugin.
-* No promise that a skills-only listing grants cloud access to live N|Solid data. Local CLI setup is separate from any cloud-hosted runtime.
+Preserve `nsolid-plugin setup --harness claude` as the intended entry point, but **do not document it as completing this flow until a released version actually does so**. Pin a minimum supported CLI version. Wrappers must be owned by the separately installed CLI package, not referenced from an uninstallable plugin cache.
 
-## Screening hypothesis and limitations
+### Findings that must be addressed before reusing existing code
 
-**Hypothesis:** a marketplace submission whose installable plugin contains only skills, references and static metadata will avoid the remote-MCP authentication/OAuth review condition that applied to the prior MCP-bearing submission. This is plausible because the package no longer advertises a remote MCP; it is not a guarantee of acceptance.
+| Current repository fact | Required H2 work |
+| --- | --- |
+| [`setup()`](../packages/core/src/index.ts) currently stops after authentication for Claude/Codex/Antigravity. | Add explicit registration behavior for the new Claude path without regressing existing integrations. |
+| [`bundle.json`](../bundle.json) defines remote URLs and token headers; `install()` expands credentials and passes them to the [config writer](../packages/core/src/mcp/mcp-config-writer.ts). | Do not simply call the existing installer. Define stdio descriptors containing only stable executable commands/arguments; prove no token serialization. |
+| [`ns-audit-dependencies`](../skills/ns-audit-dependencies/audit-dependencies.cjs) reads shared credentials and calls the NCM API. | Exclude it from H1. Before later inclusion, move authenticated execution behind the CLI or explicitly disclose and review that behavior. Audit other retained helpers too. |
+| Existing wrappers read shared Accounts credentials. | Preserve that authentication contract where appropriate; validate credential permissions, redacted errors, reuse/expiry, and organization selection. |
 
-Why this is a bounded experiment:
+### Scope and safety contract
 
-* The user-facing value of offline/repository skills remains available immediately.
-* Live data remains opt-in and is initiated by a normal CLI login/setup outside the plugin artifact.
-* The existing token model stays operational for VS Code and local harnesses.
-* If screening still rejects the listing for unrelated policy, metadata, security or content reasons, we get a precise failure reason without having changed server authentication.
+Claude distinguishes [three scopes](https://code.claude.com/docs/en/mcp#mcp-installation-scopes):
 
-Limitations:
+- **`local`:** current project, private to the user, stored in the per-project structure of `~/.claude.json`. Recommended first supported scope.
+- **`project`:** shareable repository `.mcp.json`; require explicit consent before writing.
+- **`user`:** all the user's projects through `~/.claude.json`; explicitly opt-in.
 
-* The marketplace plugin alone cannot access live N|Solid systems.
-* Cloud-hosted harness environments generally cannot rely on a locally installed CLI or local credential file.
-* Some skills will need clear graceful-degradation text when MCP tools are not present.
-* A separate public repository introduces release coordination. Versioned CLI compatibility and integration tests are required.
-* Claude can support a token-header helper for non-OAuth remote MCPs, and Antigravity supports custom headers, but intentionally using those plugin fields now would put MCP authentication back into the submission surface. [Claude custom authentication](https://code.claude.com/docs/en/mcp); [Antigravity custom headers](https://antigravity.google/docs/mcp/).
+To keep H2 small, implement and test `local` first if practical; other scopes can follow. If only another scope is feasible initially, record that decision and require explicit user consent. Never silently substitute a broader scope. CLI flags are proposed, not existing functionality.
 
-## Acceptance criteria
+H2 must preserve unrelated configuration, refuse conflicting user-owned registrations unless migration is explicitly approved, be idempotent, and offer targeted removal. Plugin uninstall must not unexpectedly delete separately installed CLI registrations or shared credentials; explain the separate removal step.
 
-1. The submitted Claude community-plugin artifact contains at least one skill and contains no `mcpServers`, MCP URL, token, `headersHelper`, wrapper, or executable MCP registration.
-2. Enabling the plugin does not contact Accounts and does not write user or project MCP configuration.
-3. `nsolid-plugin setup --harness claude` reuses valid credentials or completes the existing Accounts login, then asks for project/global scope before writing MCP registrations. Secondary harnesses retain at least their current setup behaviour.
-4. Setup writes only N|Solid server registrations, preserves unrelated user configuration, is idempotent, and has a targeted remove/uninstall path.
-5. A fresh user can install the plugin, install the public CLI, run setup, restart/reload the harness, and invoke all three local MCP wrappers without copying a token into project configuration.
-6. Existing VS Code token-authentication behavior and current MCP-server APIs pass their unchanged tests.
-7. The submission is attempted with the skills-only artifact and the resulting marketplace screening feedback is captured verbatim in the release issue.
+**H2 gate:** test fresh/reused/expired authentication; selected scope; repeat setup; no secrets in generated config/logs/new backups; old plugin coexistence or explicit migration; changed MCP tool names; stable wrapper paths; targeted removal; and one real tool invocation for each of the three promised servers. Run affected CLI/configuration tests. Do not claim all-server support until all three pass. Existing backups containing secrets require careful handling, not automatic copying or deletion.
 
-## Rollback
+## 7. Submission, measurements, and response handling
 
-The rollback is configuration-level and does not require server changes:
+Use one of the [documented submission forms](https://code.claude.com/docs/en/plugins):
 
-1. Withdraw or revert the new marketplace artifact to the last known-good skills release.
-2. Publish a CLI patch that removes only the three N|Solid registrations from the selected scope and restores backed-up config if a write failed.
-3. Keep the existing Accounts credential file untouched unless the user explicitly runs logout.
-4. Retain the old MCP-bearing source in a tagged release while the migration is evaluated; do not delete it until the new artifact has passed screening and the CLI flow is verified.
+- [claude.ai form](https://claude.ai/admin-settings/directory/submissions/plugins/new): documented as requiring Team/Enterprise directory-management access.
+- [Console form](https://platform.claude.com/plugins/submit): documented alternative for individual authors.
 
-## Questions for team review
+The Community repository is a read-only mirror; direct PRs are not the submission route. Provide an accurate description of shipped behavior, dependencies, data access, and tested runtimes. Confirm that the form selects the intended plugin subdirectory rather than accidentally submitting the existing MCP-bearing root plugin.
 
-The initial submission target is confirmed: Claude Community Marketplace. Codex and Antigravity are compatibility channels and must not block this screening attempt.
+Record in a release issue: owner, candidate SHA/path, plugin identity, validator version/output, clean-install evidence, submission ID/date, exact feedback, approved catalog SHA, and installation result. The public catalog syncs nightly; absence immediately after approval is not itself rejection. Approved pins can update through CI, so keep subsequent changes controlled.
 
-1. Which current CLI package name and npm ownership should become the stable public contract after the repository split?
-2. For Claude, should the CLI register project scope in the repository `.mcp.json` (shareable) or a user-local project configuration by default? The proposal prefers the least-surprising non-secret option and requires explicit consent for shareable files.
-3. Does the CLI already have a safe project-root discovery contract for every harness, or should the first release support global setup for a harness only after an explicit warning?
-4. Who owns release compatibility testing across the skills repository and CLI repository?
-5. If marketplace screening rejects skills-only packaging, do we first address the specific rejection, or revisit MCP OAuth as a separately scoped project?
+| Outcome | Next action |
+| --- | --- |
+| H1 accepted and installable | Record listing feasibility; decide whether to proceed with H2. Do not claim the full integration is approved. |
+| Feedback identifies packaging, quality, metadata, or security issues | Address the specific finding and resubmit within an agreed scope. |
+| Feedback explicitly requires an authentication change for the proposed live path | Reassess H2 with the actual requirement; scope OAuth separately if necessary. |
+| Submission remains pending | Follow up through the submission channel; avoid speculative architecture changes. |
+
+**Execution success:** a validated candidate, an acknowledged submission, and captured feedback.
+
+**H1 success:** the submitted skills artifact is approved and installable.
+
+**H2 success:** the tested optional CLI/MCP arrangement is accepted as part of the updated listing.
+
+## 8. Non-goals, rollback, and decisions needed
+
+### Non-goals for the first submission
+
+No repository split; no public CLI release dependency; no OAuth/DCR/PKCE project; no Accounts/server protocol changes; no VS Code or Console authentication changes; no new backend deployment; no Codex/Antigravity/OpenCode/Pi parity work; no claim of Cowork/cloud live-data support. Existing integrations remain untouched.
+
+### Rollback
+
+For H1, withdraw the candidate or revert its isolated artifact to the recorded baseline. If there is no prior approved skills release, withdraw rather than inventing a “last known-good” listing. No user MCP or credential cleanup should be needed.
+
+For H2, provide scoped removal of only CLI-owned registrations, preserving unrelated entries and shared authentication unless the user explicitly logs out. Restore backups only when doing so cannot overwrite intervening user changes. Repository separation, if later chosen, is a separate migration with its own rollback plan.
+
+### Decisions for this meeting
+
+1. **Approve the useful one-skill H1 release**, or require live MCP access in the first submission? Requiring live access moves Phase 3 ahead of submission and needs a larger estimate.
+2. Who owns implementation, validation, submission access, and reviewer follow-up?
+3. Which plugin name/source path should be submitted, and is it an update to the prior submission or a new candidate?
+4. Can the previous rejection text and submitted SHA be recovered? If not, explicitly retain the uncertainty.
+5. Should a bounded H2 discovery task run while H1 is under review? Repository separation and full scope parity remain deferred.
+
+**Recommendation:** approve the smallest useful H1 artifact now, obtain real screening feedback quickly, and treat optional authenticated CLI/MCP support as a second, evidence-backed experiment.
+
+## Appendix A — detailed precedent evidence
+
+### Method and evidence boundary
+
+The examples in section 3 were verified by reading the [official Community catalog](https://github.com/anthropics/claude-plugins-community/blob/main/.claude-plugin/marketplace.json), then inspecting each finalist at the commit the catalog pins, rather than at a changing default branch. Two targeted candidate groups were screened; this was focused discovery, not an exhaustive census. Complete, non-truncated Git trees were checked for the four main examples, including their plugin subdirectory where applicable, because a metadata-only manifest does not rule out convention-based MCP configuration or hooks.
+
+No example was installed, authenticated, or executed during this research. Catalog presence and pinned source contents were verified. Runtime correctness, private approval rationale, and acceptance of N|Solid's exact three-wrapper/service-token architecture were **not**.
+
+“Skills-only” throughout means **no Claude-bundled MCP registration or startup hook**. It does not mean the artifact contains no prose about MCP, no URLs, or no network behavior. The repository README states that listed plugins passed automated security scanning and were approved for distribution; it does not identify which design aspect caused approval.
+
+### jambonz-skills — direct match for separate CLI registration of an npm MCP
+
+**Catalog name:** `jambonz-skills`. **Pinned SHA:** `82ee0b69c88854ab7980b9042d78a3086e6b9176`.
+
+The [manifest](https://github.com/jambonz/skills/blob/82ee0b69c88854ab7980b9042d78a3086e6b9176/.claude-plugin/plugin.json) contains name, description, version, and author only. The complete 15-file tree contains skills, references, metadata, and a release workflow: no `.mcp.json`, hook registration, or MCP server implementation.
+
+The [jambonz-setup-mcp skill](https://github.com/jambonz/skills/blob/82ee0b69c88854ab7980b9042d78a3086e6b9176/skills/jambonz-setup-mcp/SKILL.md) documents remote HTTP and local stdio, with this exact Claude registration command:
+
+```bash
+claude mcp add jambonz -- npx -y @jambonz/mcp-schema-server
+```
+
+It directs verification with `claude mcp list`, and states:
+
+> The MCP server and the `jambonz-skills` plugin complement each other — install both.
+
+> You can use them separately — skills alone for planning/offline work, MCP alone for one-off schema lookups [...].
+
+**Limit:** the server exposes schemas and examples. The inspected setup does not demonstrate service-token authentication, an Accounts-style login, or a vendor CLI that owns registration of multiple wrappers; it uses the host's `claude mcp add` command. One pinned line about Codex HTTP support is outdated, so treat it as precedent evidence rather than a current setup manual.
+
+### You.com — external authenticated MCP prerequisite without a plugin registration
+
+**Catalog name:** `youdotcom-agent-skills`; manifest name `you`. **Pinned SHA:** `2ed83558991da7d09e5880fe2d119002bbcf060b`.
+
+The [Claude manifest](https://github.com/youdotcom-oss/agent-skills/blob/2ed83558991da7d09e5880fe2d119002bbcf060b/.claude-plugin/plugin.json) carries metadata and no `mcpServers`. No root `.mcp.json` or Claude startup hooks were found. The repository also ships other harness-specific packages, so it should not be described as exclusively static Markdown.
+
+The [you-web skill](https://github.com/youdotcom-oss/agent-skills/blob/2ed83558991da7d09e5880fe2d119002bbcf060b/skills/you-web/SKILL.md) states that the server “must be installed and connected before using this skill,” identifies `https://api.you.com/mcp`, and offers bearer `YDC_API_KEY`, OAuth, or an x402-aware client. It instructs the agent to name the missing capability, provide endpoints and auth options, and “request approval before installing, connecting, or changing MCP configuration.”
+
+**Limit:** a remote MCP prerequisite, not verified vendor-CLI registration of local stdio wrappers. Its frontmatter carries descriptive `metadata.mcp_servers` and endpoint/auth details; that is not a plugin `mcpServers` registration, but it does mean the plugin openly references MCP URLs.
+
+### Preset CLI Skills — separate CLI installation and interactive authentication
+
+**Catalog name:** `preset-cli-skills`; **plugin subdirectory** `plugins/preset-cli-skills`; **pinned SHA:** `8387ac0f0538271c79a2e227c7ddec084e8a5da3`. The catalog entry uses a `git-subdir` source.
+
+The plugin manifest has no MCP declaration, and the inspected plugin subtree has no MCP registration or hooks. The [installation and authentication reference](https://github.com/preset-io/agent-skills/blob/8387ac0f0538271c79a2e227c7ddec084e8a5da3/plugins/preset-cli-skills/skills/preset-cli/references/install-and-auth.md) prescribes:
+
+```bash
+pip install superset-sup
+sup --version
+sup config auth
+```
+
+It describes interactive token/secret prompts, credential testing, optional storage in `~/.sup/config.yml` or environment variables, and explicitly forbids passing secrets inline on the command line.
+
+**Limit:** this is a CLI workflow, not installation of an MCP. The same repository contains a separate MCP-skills package, but this finding does not claim that sibling package is independently listed in the Community catalog.
+
+### Pencil — skills plus external MCP, with a documented authenticated CLI path
+
+**Catalog name:** `pencil-dev-skill`. **Pinned SHA:** `28ec61cefe3000a59bdac6b98b83168dbacca9c8`. The publishing repository is `Nisus74/pencil-skill`, not established here as an official Pencil-owned repository.
+
+The manifest has no MCP registration and the complete Git tree has no MCP JSON registration or hooks directory. The [CLI reference](https://github.com/Nisus74/pencil-skill/blob/28ec61cefe3000a59bdac6b98b83168dbacca9c8/skills/pencil-design/references/pencil-cli.md) instructs `npm install -g @pencil.dev/cli`, `pencil status`, `pencil login`, and `pencil interactive`; it describes browser login, a separate credential file at `~/.pencil/session-cli.json`, and states that inside the interactive shell “the same MCP server runs that the desktop app launches.”
+
+**Limit:** verified as published instructions, not tested against the vendor binary. It does not demonstrate a `setup` command that writes Claude registrations.
+
+### Screened candidates and exclusions
+
+- **analytics-skills** (`clamp-sh/analytics-skills`, pinned `b9e06c5131a6060114e68893bc34fc77b65a9552`): no manifest/root MCP registration or hook files in the inspected tree. Its README describes platform-neutral skills with provider-specific MCP tool maps. Supporting evidence for skills that reference existing tools, not a demonstrated CLI installation flow.
+- **mcpa** is catalog-listed and explicitly wraps `claude mcp add`, but its pinned subtree contains `commands/add.md` and `hooks/hooks.json`. **Not** a strict skills-only example.
+- **Unreal Engine Skills for Claude Code** is catalog-listed and uses an externally running editor MCP, but includes a SessionStart hook. **Not** a strict skills-only example.
+- **Appwrite, Prisma, PlanetScale, MongoDB, Supabase, and Neon** had MCP registration in the manifest and/or a root MCP file in the screened source. They are not evidence for the no-bundled-MCP boundary.
+- **AccelByte** is a packaging comparison only: its approved Claude manifest includes `userConfig` and inline HTTP `mcpServers`.
+- **Numeric's** catalog-pinned README redirects to a relocated repository, so it was not used as a main precedent to avoid conflating the approved artifact with a new repository.
