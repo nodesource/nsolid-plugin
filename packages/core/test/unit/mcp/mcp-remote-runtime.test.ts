@@ -17,6 +17,23 @@ import {
   type PublishTestControls,
 } from '../../../src/mcp/mcp-remote-runtime.js'
 
+/**
+ * Creates a symlink, or returns false where Windows refuses one without
+ * Developer Mode or elevation. Directories use junctions there, which need
+ * neither, so only file symlinks can be refused.
+ */
+function trySymlink (target: string, path: string, kind: 'file' | 'dir'): boolean {
+  try {
+    symlinkSync(target, path, process.platform === 'win32' && kind === 'dir' ? 'junction' : kind)
+    return true
+  } catch (err) {
+    if (process.platform === 'win32' && (err as NodeJS.ErrnoException).code === 'EPERM') return false
+    throw err
+  }
+}
+
+const NO_SYMLINKS = 'file symlinks require Developer Mode or elevation on this Windows host'
+
 let tmpHome: string
 let originalHome: string | undefined
 let originalUserProfile: string | undefined
@@ -269,7 +286,7 @@ describe('inspectMcpRemoteRuntime()', () => {
     mkdirSync(outside, { recursive: true })
     writeFileSync(join(outside, 'package.json'), JSON.stringify({ name: 'express', version: '1.0.0' }))
     rmSync(join(runtimeRoot(), 'node_modules', 'express'), { recursive: true, force: true })
-    symlinkSync(outside, join(runtimeRoot(), 'node_modules', 'express'))
+    trySymlink(outside, join(runtimeRoot(), 'node_modules', 'express'), 'dir')
 
     const status = inspectMcpRemoteRuntime()
     assert.strictEqual(status.status, 'invalid')
@@ -308,33 +325,39 @@ describe('inspectMcpRemoteRuntime()', () => {
     writeFileSync(join(outside, 'package.json'), JSON.stringify({ name: 'mcp-remote', version: MCP_REMOTE_VERSION, dependencies: {} }))
     writeFileSync(join(outside, 'dist', 'proxy.js'), '// proxy\n')
     rmSync(join(runtimeRoot(), 'node_modules', 'mcp-remote'), { recursive: true, force: true })
-    symlinkSync(outside, join(runtimeRoot(), 'node_modules', 'mcp-remote'))
+    trySymlink(outside, join(runtimeRoot(), 'node_modules', 'mcp-remote'), 'dir')
 
     const status = inspectMcpRemoteRuntime()
     assert.strictEqual(status.status, 'invalid')
     assert.match(status.reason ?? '', /node_modules\/mcp-remote .*outside the runtime root/)
   })
 
-  it('rejects a symlinked dist/proxy.js whose target escapes the runtime root', () => {
+  it('rejects a symlinked dist/proxy.js whose target escapes the runtime root', (t) => {
     seedRuntime()
     const outsideProxy = join(tmpHome, 'outside-proxy.js')
     writeFileSync(outsideProxy, '// evil proxy\n')
     const proxy = join(runtimeRoot(), 'node_modules', 'mcp-remote', 'dist', 'proxy.js')
     rmSync(proxy)
-    symlinkSync(outsideProxy, proxy)
+    if (!trySymlink(outsideProxy, proxy, 'file')) {
+      t.skip(NO_SYMLINKS)
+      return
+    }
 
     const status = inspectMcpRemoteRuntime()
     assert.strictEqual(status.status, 'invalid')
     assert.match(status.reason ?? '', /proxy\.js .*outside the runtime root/)
   })
 
-  it('rejects a symlinked package manifest whose target escapes the runtime root', () => {
+  it('rejects a symlinked package manifest whose target escapes the runtime root', (t) => {
     seedRuntime()
     const outsideManifest = join(tmpHome, 'outside-manifest.json')
     writeFileSync(outsideManifest, JSON.stringify({ name: 'mcp-remote', version: MCP_REMOTE_VERSION, dependencies: {} }))
     const manifest = join(runtimeRoot(), 'node_modules', 'mcp-remote', 'package.json')
     rmSync(manifest)
-    symlinkSync(outsideManifest, manifest)
+    if (!trySymlink(outsideManifest, manifest, 'file')) {
+      t.skip(NO_SYMLINKS)
+      return
+    }
 
     const status = inspectMcpRemoteRuntime()
     assert.strictEqual(status.status, 'invalid')
@@ -1345,7 +1368,7 @@ describe('npm resolution (canonical, Node.js-anchored)', () => {
     }
   })
 
-  it('rejects a candidate whose symlink target escapes the canonical prefix', () => {
+  it('rejects a candidate whose symlink target escapes the canonical prefix', (t) => {
     const dir = layoutDir()
     try {
       const bin = join(dir, 'bin')
@@ -1355,7 +1378,11 @@ describe('npm resolution (canonical, Node.js-anchored)', () => {
       // Anchored candidate at ../lib/node_modules/npm/bin/npm-cli.js → outside target.
       const anchored = join(dir, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
       mkdirSync(dirname(anchored), { recursive: true })
-      symlinkSync(evilCli, anchored)
+      if (!trySymlink(evilCli, anchored, 'file')) {
+        rmSync(evil, { recursive: true, force: true })
+        t.skip(NO_SYMLINKS)
+        return
+      }
       assert.throws(
         () => resolveNpmCommandForExecPath(exec, 'linux'),
         (err: unknown) => {
@@ -1371,7 +1398,7 @@ describe('npm resolution (canonical, Node.js-anchored)', () => {
     }
   })
 
-  it('rejects a lexical-prefix escape (prefix-evil is not inside prefix)', () => {
+  it('rejects a lexical-prefix escape (prefix-evil is not inside prefix)', (t) => {
     const dir = layoutDir()
     try {
       const install = join(dir, 'node')
@@ -1380,7 +1407,11 @@ describe('npm resolution (canonical, Node.js-anchored)', () => {
       const evilCli = writeCli(join(`${install}-evil`, 'lib', 'node_modules', 'npm', 'bin'))
       const anchored = join(install, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')
       mkdirSync(dirname(anchored), { recursive: true })
-      symlinkSync(evilCli, anchored) // target starts with <install>-evil, not <install>/
+      // The target starts with <install>-evil, not <install>/.
+      if (!trySymlink(evilCli, anchored, 'file')) {
+        t.skip(NO_SYMLINKS)
+        return
+      }
       assert.throws(() => resolveNpmCommandForExecPath(exec, 'linux'), McpRemoteRuntimeError)
     } finally {
       rmSync(dir, { recursive: true, force: true })
