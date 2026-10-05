@@ -16,7 +16,7 @@ No harness relies on npm `postinstall` hooks. See `openspec/changes/cross-harnes
 
 ## What it includes
 
-- 18 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, saved N|Solid assets, vulnerability analysis, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimization validation, and switching NodeSource organizations.
+- 24 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, logs, saved N|Solid assets, vulnerability analysis, dependency behavior in production, release comparison, alert rules, agent configuration, fleet health, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimization validation, and switching NodeSource organizations.
 - Four MCP servers: `nsolid-console`, `ns-benchmark`, `ncm`, and `nsolid` (preview; see [N|Solid](#nsolid-preview)).
 - Explicit OAuth setup against NodeSource accounts. You need a NodeSource account with access to the target N|Solid organization.
 
@@ -77,7 +77,7 @@ If a browser does not open automatically (headless CI, devcontainer, agent host,
 
 ## N|Solid (preview)
 
-The new N|Solid backend replaces the console. Its MCP server is `nsolid`; the current console's stays `nsolid-console`, so the two can be installed side by side while organizations move over. The skills that read N|Solid data use its MCP server and scripts: CPU, memory and leak analysis, capturing, analyzing and downloading assets, events, traces, runtime vulnerabilities and SBOMs. Benchmarks (`ns-benchmark`) and package health (`ncm`) still use NodeSource credentials. N|Solid has settings of its own, not NodeSource credentials:
+The new N|Solid backend replaces the console. Its MCP server is `nsolid`; the current console's stays `nsolid-console`, so the two can be installed side by side while organizations move over. The skills that read N|Solid data use its MCP server and scripts: CPU, memory and leak analysis, capturing, analyzing and downloading assets, events, traces, runtime vulnerabilities and SBOMs. Six use what only the new backend has: `ns-manage-alerts` (alert rules, checked against what they would have caught, and triage), `ns-analyze-release` (what a release changed, and marking releases and uploading sourcemaps from CI), `ns-analyze-behaviors` (dependencies doing something new in production), `ns-configure-agents` (desired configs, previewed and time-boxed), `ns-fleet-health` (a briefing of what needs attention) and `ns-analyze-logs`. `ns-node-upgrade` also checks the Node.js versions production runs. Benchmarks (`ns-benchmark`) and package health (`ncm`) still use NodeSource credentials. N|Solid has settings of its own, not NodeSource credentials:
 
 | Setting | Environment | `~/.agents/.nsolid-auth.json` |
 | --- | --- | --- |

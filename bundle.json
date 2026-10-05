@@ -16,9 +16,27 @@
       "requiresMcp": ["nsolid"]
     },
     {
+      "name": "ns-analyze-behaviors",
+      "path": "skills/ns-analyze-behaviors",
+      "description": "Investigate dependencies that newly run programs, use the network or touch files in production",
+      "requiresMcp": ["nsolid"]
+    },
+    {
       "name": "ns-analyze-event",
       "path": "skills/ns-analyze-event",
       "description": "Analyze event loop delays and identify blocking operations in production",
+      "requiresMcp": ["nsolid"]
+    },
+    {
+      "name": "ns-analyze-logs",
+      "path": "skills/ns-analyze-logs",
+      "description": "Search and analyze application logs, by request, process or incident",
+      "requiresMcp": ["nsolid"]
+    },
+    {
+      "name": "ns-analyze-release",
+      "path": "skills/ns-analyze-release",
+      "description": "Explain what a release changed in CPU and behavior, and mark releases from CI",
       "requiresMcp": ["nsolid"]
     },
     {
@@ -46,6 +64,12 @@
       "requiresMcp": ["ns-benchmark"]
     },
     {
+      "name": "ns-configure-agents",
+      "path": "skills/ns-configure-agents",
+      "description": "Change agent settings such as tracing or continuous profiling, previewed and time-boxed",
+      "requiresMcp": ["nsolid"]
+    },
+    {
       "name": "ns-cpu-spike-analysis",
       "path": "skills/ns-cpu-spike-analysis",
       "description": "Profile CPU usage of running production processes to identify bottlenecks",
@@ -58,6 +82,12 @@
       "requiresMcp": ["nsolid"]
     },
     {
+      "name": "ns-fleet-health",
+      "path": "skills/ns-fleet-health",
+      "description": "Brief what needs attention across the fleet: hot, crashing, alerting and at-risk processes",
+      "requiresMcp": ["nsolid"]
+    },
+    {
       "name": "ns-generate-asset",
       "path": "skills/ns-generate-asset",
       "description": "Generate N|Solid diagnostics assets from production processes",
@@ -67,6 +97,12 @@
       "name": "ns-generate-sbom",
       "path": "skills/ns-generate-sbom",
       "description": "Generate a runtime Software Bill of Materials: what running apps installed and loaded",
+      "requiresMcp": ["nsolid"]
+    },
+    {
+      "name": "ns-manage-alerts",
+      "path": "skills/ns-manage-alerts",
+      "description": "Define, tune and triage alert rules, checking what each would have caught",
       "requiresMcp": ["nsolid"]
     },
     {
