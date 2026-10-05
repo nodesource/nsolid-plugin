@@ -16,8 +16,8 @@ No harness relies on npm `postinstall` hooks. See `openspec/changes/cross-harnes
 
 ## What it includes
 
-- 17 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, saved N|Solid assets, vulnerability analysis, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimization validation, and switching NodeSource organizations.
-- Three MCP servers: `nsolid-console`, `ns-benchmark`, and `ncm`.
+- 18 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, saved N|Solid assets, vulnerability analysis, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimization validation, and switching NodeSource organizations.
+- Four MCP servers: `nsolid-console`, `ns-benchmark`, `ncm`, and `nsolid` (preview; see [N|Solid](#nsolid-preview)).
 - Explicit OAuth setup against NodeSource accounts. You need a NodeSource account with access to the target N|Solid organization.
 
 ## Structure
@@ -74,6 +74,23 @@ If a browser does not open automatically (headless CI, devcontainer, agent host,
 **Token lifecycle:** Expired credentials trigger re-authentication during explicit setup/login. Runtime MCP wrappers fail with an actionable, version-pinned `Run: npx -y nsolid-plugin@<plugin-version> setup --harness <harness>` message if credentials are missing/expired **or the MCP bridge runtime is missing/corrupt**. Credentials are shared across harnesses — which also means there is only ever one authenticated NodeSource org at a time. If you belong to more than one org, use `nsolid-plugin switch-org --harness <harness>` to force a fresh sign-in and pick a different one; see [Switching organizations](#switching-organizations) below.
 
 **`mcpUrl` derivation:** Always built from the org's UUID (`consoleId`/`organizationId`), never from `consoleUrl`'s hostname label — a console may be reachable at a friendly display alias (e.g. `homedepot-nucleus-stage-1.saas.nodesource.io`), but the underlying MCP ingress route is only ever provisioned under the org's UUID, so using the alias verbatim produces a dead endpoint. `consoleUrl` is only consulted for its environment suffix (`saas.nodesource.io`, `staging.saas.nodesource.io`, etc.), which must be the exact suffix or a dot-delimited deeper suffix — a hostname where `saas` is merely a substring of a larger label (e.g. `foo-saas.nodesource.io`) is rejected. This gives `https://<organizationId>.mcp.<suffix>/`, always over `https`. Computed and stored on every fresh OAuth completion (`setup`, `switch-org`); a stored/explicit `credentials.mcpUrl` — including a legitimate custom operator override — still always takes priority over re-deriving. If `consoleUrl` doesn't match a recognized NodeSource pattern, fresh OAuth fails with an actionable error and never silently persists a guessed production URL, and any previously stored credentials are left unchanged.
+
+## N|Solid (preview)
+
+The new N|Solid backend replaces the console. Its MCP server is `nsolid`; the current console's stays `nsolid-console`, so the two can be installed side by side while organizations move over. The skills that read N|Solid data use its MCP server and scripts: CPU, memory and leak analysis, capturing, analyzing and downloading assets, events, traces, runtime vulnerabilities and SBOMs. Benchmarks (`ns-benchmark`) and package health (`ncm`) still use NodeSource credentials. N|Solid has settings of its own, not NodeSource credentials:
+
+| Setting | Environment | `~/.agents/.nsolid-auth.json` |
+| --- | --- | --- |
+| MCP server URL | `NSOLID_MCP_URL` | `mcpUrl` |
+| API URL (the skills' scripts) | `NSOLID_API_URL` | `apiUrl` |
+| API token | `NSOLID_API_TOKEN` | `token` |
+| Tenant, when the token can use several | `NSOLID_TENANT` | `tenant` |
+
+The environment wins over the file. The token is an N|Solid API token. Reading needs the `read` scope. Capturing profiles, heap samples, heap snapshots and heap tracking needs `operate`, or a token limited to the permissions it uses (`nsolid:generate-cpu-profile`, `nsolid:generate-heap-sample`, `nsolid:generate-heap-snapshot`). Downloading a heap snapshot needs the permission to take one. URLs must use https, except for `localhost`. Without these settings the `nsolid` MCP server is left out of direct installs, and its wrapper says how to configure it.
+
+The scripts the N|Solid skills share live in `skill-assets/`: `nsolid-api.cjs` (settings and requests), `fetch-nsolid-asset.cjs` (downloads to `.nsolid/assets/`), `workspace-delta.cjs` (reads a profile's frame from the workspace before asking the running process) and the report renderer. `ns-generate-sbom` saves CycloneDX documents, and a page to read them, under `.nsolid/sbom/`.
+
+With the N|Solid server, `ns-cpu-spike-analysis` also writes an HTML report (`.nsolid/reports/`), and `ns-analyze-asset` offers the same for any CPU profile: an interactive flame graph, time by package, the heaviest functions, and the process's CPU and heap around the profile, in one file that opens anywhere without network. The renderer, `skill-assets/nsolid-report.cjs`, is built in the N|Solid Console's repository (`packages/viz`) and copied here; rebuild it there rather than editing it.
 
 ## Per-harness install
 

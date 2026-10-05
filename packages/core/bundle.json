@@ -7,31 +7,31 @@
       "name": "ns-advanced-memory-leak-hunter",
       "path": "skills/ns-advanced-memory-leak-hunter",
       "description": "Perform deep memory analysis to identify and locate memory leaks in production",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-analyze-asset",
       "path": "skills/ns-analyze-asset",
       "description": "Load and analyze N|Solid saved assets (CPU profiles, heap snapshots)",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-analyze-event",
       "path": "skills/ns-analyze-event",
       "description": "Analyze event loop delays and identify blocking operations in production",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-analyze-tracing",
       "path": "skills/ns-analyze-tracing",
       "description": "Collect and analyze distributed traces for request flow analysis",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-analyze-vulnerabilities",
       "path": "skills/ns-analyze-vulnerabilities",
       "description": "Scan running production memory for actively-exploitable CVEs",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-audit-dependencies",
@@ -49,31 +49,31 @@
       "name": "ns-cpu-spike-analysis",
       "path": "skills/ns-cpu-spike-analysis",
       "description": "Profile CPU usage of running production processes to identify bottlenecks",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-download-asset",
       "path": "skills/ns-download-asset",
-      "description": "Download a raw N|Solid diagnostic asset (heap snapshot, CPU profile, heap profile) to local disk",
-      "requiresMcp": ["nsolid-console"]
+      "description": "Download a raw N|Solid diagnostic asset (heap snapshot, CPU profile, heap profile, heap tracking) to local disk",
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-generate-asset",
       "path": "skills/ns-generate-asset",
       "description": "Generate N|Solid diagnostics assets from production processes",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-generate-sbom",
       "path": "skills/ns-generate-sbom",
-      "description": "Generate Software Bill of Materials for project dependency provenance",
-      "requiresMcp": ["ncm"]
+      "description": "Generate a runtime Software Bill of Materials: what running apps installed and loaded",
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-memory-spike-analysis",
       "path": "skills/ns-memory-spike-analysis",
       "description": "Analyze memory spikes and suspected leaks via baseline/peak heap sampling comparison",
-      "requiresMcp": ["nsolid-console"]
+      "requiresMcp": ["nsolid"]
     },
     {
       "name": "ns-node-upgrade",
@@ -132,6 +132,14 @@
       "headers": {
         "X-Nsolid-Service-Token": "${AUTH_TOKEN}"
       }
+    },
+    {
+      "name": "nsolid",
+      "url": "${NSOLID_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${NSOLID_API_TOKEN}"
+      },
+      "credentials": "nsolid"
     }
   ],
   "auth": {

@@ -28,6 +28,12 @@ export interface McpServerRef {
   name: string;
   url: string;
   headers: Record<string, string>;
+  /**
+   * Where the server's variables come from. Unset: NodeSource credentials.
+   * 'nsolid': the N|Solid server's settings (NSOLID_MCP_URL and NSOLID_API_TOKEN, or
+   * ~/.agents/.nsolid-auth.json), see auth/nsolid-settings.ts.
+   */
+  credentials?: 'nsolid';
 }
 
 export interface Credentials {

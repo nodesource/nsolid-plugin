@@ -1,30 +1,32 @@
 ---
 name: ns-analyze-vulnerabilities
 description: >-
-  Analyzes live runtime vulnerabilities loaded by connected N|Solid Node.js processes. Use when the user wants to know which CVEs are actually present in running apps, active exploitable/live vulnerabilities, zero-day exposure, supply-chain risk in production, or production package risk. For static npm-audit-style project dependency scans, use ns-audit-dependencies instead.
+  Analyzes live runtime vulnerabilities in the packages connected N|Solid Node.js processes run, from N|Solid. Use when the user wants to know which CVEs are actually present in running apps, active exploitable/live vulnerabilities, malicious packages, zero-day exposure, supply-chain risk in production, Node.js runtime advisories, or production package risk. For static npm-audit-style project dependency scans, use ns-audit-dependencies instead.
 ---
 
+This skill reads vulnerability findings through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names (production and staging are usually separate tenants).
+
 ### 1. High-Level Overview
-- Call the `vulnerabilities` tool with `showLimit`/`page` when scanning large fleets.
-- Summarize the output to identify which application (`app`) has the most critical issues.
+- Call `list_vulnerabilities`: open findings, most severe first. Each names its advisory (GHSA, a malicious-package report MAL, or a Node.js core advisory NODE-CORE), the app, severity, the vulnerable packages with the version that fixes them, the app's own dependencies that bring each in (`via`), and the runtime evidence: `installed`, `loaded` (required by the app) or `running` (seen in CPU profiles).
+- Narrow large fleets with `app`, `severity` (at least), or `where`, e.g. `severity >= "high" && evidence >= "loaded"` (`expression_help` with context `finding` lists the fields).
+- Summarize which app has the most critical issues, and lead with malicious packages (MAL-…) when there are any.
+- For the Node.js runtime itself, `list_runtimes` gives each Node.js version in use: its core advisories, the release that fixes them, and whether its line is at or near end of life.
 
 ### 2. Detail Per App
-- For a specific vulnerable app, call `application-packages` (parameters: exact `app` name, `mode='flat'`).
-- **Timeout note**: The MCP server allows 180s for this streaming endpoint, but the MCP client may drop after 60s. If it times out, proceed using data already collected from the `vulnerabilities` tool.
+- For one advisory, call `get_vulnerability`: its details and references, every app it was found in, and each installed copy — where it is installed, whether it was loaded, the processes that have it, and the shortest chain from the app's own dependency down to it. The first package in a chain is the one to upgrade or replace.
+- For one package, `get_sbom` with the `app` and `package` gives every installed copy and why it is there; `find_package` shows which processes and apps run which versions of it.
 
-### 3. Discover First Detection Time
-- Call `events-historic` (parameters: `type='new-vulnerability-found'`, plus `app`, `start`, and `end` when known).
-- **CRITICAL**: The MCP tool description may incorrectly say `vulnerability-detected`. Do not use that. Valid Security Events: `new-vulnerability-found`, `package-vulnerabilities-updated`, `vulnerabilities-database-updated`, `active-vulns-updated`.
-- If this endpoint returns `null`, it means there are no matched historical events. Proceed without failing the audit.
+### 3. When It Was First Seen
+- Each finding's `openedAt` is when N|Solid first matched it in that app. A finding resolves when the vulnerable version goes, and reopens if it comes back.
 
 ### 4. Propose and Implement
 - Locate the target `package.json` in the user's workspace.
-- Propose an update to a patched version.
+- Propose an update to a patched version: of the vulnerable package when the app depends on it directly, otherwise of the dependency at the top of its chain.
 - Wait for user approval if the update represents a major breaking change. Otherwise, implement the fix.
 
 ### 5. Verify
-- Re-run the `vulnerabilities` tool to confirm the vulnerability is resolved.
-- If results do not change, note that verification may require app restart/redeploy or package refresh before live data updates.
+- Re-run `list_vulnerabilities` (or `get_vulnerability`) to confirm the vulnerability is resolved.
+- N|Solid reads each process's packages when it connects and every 6 hours, so a fix shows once the new version is deployed and running. If results do not change, say that verification needs the redeploy; `refresh_agent` with `what: "packages"` asks a running process for its packages now, when the token may act.
 
 ### 6. Present a Report
 - Emit the analysis directly in chat as markdown:
@@ -34,7 +36,7 @@ description: >-
   - `## Findings`
   - `## Remediation Plan`
   - `## Verification`
-- Ground every CVE, package, version, and severity in `vulnerabilities`, `application-packages`, or provided evidence.
+- Ground every CVE, package, version, and severity in `list_vulnerabilities`, `get_vulnerability`, `get_sbom`, or provided evidence.
 
 ### 7. Write the Report to Disk
 - Ask the user if they want to save the report to disk.
@@ -42,5 +44,6 @@ description: >-
 
 ## Guardrails
 - NEVER suggest bumping a major version without explicitly warning the user about potential breaking changes.
-- ALWAYS base your analysis on the actual output from the `vulnerabilities` and `application-packages` tools.
-- Only analyze the application requested, or the one with the highest vulnerabilities if none is specified.
+- ALWAYS base your analysis on the actual output from the N|Solid tools.
+- A malicious package is critical whatever else is true: say so first, and recommend removing it, not upgrading it.
+- Only analyze the application requested, or the one with the most severe findings if none is specified.

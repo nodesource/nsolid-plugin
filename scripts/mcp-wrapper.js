@@ -19,7 +19,8 @@ const MCP_REMOTE_VERSION = "0.1.38"
 const PLUGIN_VERSION = "1.0.3"
 const STARTUP_FAILURE_WINDOW_MS = 15000
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
-const SERVER_DEFINITIONS = {"nsolid-console":{"url":"${MCP_URL}","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ns-benchmark":{"url":"https://benchmark.mcp.saas.nodesource.io/mcp","headers":{"X-Nsolid-Org-Id":"${AUTH_ORG_ID}","X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ncm":{"url":"https://mcp.ncm.nodesource.com","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}}}
+const NSOLID_AUTH_FILE = path.join(os.homedir(), '.agents', '.nsolid-auth.json')
+const SERVER_DEFINITIONS = {"nsolid-console":{"url":"${MCP_URL}","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ns-benchmark":{"url":"https://benchmark.mcp.saas.nodesource.io/mcp","headers":{"X-Nsolid-Org-Id":"${AUTH_ORG_ID}","X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ncm":{"url":"https://mcp.ncm.nodesource.com","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"nsolid":{"url":"${NSOLID_MCP_URL}","headers":{"Authorization":"Bearer ${NSOLID_API_TOKEN}"},"credentials":"nsolid"}}
 const SERVER_NAMES = new Set(Object.keys(SERVER_DEFINITIONS))
 const VARIABLE_PATTERN = new RegExp("\\$\\{(\\w+)\\}", 'g')
 const HARNESS_NAMES = new Set(["claude", "codex", "opencode", "antigravity", "pi"])
@@ -33,9 +34,51 @@ if (!HARNESS_NAMES.has(harness)) {
   fail(`Invalid harness argument: ${harness ?? '(missing)'}`)
 }
 
-const credentials = readCredentials()
-const server = resolveServer(serverName, credentials)
+const server = SERVER_DEFINITIONS[serverName].credentials === 'nsolid'
+  ? resolveNsolidServer(serverName, readNsolidSettings())
+  : resolveServer(serverName, readCredentials())
 await runMcpRemote(server.url, server.headers)
+
+// N|Solid servers have settings of their own, not NodeSource credentials: the
+// MCP URL and an N|Solid API token, from the environment or NSOLID_AUTH_FILE.
+function readNsolidSettings () {
+  let file = {}
+  if (existsSync(NSOLID_AUTH_FILE)) {
+    try {
+      file = JSON.parse(readFileSync(NSOLID_AUTH_FILE, 'utf8'))
+    } catch (err) {
+      fail(`N|Solid settings in ${NSOLID_AUTH_FILE} are unreadable: ${err.message}`)
+    }
+  }
+  const mcpUrl = process.env.NSOLID_MCP_URL || file.mcpUrl
+  const token = process.env.NSOLID_API_TOKEN || file.token
+  if (typeof mcpUrl !== 'string' || !mcpUrl || typeof token !== 'string' || !token) {
+    fail(`N|Solid is not configured: set NSOLID_MCP_URL and NSOLID_API_TOKEN, or write ${NSOLID_AUTH_FILE} with "mcpUrl" and "token"`)
+  }
+  return { mcpUrl, token }
+}
+
+function resolveNsolidServer (name, settings) {
+  const definition = SERVER_DEFINITIONS[name]
+  const variables = { NSOLID_MCP_URL: settings.mcpUrl, NSOLID_API_TOKEN: settings.token }
+  const url = expandTemplate(definition.url, variables)
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    fail(`Invalid URL for the N|Solid MCP server: ${name}`)
+  }
+  // The token travels with every request: plain http only to this machine.
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && local)) {
+    fail(`The N|Solid MCP URL must use https (plain http only for localhost): ${name}`)
+  }
+  const headers = Object.fromEntries(Object.entries(definition.headers ?? {}).map(([key, value]) => {
+    if (typeof value !== 'string') fail(`Invalid header for the N|Solid MCP server: ${name}`)
+    return [key, expandTemplate(value, variables)]
+  }))
+  return { url, headers }
+}
 
 function readCredentials () {
   if (!existsSync(AUTH_FILE)) {

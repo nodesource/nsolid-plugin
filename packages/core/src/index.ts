@@ -21,6 +21,7 @@ import { PLUGIN_OWNED_HARNESSES, NATIVE_PLUGIN_HARNESSES } from './types.js'
 import { validateBundle } from './validate.js'
 import { ensureAuthenticated, loadCredentials, isExpired, removeCredentials } from './auth/index.js'
 import { resolveMcpUrl } from './auth/mcp-url.js'
+import { readNsolidSettings, nsolidSettingsPath } from './auth/nsolid-settings.js'
 import { installSkills, installSkillsToDirectory, uninstallSkills, SkillCopyError } from './skills/skill-copier.js'
 import { linkSkillsToHarness, unlinkSkillsFromHarness } from './skills/skill-linker.js'
 import {
@@ -344,15 +345,27 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
     logger.debug('install.variables.derived', { orgId: credentials.organizationId })
   }
 
+  // N|Solid servers take the N|Solid settings; without them they are left out.
+  const nsolid = readNsolidSettings()
+  if (nsolid) {
+    variables.NSOLID_MCP_URL = nsolid.mcpUrl
+    variables.NSOLID_API_TOKEN = nsolid.token
+  }
+  const mcpServers = bundle.mcpServers.filter((s) => s.credentials !== 'nsolid' || nsolid)
+  const skippedNsolid = bundle.mcpServers.filter((s) => s.credentials === 'nsolid' && !nsolid)
+
   const mcpConfigPath = adapter.getMcpConfigPath()
 
-  if (adapter.supportsMcp() && bundle.mcpServers.length > 0 && canConfigureMcp) {
+  if (adapter.supportsMcp() && mcpServers.length > 0 && canConfigureMcp) {
     try {
-      await writeMcpConfig(options.harness, bundle.mcpServers, variables, {
+      await writeMcpConfig(options.harness, mcpServers, variables, {
         configPath: mcpConfigPath ?? undefined,
         logger,
       })
-      result.mcpServersConfigured = bundle.mcpServers.map((s) => s.name)
+      result.mcpServersConfigured = mcpServers.map((s) => s.name)
+      if (skippedNsolid.length > 0) {
+        progress.step('N|Solid MCP', `skipped ${skippedNsolid.map((s) => s.name).join(', ')} — set NSOLID_MCP_URL and NSOLID_API_TOKEN, or write ${nsolidSettingsPath()}`)
+      }
       const targetConfigPath = mcpConfigPath ?? adapter.getMcpConfigPath() ?? 'MCP config'
       progress.step('Merging MCP servers', `${result.mcpServersConfigured.join(', ')} into ${targetConfigPath}\n(backup saved)`)
       logger.info('install.mcp.done', { harness: options.harness, servers: result.mcpServersConfigured })

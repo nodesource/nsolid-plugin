@@ -23,6 +23,14 @@
         "ncm",
         "claude"
       ]
+    },
+    "nsolid": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp-wrapper.js",
+        "nsolid",
+        "claude"
+      ]
     }
   }
 }

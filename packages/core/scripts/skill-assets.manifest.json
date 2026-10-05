@@ -3,17 +3,38 @@
     "ns-advanced-memory-leak-hunter",
     "ns-analyze-asset",
     "ns-benchmark-run",
-    "ns-cpu-spike-analysis",
-    "ns-generate-asset",
     "ns-memory-spike-analysis",
     "ns-validate-optimization"
   ],
-  "fetch-asset.cjs": [
+  "nsolid-api.cjs": [
+    "ns-advanced-memory-leak-hunter",
+    "ns-analyze-asset",
+    "ns-cpu-spike-analysis",
+    "ns-download-asset",
+    "ns-generate-asset",
+    "ns-generate-sbom",
+    "ns-memory-spike-analysis"
+  ],
+  "fetch-nsolid-asset.cjs": [
     "ns-advanced-memory-leak-hunter",
     "ns-analyze-asset",
     "ns-cpu-spike-analysis",
     "ns-download-asset",
     "ns-generate-asset",
     "ns-memory-spike-analysis"
+  ],
+  "workspace-delta.cjs": [
+    "ns-advanced-memory-leak-hunter",
+    "ns-analyze-asset",
+    "ns-analyze-event",
+    "ns-cpu-spike-analysis"
+  ],
+  "render-cpu-report.cjs": [
+    "ns-analyze-asset",
+    "ns-cpu-spike-analysis"
+  ],
+  "nsolid-report.cjs": [
+    "ns-analyze-asset",
+    "ns-cpu-spike-analysis"
   ]
 }

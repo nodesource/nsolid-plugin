@@ -24,7 +24,8 @@ const McpUrlSchema = z.string().min(1).refine((value) => {
 const McpServerRefSchema = z.object({
   name: z.string(),
   url: McpUrlSchema,
-  headers: z.record(z.string(), z.string())
+  headers: z.record(z.string(), z.string()),
+  credentials: z.literal('nsolid').optional()
 }).strict()
 
 const AuthConfigSchema = z.object({

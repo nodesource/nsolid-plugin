@@ -1,66 +1,57 @@
 ---
 name: ns-generate-asset
 description: >-
-  Captures a new N|Solid diagnostic asset for a connected Node.js app. Use when the user explicitly asks to collect, capture, or generate a CPU profile, flamegraph, heap sample, heap snapshot, or heap tracking asset and wants it saved or handed off for analysis. For existing assets, use ns-analyze-asset instead.
+  Captures a new N|Solid diagnostic asset for a connected Node.js app through N|Solid. Use when the user explicitly asks to collect, capture, or generate a CPU profile, flamegraph, heap sample, heap snapshot, or heap tracking asset and wants it saved or handed off for analysis. For existing assets, use ns-analyze-asset instead.
 ---
 
-### 1. Resolve Scope
-- The target app is already resolved (workspace mapping, explicit `Application: <name>`, or user confirmation). Do not switch apps.
-- Call `information-dashboard` with `q: "app=<appName>"` and `start: "5m"`.
-- No agents → stop and report no connected agents. Do not profile a different app.
-- One agent → use its `id`.
-- Multiple agents → list each (`id`, hostname, key metrics) and ask the user to choose. Only proceed after selection.
+This skill captures assets through the N|Solid MCP server (`nsolid`) and saves them with a bundled script. The script needs the server's settings: `NSOLID_API_URL` and `NSOLID_API_TOKEN` in the environment, or `~/.agents/.nsolid-auth.json` with `apiUrl` and `token` (plus `tenant` when the token can use several tenants).
 
-### 2. Choose Asset Type
+### 1. Pick the Tenant
+- The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names (production and staging are usually separate tenants). Pass the same tenant to every call, and set `NSOLID_TENANT` for the script.
+
+### 2. Resolve Scope
+- The target app is already resolved (workspace mapping, explicit `Application: <name>`, or user confirmation). Do not switch apps.
+- Call `fleet_snapshot` with `where: 'app == "<appName>"'`.
+- No agents → stop and report no connected agents. Do not capture from a different app.
+- One agent → use its `agentId`.
+- Multiple agents → list each (`agentId`, `hostname`, `cpu_percent`, `used_heap_size`) and ask the user to choose. Only proceed after selection.
+- For a worker thread, `list_threads` with the `agentId` gives each thread's `threadId` and name. The main thread is `0`.
+
+### 3. Choose Asset Type
 - Supported types: CPU profile, heap sample, heap snapshot, heap tracking.
 - Match the user's request:
-  - CPU profile / cpuprofile / flamegraph → `profile`.
-  - Heap sample / heap sampling / memory sample → `heap-sampling`.
-  - Heap snapshot / full heap snapshot → `snapshot`.
-  - Heap tracking / allocation tracking / object relocation tracking → `track-heap-objects`.
-- Default to `heap-sampling` for memory concerns and `profile` for CPU concerns.
+  - CPU profile / cpuprofile / flamegraph → `take_cpu_profile`.
+  - Heap sample / heap sampling / memory sample → `take_heap_sampling`.
+  - Heap snapshot / full heap snapshot → `take_heap_snapshot`.
+  - Heap tracking / allocation tracking / object tracking → `take_heap_profile`.
+- Default to heap sampling for memory concerns and a CPU profile for CPU concerns.
 - If ambiguous, ask the user to choose. Do not guess. Only proceed after the user specifies or confirms.
 
-### 3. Create the Asset
-- Use the agent `id` from Step 1 as the `id` parameter.
-- CPU profile: `profile` with `duration: 30`, `threadId: 0`.
-- Heap sample: `heap-sampling` with `duration: 30`; add `threadId: 0` when the main thread is intended.
-- Heap snapshot: `snapshot`; add `threadId: 0` when the main thread is intended.
-- Heap tracking: `track-heap-objects` with `duration: 30`; add `threadId: 0` when the main thread is intended. Include `trackAllocations: true` when the user asks for allocation stacks.
-- Record the exact returned asset ID and app name for downloading and reporting.
+### 4. Create the Asset
+- Each tool waits until the asset is stored and returns its `assetId`; there is nothing to poll.
+- CPU profile: `take_cpu_profile` with the `agentId`, `durationMs: 30000` and `threadId: 0`. It also returns the hottest functions.
+- Heap sample: `take_heap_sampling` with the `agentId`, `durationMs: 30000` and `threadId: 0`. Add `sampleInterval` (bytes) or `stackDepth` only when the user asks for them.
+- Heap snapshot: `take_heap_snapshot` with the `agentId` and `threadId: 0`. The application pauses while the snapshot is written: say so before capturing.
+- Heap tracking: `take_heap_profile` with the `agentId`, `durationMs: 30000` and `threadId: 0`. Add `trackAllocations: true` when the user asks for allocation stacks. It ends with a snapshot, so the application pauses too.
+- If a tool answers that the agent is already profiling (continuous CPU profiling is on), `list_assets` with the `agentId` and `kind: "cpu_profile"` lists its continuous profiles: offer the newest instead.
+- If a tool is refused because the tenant used its monthly allowance (`quota_exceeded`), report that and when it resets, and stop.
+- Record the exact `assetId`, app name and `agentId` for downloading and reporting.
 
-### 4. Wait
-Run the bundled wait script (use the absolute path of the directory where you read this SKILL.md):
-- CPU profile: `node "<skill-dir>/wait.cjs" 35`.
-- Heap sample: `node "<skill-dir>/wait.cjs" 30`.
-- Heap snapshot: at least `40` seconds before checking summary readiness: `node "<skill-dir>/wait.cjs" 40`.
-- Heap tracking: `node "<skill-dir>/wait.cjs" 35`.
-
-### 5. Check Readiness
-- CPU profile and heap sample: call `asset-summary` on the returned asset ID. If not ready, run `node "<skill-dir>/wait.cjs" 5` and retry on the same ID. Cap retries at **12**. If still not ready, report the asset ID and the pending state — do not invent analysis.
-- Heap snapshot: call `asset-summary` first. If the response says async, processing, pending, or summarization started, call `assets-in-progress`, then run `node "<skill-dir>/wait.cjs" 5`, then retry `asset-summary`. Cap retries at **12**. If still not ready, report the asset ID and the pending state — do not invent analysis.
-- Heap tracking: call `assets-in-progress`. If the returned asset ID is still in progress, run `node "<skill-dir>/wait.cjs" 5` and retry. Cap retries at **12**. Once it is no longer in progress, continue to download.
-- If `asset-summary` returns a tool error (auth, network, MCP failure), report the error and stop. Do not retry as if pending.
-
-### 6. Download
-- After the asset is ready, download it with the bundled script (use the absolute path of the directory where you read this SKILL.md):
+### 5. Download
+- Download the asset with the bundled script (use the absolute path of the directory where you read this SKILL.md):
   ```
-  node "<skill-dir>/fetch-asset.cjs" <assetId> <assetType> <appName>
+  node "<skill-dir>/fetch-nsolid-asset.cjs" <assetId> <appName>
   ```
-- Use these `<assetType>` values:
-  - CPU profile: `cpuprofile`.
-  - Heap sample: `heapprofile`.
-  - Heap snapshot: `heapsnapshot`.
-  - Heap tracking: `heapprofile`.
+- It writes `.nsolid/assets/<type>-<appName>-<assetIdPrefix>.<ext>` (`.cpuprofile`, `.heapprofile`, `.heapsnapshot` or `.heaptimeline`) and registers it in `.nsolid/assets/index.json`. A file already downloaded is reused.
+- Downloading a heap snapshot or a heap tracking file needs a token allowed to take them. If the script is refused, report the `assetId` and that this token can't download it.
 
-### 7. Report or Hand Off for Analysis
-- For capture-only requests, report asset type, asset ID, app name, agent ID, duration/thread ID, and local path.
-- If the user asked to analyze, summarize, interpret, or explain a CPU profile, heap sample, or heap snapshot, read and follow `../ns-analyze-asset/SKILL.md` after the asset is ready. Do not duplicate its analysis rules here.
-- Pass this handoff payload: `assetId`, `assetType` (`cpuprofile`, `heapprofile`, or `heapsnapshot`), `appName`, `agentId`, `threadId`, `duration`, and local path if downloaded.
-- For heap tracking, report capture metadata and local path. The resulting `heap-profile` asset cannot be summarized by `asset-summary`; do not route it to `ns-analyze-asset` or `ns-advanced-memory-leak-hunter`. The local `.heapprofile` saved via `fetch-asset.cjs` is the deliverable; inspect the raw file only if the user explicitly asks.
+### 6. Report or Hand Off for Analysis
+- For capture-only requests, report asset type, `assetId`, app name, `agentId`, duration/thread ID, and local path.
+- If the user asked to analyze, summarize, interpret, or explain the asset, read and follow `../ns-analyze-asset/SKILL.md` after the capture. Do not duplicate its analysis rules here.
+- Pass this handoff payload: `assetId`, the asset kind (`cpu_profile`, `heap_sampling`, `heap_snapshot` or `heap_profile`), `appName`, `agentId`, `threadId`, `durationMs`, and local path if downloaded.
 
 ## Guardrails
-- Do not use `runtime-code` or `workspace_delta`.
-- Waits and downloads use the bundled `wait.cjs` and `fetch-asset.cjs` scripts in this skill's directory. Do not use direct HTTP calls, `curl`, or ad hoc shell commands.
-- Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.
-- Do not use `assets-in-progress` as the first readiness check for CPU profiles or heap samples.
+- Do not use `get_source_code` or `workspace_delta`.
+- Downloads use the bundled `fetch-nsolid-asset.cjs` only. Do not use direct HTTP calls, `curl`, or ad hoc shell commands.
+- Never read a downloaded asset into context.
+- Prefer heap sampling to snapshots and heap tracking: both of those pause the application.

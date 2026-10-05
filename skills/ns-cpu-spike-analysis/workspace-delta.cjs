@@ -32,14 +32,14 @@ function main () {
 function printHelp () {
   process.stdout.write(
     'Usage:\n' +
-    '  node .agents/skills/ns-cpu-spike-analysis/workspace-delta.cjs <input.json>\n' +
-    '  printf \'%s\' \'<json>\' | node .agents/skills/ns-cpu-spike-analysis/workspace-delta.cjs\n\n' +
+    '  node <skill-dir>/workspace-delta.cjs <input.json>\n' +
+    '  printf \'%s\' \'<json>\' | node <skill-dir>/workspace-delta.cjs\n\n' +
     'Input JSON fields:\n' +
     '  workspaceRoot?: string\n' +
     '  targetAppName?: string\n' +
     '  runtimePath?: string\n' +
     '  workspaceRelativePath?: string\n' +
-    '  runtimeCode: string\n' +
+    '  runtimeCode?: string  (omit to look up the workspace code only, without a comparison)\n' +
     '  startLine?: number\n' +
     '  endLine?: number\n' +
     '  lineHint?: number\n' +
@@ -62,7 +62,8 @@ function readInput (argv) {
     throw new Error('Input JSON is empty.')
   }
 
-  return JSON.parse(raw)
+  // Windows PowerShell puts a byte-order mark in front of what it pipes.
+  return JSON.parse(raw.replace(/^﻿/, ''))
 }
 
 function computeWorkspaceDelta (input) {
@@ -88,28 +89,9 @@ function computeWorkspaceDelta (input) {
   const workspaceMatchesTargetApp = targetAppName && identity.name
     ? normalizeAppName(identity.name) === normalizeAppName(targetAppName)
     : null
-
-  if (runtimeCode.length === 0) {
-    return {
-      ok: false,
-      error: 'Input "runtimeCode" must be a non-empty string.',
-      workspaceRoot,
-      targetAppName,
-      workspaceIdentity: identity,
-      workspaceMatchesTargetApp,
-      comparisonSkippedReason: 'Runtime code is required to compute a workspace delta.',
-      runtimePath,
-      resolvedWorkspacePath: null,
-      pathMappingStrategy: null,
-      comparisonMode: null,
-      lineRange: null,
-      fileExists: false,
-      inSync: null,
-      workspaceHash: null,
-      workspaceCode: null,
-      diff: null
-    }
-  }
+  // Without runtime code, look the code up in the workspace only: the same
+  // identity check and path mapping, the lines around the frame, no diff.
+  const lookupOnly = runtimeCode.length === 0
 
   if (!targetAppName) {
     return {
@@ -206,6 +188,31 @@ function computeWorkspaceDelta (input) {
 
   const workspaceCode = lines.slice(sliceSelection.startLine - 1, sliceSelection.endLine).join('\n')
   const workspaceHash = createHash('sha256').update(workspaceCode).digest('hex')
+
+  if (lookupOnly) {
+    return {
+      ok: true,
+      workspaceRoot,
+      targetAppName,
+      workspaceIdentity: identity,
+      workspaceMatchesTargetApp,
+      comparisonSkippedReason: 'No runtime code was given: this is the workspace code, without a comparison.',
+      runtimePath,
+      resolvedWorkspacePath: resolved.relativePath,
+      pathMappingStrategy: resolved.strategy,
+      comparisonMode: sliceSelection.mode,
+      lineRange: {
+        startLine: sliceSelection.startLine,
+        endLine: sliceSelection.endLine
+      },
+      fileExists: true,
+      inSync: null,
+      workspaceHash,
+      workspaceCode,
+      diff: null
+    }
+  }
+
   const inSync = codesLikelyInSync(workspaceCode, runtimeCode)
 
   return {

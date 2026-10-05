@@ -52,3 +52,18 @@ own summary — it already reflects exactly what changed and what to do next.
 If the command fails, surface its error output directly; do not attempt to
 work around a failed OAuth flow (e.g. by editing
 `~/.agents/.nodesource-auth.json` by hand).
+
+### N|Solid: tenants, not organizations
+
+The skills that read N|Solid data use the N|Solid MCP server (`nsolid`), which has
+settings of its own: switching NodeSource organizations doesn't change it. A
+N|Solid token can reach several tenants, such as an organization's production and
+staging. Its tools take a `tenant`, and `list_tenants` shows the tenants the
+token reaches. If the user wants N|Solid data from another tenant:
+
+- Pass that tenant to the tools from now on.
+- To change the default the skills' scripts use, the user sets `NSOLID_TENANT`,
+  or `tenant` in `~/.agents/.nsolid-auth.json`. Tell them; don't edit the file
+  yourself.
+- A tenant the token can't reach needs another token from that tenant's
+  administrator. No sign-in flow here changes that.

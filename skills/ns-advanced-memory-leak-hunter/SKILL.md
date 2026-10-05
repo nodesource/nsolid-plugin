@@ -1,89 +1,88 @@
 ---
 name: ns-advanced-memory-leak-hunter
 description: >-
-  Performs an advanced N|Solid memory leak hunt comparing baseline vs peak heap evidence to isolate retained constructors, closures, and retainer paths. Use when the user reports recurring/staircase memory growth, elusive leaks, retained objects, closures holding references, or a standard heap sample/snapshot analysis was inconclusive. Prefer supplied baseline/peak assets; capture new samples only when needed.
+  Performs an advanced N|Solid memory leak hunt through N|Solid, comparing baseline vs peak heap evidence to isolate retained allocators, closures, and growing classes. Use when the user reports recurring/staircase memory growth, elusive leaks, retained objects, closures holding references, or a standard heap sample/snapshot analysis was inconclusive. Prefer supplied baseline/peak assets; capture new samples only when needed.
 ---
 
+This skill reads N|Solid data through the N|Solid MCP server (`nsolid`) and bundled scripts. The scripts need the server's settings: `NSOLID_API_URL` and `NSOLID_API_TOKEN` in the environment, or `~/.agents/.nsolid-auth.json` with `apiUrl` and `token` (plus `tenant` when the token can use several tenants).
+
 ### Phase 0: Reuse Evidence and Resolve Target
-1. If the user already supplied both baseline and peak evidence, skip straight to Phase 4.
-2. If no agent `id` is supplied, call `information-dashboard` (`q: "app=<appName>"`, `start: "5m"` when app is known) to resolve the required agent `id`; preserve the exact `appName` for downloads. Stop if no matching agent is connected.
+1. If the user already supplied both baseline and peak evidence (asset IDs or local files), skip straight to Phase 4.
+2. The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Pass it to every call, and set `NSOLID_TENANT` for the scripts.
+3. If no `agentId` is supplied, call `fleet_snapshot` with `where: 'app == "<appName>"'` and `sort: "used_heap_size"` to find the process; keep the exact `appName` for downloads. Stop if no matching process is connected.
+4. A leak can sit in a worker thread while the main thread looks fine: `list_threads` with the `agentId` shows each thread's heap. Capture the thread that grows (`threadId`).
 
 ### Phase 1: Establish the Baseline
-1. Take an initial low-overhead heap sample using `heap-sampling` (`id: <agentId>`, `duration: 30`).
-2. Run the wait script using the absolute path of the directory where you read this SKILL.md:
+1. Take an initial low-overhead heap sample: `take_heap_sampling` with the `agentId`, `durationMs: 30000` and the `threadId`. It waits for the sampling and returns its `assetId`.
+2. Call `heap_summary` on the baseline `assetId`. If it says the asset is not analyzed yet, run the wait script (use the absolute path of the directory where you read this SKILL.md) and ask again, up to **12** times; if still not ready, report the baseline asset ID and its state instead of continuing:
    ```
-   node "<skill-dir>/wait.cjs" 30
+   node "<skill-dir>/wait.cjs" 10
    ```
-3. Call `asset-summary` on the returned baseline asset ID. If not ready, run `node "<skill-dir>/wait.cjs" 10` and retry; use `assets-in-progress` only as a secondary queue clue. Cap retries at **12**; if still not ready, report the baseline asset ID and its pending state instead of continuing indefinitely.
-4. From the baseline summary, note the top allocating constructors (e.g., `Object`, `Array`, `system / Map`).
-5. Check `.nsolid/assets/index.json` and `.nsolid/assets/` for the same baseline asset ID. If it is already present locally, skip the download.
-6. If the baseline asset is not present, save it locally:
+3. From the baseline summary, note the top allocating functions and packages (`selfBytes`, `totalBytes`).
+4. Check `.nsolid/assets/index.json` for the baseline asset ID. If it is already there, skip the download; otherwise save it locally:
    ```
-   node "<skill-dir>/fetch-asset.cjs" <baselineAssetId> heapprofile <appName>
+   node "<skill-dir>/fetch-nsolid-asset.cjs" <baselineAssetId> <appName>
    ```
 
 ### Phase 2: Monitor RSS and Heap Growth
-1. Call `metrics-historic` with `field: ["rss", "heapUsed", "heapTotal", "loopEstimatedLag"]`, `q: "app=<appName>"` or `q: "id=<id>"`, and `start: "1h"`.
-2. Search for the "Sawtooth Pattern" (normal garbage collection) vs "Staircase Pattern" (unreleased memory).
-3. Identify the moment where `heapUsed` stops dropping to its original baseline.
+1. Call `query_metric` with `agentIds: [<agentId>]` and `from: "-1h"` for each of `rss`, `used_heap_size`, `total_heap_size` and `loop_estimated_lag` (for a worker, add `thread`).
+2. Search for the "Sawtooth Pattern" (normal garbage collection) vs the "Staircase Pattern" (unreleased memory).
+3. Identify the moment where `used_heap_size` stops dropping back to its original baseline.
 
 ### Phase 3: Capture the Peak / Leak State
-1. Once you confirm memory has substantially grown from the baseline, trigger a second analysis.
-2. Capture the peak with `heap-sampling` for 60 seconds. Requires the resolved agent `id`. Do not use `track-heap-objects`: the resulting `heap-profile` asset is not supported by `asset-summary`. When closure/retainer suspicion exists, correlate the peak sample's allocator call stacks with the source using `runtime-code` (Phase 5) instead.
-3. Wait for the operation to complete:
+1. Once you confirm memory has substantially grown from the baseline, capture the peak with `take_heap_sampling` for 60 seconds (`durationMs: 60000`) on the same `agentId` and `threadId`.
+2. Call `heap_summary` on the peak `assetId`, waiting and asking again as in Phase 1 if it is not analyzed yet.
+3. Check `.nsolid/assets/index.json` for the peak asset ID; if it is not there, save it:
    ```
-   node "<skill-dir>/wait.cjs" 60
+   node "<skill-dir>/fetch-nsolid-asset.cjs" <peakAssetId> <appName>
    ```
-   Then call `asset-summary` on the peak asset ID. If not ready, run `node "<skill-dir>/wait.cjs" 10` and retry; use `assets-in-progress` only as a secondary queue clue. Cap retries at **12**; if still not ready, report the peak asset ID and its pending state instead of continuing indefinitely.
-4. Analyze the `asset-summary`.
-5. Check `.nsolid/assets/index.json` and `.nsolid/assets/` for the same peak asset ID. If it is already present locally, skip the download.
-6. If the peak asset is not present, save it locally:
-   ```
-   node "<skill-dir>/fetch-asset.cjs" <peakAssetId> heapprofile <appName>
-   ```
+4. **Snapshots, when the user accepts the pause.** Two heap snapshots of the process some minutes apart show which classes grew: `take_heap_snapshot` twice, then `heap_diff` with the later as `assetId` and the earlier as `baseId`. Classes that keep growing are what leaks look like. Each snapshot pauses the application while it is written, so ask first.
 
 ### Phase 4: Delta Analysis
-1. Compare the top allocators from the Peak profile (Phase 3) against the Baseline profile (Phase 1).
-2. Report the delta — which constructors or functions experienced the most massive growth between the two profiles.
-3. Propose exact code optimizations or point the user to the exact function causing the retained bytes.
+1. Compare the top allocators from the Peak sample (Phase 3) against the Baseline (Phase 1), function by function and package by package.
+2. Report the delta — which functions or packages grew the most in live bytes between the two samples (and which classes grew, when Phase 3 took snapshots).
+3. Point the user to the exact function causing the retained bytes, and propose code optimizations.
 
-### Phase 5: Runtime Code Extraction & Optimization
-1. If the summary provides a `location` (containing `scriptId`, `line`, `column`) and a known `url` (file path) for the leaking function, extract its source.
-2. Call `runtime-code` passing the agent `id`, `threadId`, `scriptId`, and `path`.
-   - Extraction will fail if `scriptId` is `0`.
-   - If the process runs in Docker, try tweaking the path up to two times. If it still fails, ask the user to provide the source code.
-3. **Human in the loop**: Present the problematic code and root cause to the user. Ask: *"I've isolated the cause of the memory leak in this function. Would you like me to propose a fix?"*
-4. Only after user approval, propose an optimized rewrite and use the `ns-validate-optimization` skill to verify the fix.
+### Phase 5: Read the Leaking Code & Optimize
+1. Use the leaking function's location (`at`: its script and line) from `heap_summary`. Only read **user-owned** code (`(app)`); for a dependency, explain how the app's code feeds or holds what it allocates.
+2. **The workspace first.** When this workspace is the app's source, run the bundled helper:
+   ```
+   node "<skill-dir>/workspace-delta.cjs" <json-file-or-stdin>
+   ```
+   with `{"targetAppName": "<appName>", "runtimePath": "<the location without :line>", "lineHint": <its line>, "contextLines": 40}`. It checks the workspace is that app, maps the runtime path to a workspace file (stripping `/app` and other deploy prefixes), and returns `workspaceCode`, `resolvedWorkspacePath` and `lineRange`.
+3. **Then the running process.** Only when the helper says the workspace isn't the app, or the file isn't in it, call `get_source_code` with the `agentId`, `path`, `line`, `context: 80` and the `threadId`. It reads code out of a production process and needs a permission the token may not have. If the process runs in a container, try tweaking the path up to two times (strip `/app` or `/usr/src/app`, or a leading segment). If it still fails, ask the user to provide the source code.
+4. **Human in the loop**: Present the problematic code and root cause to the user. Ask: *"I've isolated the cause of the memory leak in this function. Would you like me to propose a fix?"*
+5. Only after user approval, propose an optimized rewrite and use the `ns-validate-optimization` skill to verify the fix.
 
 ### Phase 6: Write a Report
 1. Compose the full report as markdown using this structure:
    ```markdown
    # Memory Leak Hunt Report — <appName>
    **Date**: <ISO date>
-   **Agent ID**: <id>
+   **Agent ID**: <agentId>
 
    ## Summary
-   <Brief description of the leak — leaking constructor, growth rate, root cause>
+   <Brief description of the leak — leaking function or class, growth rate, root cause>
 
    ## Baseline (Phase 1)
    **Asset ID**: <baselineAssetId>
-   | Constructor | Self Size | Count |
-   |-------------|-----------|-------|
-   | <name> | <size> | <count> |
+   | Function | Package | Live bytes |
+   |----------|---------|------------|
+   | <name> | <package> | <bytes> |
 
    ## Peak (Phase 3)
    **Asset ID**: <peakAssetId>
-   | Constructor | Self Size | Count |
-   |-------------|-----------|-------|
-   | <name> | <size> | <count> |
+   | Function | Package | Live bytes |
+   |----------|---------|------------|
+   | <name> | <package> | <bytes> |
 
    ## Delta Analysis
-   | Constructor | Baseline Size | Peak Size | Growth |
-   |-------------|--------------|-----------|--------|
-   | <name> | <size> | <size> | +<delta> |
+   | Function | Baseline | Peak | Growth |
+   |----------|----------|------|--------|
+   | <name> | <bytes> | <bytes> | +<delta> |
 
    ## Root Cause
-   <Explanation of the leaking constructor/closure>
+   <Explanation of the leaking function, closure or class>
 
    ## Recommendation
    <Proposed fix>
@@ -92,14 +91,16 @@ description: >-
    - Baseline heap profile: `.nsolid/assets/heapprofile-<appName>-<baselineAssetIdPrefix>.heapprofile`
    - Peak heap profile: `.nsolid/assets/heapprofile-<appName>-<peakAssetIdPrefix>.heapprofile`
    ```
+   When Phase 3 compared snapshots, add a `## Class Growth` table from `heap_diff` (class, count delta, size delta).
 
 ### 7. Write the Report to Disk
 - Ask the user if they want to save the report to disk.
 - If the user confirms, write the final report as a markdown file (`.md`) under `.nsolid/assets/` — for example `.nsolid/assets/memory-analysis-<appName>.md`.
 
 ## Guardrails
-- **No early assumptions**: Never declare a memory leak from a single snapshot. Always compare baseline to peak.
-- **Reuse what exists**: Do not capture a new baseline or peak sample if the user already supplied the needed assets.
-- **Wait times**: Memory tools block the thread. Do not spam endpoints while an asset is in progress.
-- Never use the MCP `asset` tool to download raw assets (still exposed by older console versions); always use the bundled `fetch-asset.cjs`.
-- **Unsupported asset types**: `asset-summary` does not support `heap-profile` assets (`track-heap-objects`). Never capture them in this workflow — baseline and peak must always be heap samples.
+- **No early assumptions**: Never declare a memory leak from a single sample or snapshot. Always compare baseline to peak.
+- **Reuse what exists**: Do not capture a new baseline or peak if the user already supplied the needed assets.
+- **One capture at a time**: the take tools wait for their capture; do not start another on the same process meanwhile.
+- **Snapshots pause the application**: take them only with the user's approval.
+- Download assets only with the bundled `fetch-nsolid-asset.cjs`, and never read them into context.
+- Read code from the workspace whenever it has the file; `get_source_code` is the fallback.
