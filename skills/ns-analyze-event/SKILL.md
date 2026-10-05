@@ -37,7 +37,7 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|S
     node "<skill-dir>/workspace-delta.cjs" <json-file-or-stdin>
     ```
     with `{"targetAppName": "<app>", "runtimePath": "<the frame's script>", "lineHint": <its line>, "contextLines": 40}`. It checks the workspace is that app and maps container paths such as `/app/server.js` to workspace files. `event_stacks` gives the latest process's main module (`latest.main`), which shows where the app was deployed.
-  - Only when the workspace isn't the app and the process still runs, call `get_source_code` with the `agentId`, `path` and `line`; a plain stack trace alone is not enough to fetch code.
+  - Only when the workspace isn't the app and the process still runs, call `get_source_code` with the `agentId`, `path` and `line`; a plain stack trace alone is not enough to fetch code. It is offered only to people holding N|Solid's source-code permission (tenant admins by default) on a tenant where the source viewer is on. When the tool is missing or refuses, say which (no permission, or the feature is off for the tenant) and ask for the file or read it from the checkout instead.
 
 ### 3. Recommend the Right Next Step
 - If the issue needs deeper work, point to the most relevant follow-up skill: `ns-cpu-spike-analysis`, `ns-memory-spike-analysis`, `ns-analyze-vulnerabilities`, or `ns-analyze-tracing`.

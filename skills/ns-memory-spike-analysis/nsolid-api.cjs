@@ -7,7 +7,7 @@
 //   1. Environment: NSOLID_API_URL, NSOLID_API_TOKEN, and optionally NSOLID_TENANT.
 //   2. ~/.agents/.nsolid-auth.json: { "apiUrl": "...", "token": "...", "tenant": "..." }
 // The token is an N|Solid API token. Reports need the "read" scope; downloading a
-// heap snapshot needs "operate".
+// heap snapshot needs "operate", and pulled source code "nsolid:source-code".
 //
 // Data read here goes to files, never to the agent's context.
 
@@ -20,6 +20,9 @@ const { Readable } = require('stream')
 const { pipeline } = require('stream/promises')
 
 const CONFIG_FILE = path.join(os.homedir(), '.agents', '.nsolid-auth.json')
+// Sent with every request: N|Solid's usage reports tell the plugin's scripts
+// from other API callers (and from the MCP server, which labels itself).
+const CLIENT_HEADERS = { 'x-nsolid-client': 'api', 'x-nsolid-client-name': 'nsolid-plugin' }
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 
 function readConfig () {
@@ -63,7 +66,7 @@ async function failure (res, what) {
 }
 
 function createClient (config = readConfig()) {
-  const auth = { authorization: `Bearer ${config.token}` }
+  const auth = { authorization: `Bearer ${config.token}`, ...CLIENT_HEADERS }
 
   async function get (pathname) {
     const res = await fetch(config.apiUrl + pathname, { headers: { ...auth, accept: 'application/json' } })
@@ -107,4 +110,4 @@ function slug (value, fallback = 'unknown') {
   return s || fallback
 }
 
-module.exports = { CONFIG_FILE, readConfig, createClient, slug }
+module.exports = { CLIENT_HEADERS, CONFIG_FILE, readConfig, createClient, slug }

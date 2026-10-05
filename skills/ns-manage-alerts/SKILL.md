@@ -29,6 +29,7 @@ Before saving, show the user what the rule would have done:
 
 ### 4. Pick Channels and Diagnostics
 - `list_alert_channels` names the channels (Slack, Teams, PagerDuty, webhooks). Use the names the user wants; if there is no fitting channel, say that someone who manages integrations adds one in the web UI. A rule with no channel still records alerts.
+- Webhook channels: each delivery carries `x-nsolid-event`, `x-nsolid-idempotency-key` (deliveries are at least once: deduplicate on it), `x-nsolid-timestamp` and, with a signing secret, `x-nsolid-signature` (`v1=` and the hex HMAC-SHA256 of `<timestamp>.<body>`), with the user agent `nsolid-alerts/1`. Receivers verify against the raw body and refuse old timestamps.
 - `severity`: `info`, `warning` (default) or `critical`.
 - `diagnose` makes a firing process capture evidence: `profile` (CPU), `heap_sampling` or `snapshot` (pauses the process). A small hourly budget per app keeps an incident from profiling the whole fleet. Suggest `profile` for CPU and latency rules and `heap_sampling` for memory rules; `snapshot` only when the user asks.
 

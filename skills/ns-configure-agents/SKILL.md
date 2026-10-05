@@ -34,6 +34,13 @@ N|Solid keeps agents at **desired configs**: each targets processes by an expres
 ### 6. Present the Result
 - What changed, on which processes (count and app), until when, and how to undo it; or, for a question, which config set the value and why.
 
+### 7. Connecting Agents and Their Tokens
+No MCP tool covers this: it is for the tenant's admins, in the web UI's **Connect agents** page or the API (an admin API token).
+- **How agents connect:** `GET /v1/tenants/<tenant>/connection` lists the hostnames that reach the tenant, whether the gateways use TLS, and how many agents are connected. The page gives the environment for a shell, Docker, Compose or Kubernetes.
+- **Ingest tokens** (`NSOLID_SAAS`): `GET /v1/tenants/<tenant>/ingest-tokens` lists them, each with `rotationDueAt` when it has a schedule, `agentsConnected`, and `replacedBy` once rotated.
+- **Rotating safely:** `POST /v1/tenants/<tenant>/ingest-tokens/<id>/rotate` (optionally `{"graceDays": 7}`) issues a successor for the same deployment, shown once. Deploy it in place of the old one. The old token keeps working until no connected agent presents it, and stops at its grace deadline at the latest, so the switch has no gap. `PUT .../ingest-tokens/<id>/schedule` with `{"rotateEveryDays": 90}` sets a schedule.
+- Never paste a token into chat or a file the user didn't ask for: it is a credential.
+
 ## Guardrails
 - Never save, change or delete a config without showing the preview and getting the user's agreement.
 - Never target every process (`allAgents: true`) unless the user asked for exactly that.
