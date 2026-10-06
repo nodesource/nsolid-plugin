@@ -19,7 +19,7 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). The N|Solid t
 ### 3. Find Slow Requests Only If No Trace Was Supplied
 - Call `search_spans` with `rootOnly: true` (one span per request), `order: "slowest"`, the `service`, and `from`/`to` (default the last hour).
 - Narrow by duration with `minDurationMs`, or a range with `where`, e.g. `duration > 1s && duration < 5s`. Narrow by endpoint with `where: 'name.startsWith("GET /api")'` or `name` (exact).
-- `query_metric` with `metric: "http_server"` (the p99 by default) and `groupBy: "app"` shows how latency moved over time.
+- `query_metric` with `metric: "http_server"` (the p99 by default) and `groupBy: "app"` shows how latency moved over time. `span_histogram` with the same filters as `search_spans` (but no `order` or `limit`, which it doesn't take) gives, per time bucket, the requests, how many failed, and their p50 and p99: when a slowdown or a wave of errors started, for one endpoint.
 
 ### 4. Find Failing Endpoints Only If No Trace Was Supplied
 - Call `search_spans` with `where: 'attr["http.status_code"].startsWith("5")'` for HTTP server errors, or `status: "error"` for spans that recorded an error, with the `service` and time range.
@@ -32,6 +32,7 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). The N|Solid t
 ### 6. Triage the Trace
 - Call `get_trace` with the slowest or failing request's `traceId`.
 - The calls between services show where the time went from each caller's side, and which calls failed. The span tree shows parent and child spans: a slow parent with one slow child, sequential awaits that could run in parallel, the same query repeated (N+1), or a slow outside host.
+- To see what each span did, call `get_trace` again with `attributes: true`, or `attributeKeys` for just the ones you need (`["http.route", "db.statement", "http.status_code"]`): the repeated query of an N+1 shows in its `db.statement`, and each failing span shows its error message.
 - `search_logs` with the `traceId` gives the logs written during that request.
 
 ### 7. Propose Architectural Fixes

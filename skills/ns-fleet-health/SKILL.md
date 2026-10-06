@@ -14,10 +14,10 @@ Run what fits the question; for a full briefing, all of it:
 - **Hot processes:** `fleet_snapshot` with `sort: "cpu_percent"`, then `sort: "used_heap_size"` and `sort: "loop_estimated_lag"` (limit 5 each; add `where: 'app == "<app>"'` for one app). Note anything far from its peers.
 - **Growing memory:** `query_metric` with `metric: "used_heap_size"`, `groupBy: "app"` and `from: "-24h"`: a series that only climbs needs a look (`ns-memory-spike-analysis`).
 - **Latency:** `query_metric` with `metric: "http_server"` (the p99) and `groupBy: "app"`.
-- **Crashes and restarts:** `list_ended_processes` with `byApp: true` and `from: "-24h"`: how many processes of each app ended and how the latest did. `event_stacks` with `type: "exit"` groups exits by error.
+- **Crashes and restarts:** `list_ended_processes` with `byApp: true` and `from: "-24h"`: how many processes of each app ended and how the latest did, lost ones (gone without an exit: killed, or the host lost) included. `event_stacks` with `type: "exit"` groups exits by error; `event_histogram` with `types: ["exit", "lost"]` shows when they came.
 - **Blocked event loops:** `event_stacks` (default `loop_blocked`) over the last day: where loops blocked, how often and how long.
-- **Alerts:** `list_alerts` with `state: "firing"`.
-- **Vulnerabilities:** `list_vulnerabilities` with `severity: "high"` (and `where: 'evidence >= "loaded"'` for the ones whose code is in use); malicious packages first.
+- **Alerts:** `list_alerts` with `state: "firing"`. `list_alert_rules` shows each rule's `health`: a rule that is `no-data`, `failing` or `stale` protects nothing, so name it under Needs attention.
+- **Vulnerabilities:** `list_vulnerabilities` with `severity: "high"` (and `where: 'evidence >= "loaded"'` for the ones whose code is in use); malicious packages first, then findings marked `knownExploited` (CISA lists them as exploited in the wild), whatever their severity: `where: "knownExploited"`.
 - **Node.js runtimes:** `list_runtimes`: versions at or near end of life, and core advisories with the release that fixes them.
 - **New behaviors:** `list_behaviors`: dependencies doing something new, release regressions and drift.
 - **Agent credentials** (admins, on request): the web UI's Connect agents page, or `GET /v1/tenants/<tenant>/ingest-tokens`, shows ingest tokens due for rotation (`rotationDueAt`) and rotated ones still in use; rotation is covered in `ns-configure-agents`.

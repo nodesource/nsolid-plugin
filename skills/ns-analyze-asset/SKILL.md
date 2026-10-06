@@ -70,7 +70,7 @@ The summary gives objects and bytes by class and type. It has no retained sizes,
 
 ### 5. Correlate with Runtime Context
 - `get_agent` with the asset's `agentId` confirms the app, the host, and whether the process still runs (or how it ended).
-- `query_metric` around the asset's time with the `agentId`: `cpu_percent` for CPU profiles, `used_heap_size` and `rss` for heap assets.
+- `query_metric` around the asset's time with `agentIds: ["<agentId>"]`: `cpu_percent` for CPU profiles, `used_heap_size` and `rss` for heap assets.
 
 ### 6. Read the Code Behind a CPU Bottleneck
 - Only for CPU profiles, for the hottest **user-owned** (`(app)`) frame. Never fetch code for Node internals or dependencies.

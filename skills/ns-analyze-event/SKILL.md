@@ -9,7 +9,7 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|S
 ### 1. Parse the Event
 - Recognize the payload's shape before anything else:
   - **An N|Solid alert notification** (a webhook body, or a Slack, Teams or PagerDuty message made from one): `event` (`firing`, `resolved`), `alert.rule`, `alert.severity`, `alert.summary`, `alert.group` (the `agentId` or `app`), `alert.value`, `alert.since`, `alert.fingerprint`, `alert.evidence`.
-  - **An N|Solid agent event** (from `list_events`): `type` (`loop_blocked`, `loop_unblocked`, `exit`, `connect`, `disconnect`, `reconfigure`, `packages_changed`), `agentId`, `app`, `ts`, `blockedForMs`, `exitCode`, `exitSignal`, `error`, `frames`.
+  - **An N|Solid agent event** (from `list_events`): `type` (`loop_blocked`, `loop_unblocked`, `exit`, `lost`, `connect`, `disconnect`, `reconfigure`, `packages_changed`), `agentId`, `app`, `ts`, `blockedForMs`, `exitCode`, `exitSignal`, `error`, `frames`. A `lost` event marks a process that went away without an exit (SIGKILL, the out-of-memory killer, its host lost), placed when it was last heard from, 15 minutes before it was declared lost.
   - **An N|Solid console event**: `event`, `type`, `severity`, `app`, `agent`, `time`, and `args`. If `args` is a JSON string, parse it before doing anything else.
 - If the payload already includes a stack trace, span data, trace identifiers, or other direct evidence, analyze that payload before reaching for more tools.
 - For an alert, `get_alert` with its `fingerprint` gives the event that fired it, the diagnostic the rule took (a CPU profile, heap sampling or snapshot, with its `assetId`), the continuous profiles kept around it (`kept`), and its history.
@@ -18,7 +18,7 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|S
 ### 2. Branch by Event Type
 - **Performance** (a blocked event loop, event loop lag, high CPU; console `process-blocked`):
   - Call `event_stacks` with the `agentId` or `app` and `from`/`to` around the event: where the loop blocked, grouped by frame, with how often and how long.
-  - Call `query_metric` for `cpu_percent`, `loop_estimated_lag` and `used_heap_size` with the `agentId` (`agentIds`) or `app` and `from`/`to` around the event time.
+  - Call `query_metric` for `cpu_percent`, `loop_estimated_lag` and `used_heap_size` with `agentIds: ["<agentId>"]` (a list) or `app`, and `from`/`to` around the event time.
   - Call `list_assets` with the `agentId` for nearby profiles, the alert's diagnostic and continuous profiles included. If one covers the event, read it with `profile_hotspots` (CPU) or `heap_summary` (heap).
 - **Security** (a finding alert; console `new-vulnerability-found`):
   - Call `list_vulnerabilities` for the affected app.
@@ -26,9 +26,11 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|S
 - **New behavior** (a behavior alert: a package that newly runs programs, compiles code, uses the network, starts threads or touches files; a release regression; dependency drift):
   - Call `list_behaviors` for the app. A regression's release comparison is in `compare_releases`; a new capability or drift in a dependency may be a supply-chain problem, so hand it to `ns-analyze-vulnerabilities`.
 - **Lifecycle** (an exit, a disconnect, repeated restarts; console `agent-exit`):
-  - Call `list_events` with the same `app` or `agentId`, `types: ["exit", "disconnect"]` and `from`/`to` around the event.
+  - Call `list_events` with the same `app` or `agentId`, `types: ["exit", "lost", "disconnect"]` and `from`/`to` around the event.
   - Call `list_ended_processes` with the `app`: how each process ended (an exit code and signal, an abort, or lost without a word), how long it lived, and its peaks. `get_agent` gives one process's exit error and stack.
-  - Call `query_metric` with explicit metrics (`used_heap_size`, `rss`, `cpu_percent`) and the `agentId` before the event to spot resource spikes. Running out of memory shows as an abort (`SIGABRT`) with the heap at its limit.
+  - For "how often", `event_histogram` with the `app` and `types: ["exit", "lost"]` counts them per bucket over a day or a month: one restart, or a crash loop.
+  - A lost process left no exit: look at its last minutes instead (`query_metric` for `rss` and `used_heap_size` with `agentIds: ["<agentId>"]`, up to its last report). Memory climbing to the end suggests the out-of-memory killer.
+  - Call `query_metric` with explicit metrics (`used_heap_size`, `rss`, `cpu_percent`) and `agentIds: ["<agentId>"]` before the event to spot resource spikes. Running out of memory shows as an abort (`SIGABRT`) with the heap at its limit.
 - **Errors** (an uncaught exception, an exit with a stack):
   - Parse the stack (`error` and `frames`, or console `args.stack`).
   - `event_stacks` with `type: "exit"` and the `app` groups exits by stack: whether the same error keeps killing processes.
@@ -37,7 +39,7 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|S
     node "<skill-dir>/workspace-delta.cjs" <json-file-or-stdin>
     ```
     with `{"targetAppName": "<app>", "runtimePath": "<the frame's script>", "lineHint": <its line>, "contextLines": 40}`. It checks the workspace is that app and maps container paths such as `/app/server.js` to workspace files. `event_stacks` gives the latest process's main module (`latest.main`), which shows where the app was deployed.
-  - Only when the workspace isn't the app and the process still runs, call `get_source_code` with the `agentId`, `path` and `line`; a plain stack trace alone is not enough to fetch code. It is offered only to people holding N|Solid's source-code permission (tenant admins by default) on a tenant where the source viewer is on. When the tool is missing or refuses, say which (no permission, or the feature is off for the tenant) and ask for the file or read it from the checkout instead.
+  - Only when the workspace isn't the app and the process still runs, call `get_source_code` with the `agentId`, `path` and `line`; a plain stack trace alone is not enough to fetch code. It is offered only with N|Solid's source-code permission, an admin one, on a tenant where the source viewer is on, and never over a browser sign-in to the MCP server (a sign-in carries read and operate permissions at most). When the tool is missing or refuses, say which (a sign-in, no permission, or the feature is off for the tenant) and ask for the file or read it from the checkout instead.
 
 ### 3. Recommend the Right Next Step
 - If the issue needs deeper work, point to the most relevant follow-up skill: `ns-cpu-spike-analysis`, `ns-memory-spike-analysis`, `ns-analyze-vulnerabilities`, or `ns-analyze-tracing`.
