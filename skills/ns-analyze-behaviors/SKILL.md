@@ -26,7 +26,7 @@ The watch learns what each app's packages do from its CPU profiles, and reports 
 ### 3. Recommend
 - Suspicious and unexplained: treat it as a possible compromise. Pin or roll back the package to the last version that didn't do it, check the lockfile, and look at the package's recent releases and maintainers. Say how urgent it is from its severity and what it does.
 - Explained and expected: say why, and offer to accept it.
-- **Accepting:** `accept_behavior` with the `behaviorId` takes it into the app's baseline: the watch won't raise it again for that app, and alerts on it resolve. Only with the user's explicit approval, one behavior at a time.
+- **Accepting:** `accept_behavior` with the `behaviorId` takes it into the app's baseline: the watch won't raise it again for that app, and alerts on it resolve. Only with the user's explicit approval, one behavior at a time. It needs the permission titled "Accepting behaviors" (`nsolid:hide-security-vulnerabilities`, an operator's); without it the tool isn't offered.
 
 ### 4. Alerting
 - To be told about new ones, `ns-manage-alerts` sets a behavior rule, e.g. `kind == "capability" && severity >= "high"`.

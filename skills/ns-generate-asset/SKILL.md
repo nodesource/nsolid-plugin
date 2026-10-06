@@ -51,7 +51,7 @@ This skill captures assets through the N|Solid MCP server (`nsolid`) and saves t
 - Pass this handoff payload: `assetId`, the asset kind (`cpu_profile`, `heap_sampling`, `heap_snapshot` or `heap_profile`), `appName`, `agentId`, `threadId`, `durationMs`, and local path if downloaded.
 
 ## Guardrails
-- Do not use `get_source_code` or `workspace_delta`.
+- Do not use `get_source_code` or the workspace comparison helper.
 - Downloads use the bundled `fetch-nsolid-asset.cjs` only. Do not use direct HTTP calls, `curl`, or ad hoc shell commands.
 - Never read a downloaded asset into context.
 - Prefer heap sampling to snapshots and heap tracking: both of those pause the application.

@@ -40,5 +40,5 @@ Run what fits the question; for a full briefing, all of it:
 - If the user confirms, write it as markdown under `.nsolid/reports/`, for example `.nsolid/reports/fleet-health-<date>.md`.
 
 ## Guardrails
-- Read only: this skill changes nothing. Captures, acknowledgements and configuration changes belong to the follow-up skills, with the user's agreement.
+- Read only, but for one thing: saving a useful expression as a view (`save_view`), and only with the user's agreement. Captures, acknowledgements and configuration changes belong to the follow-up skills, with the user's agreement.
 - Keep tool calls bounded: small limits, the last day by default.

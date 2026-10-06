@@ -10,9 +10,10 @@ description: >-
 ### 1. Warn before switching
 
 `nsolid-plugin` stores one set of NodeSource credentials, shared by every
-installed harness (Claude Code, Codex CLI, OpenCode, Antigravity, Pi) and all
-three MCP servers (`nsolid-console`, `ns-benchmark`, `ncm`). There is no way
-to keep two orgs active at once. Before running anything, tell the user:
+installed harness (Claude Code, Codex CLI, OpenCode, Antigravity, Pi) and the
+NodeSource MCP servers that use it (`nsolid-console`, `ns-benchmark`, `ncm`).
+The N|Solid server (`nsolid`) has settings of its own, and switching doesn't
+change it. There is no way to keep two orgs active at once. Before running anything, tell the user:
 
 > Switching organizations changes the single shared NodeSource login used by
 > **every** harness you have installed nsolid-plugin into, not just this one.

@@ -88,14 +88,13 @@ when the token can use several tenants).
 
 ### 10. Compare Runtime Code to Workspace Source
 - Only when step 9 read the code from the running process, so there is a runtime copy to compare. When it came from the workspace, skip this step.
-- Prefer the `workspace_delta` tool when it is available. Pass the profiled app name, runtime path, runtime code, and the best line range or line hint you have for the hot function.
-- If `workspace_delta` reports that the workspace does not match the profiled app, skip comparison and state that clearly in the report.
-- If `workspace_delta` is unavailable but shell execution is allowed, use the bundled same-directory helper:
+- When shell execution is allowed, use the bundled same-directory helper. Pass the profiled app name, runtime path, runtime code, and the best line range or line hint you have for the hot function:
   ```
   node "<skill-dir>/workspace-delta.cjs" <json-file-or-stdin>
   ```
   It accepts JSON via stdin or a file path and prints the comparison result as JSON.
-- If neither the tool nor the bundled helper is available, perform a conservative manual fallback: verify that the current workspace corresponds to the target app before comparing any local code, and skip comparison if identity is uncertain.
+- If it reports that the workspace does not match the profiled app, skip comparison and state that clearly in the report.
+- If the helper can't run, perform a conservative manual fallback: verify that the current workspace corresponds to the target app before comparing any local code, and skip comparison if identity is uncertain.
 - Only attempt this step for user-owned application code. If the hot frame is a dependency or Node internal path, skip comparison and say that the performance issue originates outside user-owned source.
 - If the file maps cleanly to the workspace, compare the local copy to the runtime version. Note real differences such as added logic, removed guards, changed thresholds, or refactors.
 - Include a "Workspace Delta" section in the final report with the actual diff content when a comparison was possible.

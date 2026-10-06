@@ -13,7 +13,7 @@ N|Solid keeps agents at **desired configs**: each targets processes by an expres
 - `agent_config` with an `agentId`: what that process reports, what it should have and which config set each key, what is still to apply, and whether it has converged. Use it to answer "why does this process have that setting?"
 
 ### 2. Shape the Change
-- Settings: `tracingEnabled`, `traceSampleRate` (0 to 1), `contCpuProfile` (continuous CPU profiling), `interval` (metrics, ms), `blockedLoopThreshold` (ms), `pauseMetrics`, `promiseTracking`, `redactSnapshots`, `assetsEnabled`, `tags`.
+- Settings: `tracingEnabled`, `traceSampleRate` (0 to 1), `contCpuProfile` (continuous CPU profiling), `interval` (metrics, ms), `blockedLoopThreshold` (ms), `pauseMetrics`, `promiseTracking`, `redactSnapshots`, `assetsEnabled`, `tags`. Turning `contCpuProfile` on needs the tenant's continuous-profiling feature: where N|Solid has it off, the save is refused, and processes stay off whatever a config says.
 - Target: `app`, `tags`, one `agentId`, or `where`, an expression over what a process is (`app == "checkout" && hostname.endsWith(".prod")`, `nodeVersion >= "22"`; `expression_help` with context `selector` lists the fields). Every process of the tenant needs `allAgents: true` and the user's explicit agreement.
 - **Prefer an expiring override** for anything diagnostic: `expiresInMinutes` makes it stop applying, and the processes go back to what they had. Tracing or continuous profiling "for the next hour" is an override of 60 minutes.
 - `priority`: higher wins where configs disagree.

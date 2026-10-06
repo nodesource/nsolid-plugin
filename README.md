@@ -16,7 +16,7 @@ No harness relies on npm `postinstall` hooks. See `openspec/changes/cross-harnes
 
 ## What it includes
 
-- 24 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, logs, saved N|Solid assets, vulnerability analysis, dependency behavior in production, release comparison, alert rules, agent configuration, fleet health, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimization validation, and switching NodeSource organizations.
+- 25 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, logs, saved N|Solid assets, vulnerability analysis, dependency behavior in production, release comparison, alert rules, agent configuration, fleet health, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimization validation, and switching NodeSource organizations.
 - Four MCP servers: `nsolid-console`, `ns-benchmark`, `ncm`, and `nsolid` (preview; see [N|Solid](#nsolid-preview)).
 - Explicit OAuth setup against NodeSource accounts. You need a NodeSource account with access to the target N|Solid organization.
 
