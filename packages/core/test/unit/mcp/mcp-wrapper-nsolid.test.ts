@@ -79,7 +79,16 @@ describe('nsolid MCP server through the wrapper', () => {
   it('says how to configure the N|Solid server when nothing is set', () => {
     const result = runNsolid(createFixture())
     assert.notStrictEqual(result.status, 0)
-    assert.match(result.stderr, /N\|Solid is not configured: set NSOLID_MCP_URL and NSOLID_API_TOKEN/)
+    assert.match(result.stderr, /N\|Solid is not configured: set NSOLID_MCP_URL \(and NSOLID_API_TOKEN/)
+  })
+
+  it('leaves sign-in to OAuth without a token: no Authorization header', () => {
+    const fixture = createFixture()
+    const result = runNsolid(fixture, { NSOLID_MCP_URL: 'https://nsolid.example.test/mcp' })
+    assert.strictEqual(result.status, 0, result.stderr)
+    const args = proxyArgs(fixture)
+    assert.strictEqual(args[0], 'https://nsolid.example.test/mcp')
+    assert.ok(!args.includes('--header'), args.join(' '))
   })
 
   it('sends the token over plain http only to this machine', () => {
@@ -94,13 +103,15 @@ describe('nsolid MCP server through the wrapper', () => {
 })
 
 describe('readNsolidSettings', () => {
-  it('needs both the MCP URL and a token', () => {
+  it('needs the MCP URL; the token is for servers that take one', () => {
     assert.deepEqual(readNsolidSettings({ NSOLID_MCP_URL: 'https://s.test/mcp', NSOLID_API_TOKEN: 'x' }), {
       mcpUrl: 'https://s.test/mcp',
       token: 'x',
     })
+    // A server in OAuth mode: the URL alone.
+    const oauth = readNsolidSettings({ NSOLID_MCP_URL: 'https://s.test/mcp' })
     if (readNsolidSettings({}) === null) {
-      assert.strictEqual(readNsolidSettings({ NSOLID_MCP_URL: 'https://s.test/mcp' }), null)
+      assert.deepEqual(oauth, { mcpUrl: 'https://s.test/mcp', token: undefined })
     }
   })
 })

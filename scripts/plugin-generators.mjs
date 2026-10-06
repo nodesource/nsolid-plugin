@@ -217,6 +217,8 @@ await runMcpRemote(server.url, server.headers)
 
 // N|Solid servers have settings of their own, not NodeSource credentials: the
 // MCP URL and an N|Solid API token, from the environment or NSOLID_AUTH_FILE.
+// Without a token, mcp-remote signs the person in with OAuth when the server
+// asks (a server in OAuth mode refuses API tokens).
 function readNsolidSettings () {
   let file = {}
   if (existsSync(NSOLID_AUTH_FILE)) {
@@ -228,15 +230,18 @@ function readNsolidSettings () {
   }
   const mcpUrl = process.env.NSOLID_MCP_URL || file.mcpUrl
   const token = process.env.NSOLID_API_TOKEN || file.token
-  if (typeof mcpUrl !== 'string' || !mcpUrl || typeof token !== 'string' || !token) {
-    fail(\`N|Solid is not configured: set NSOLID_MCP_URL and NSOLID_API_TOKEN, or write \${NSOLID_AUTH_FILE} with "mcpUrl" and "token"\`)
+  if (typeof mcpUrl !== 'string' || !mcpUrl) {
+    fail(\`N|Solid is not configured: set NSOLID_MCP_URL (and NSOLID_API_TOKEN, unless the server signs people in with OAuth), or write \${NSOLID_AUTH_FILE} with "mcpUrl" (and "token")\`)
   }
-  return { mcpUrl, token }
+  return { mcpUrl, token: typeof token === 'string' && token ? token : undefined }
 }
 
 function resolveNsolidServer (name, settings) {
   const definition = SERVER_DEFINITIONS[name]
-  const variables = { NSOLID_MCP_URL: settings.mcpUrl, NSOLID_API_TOKEN: settings.token }
+  const variables = {
+    NSOLID_MCP_URL: settings.mcpUrl,
+    ...(settings.token ? { NSOLID_API_TOKEN: settings.token } : {}),
+  }
   const url = expandTemplate(definition.url, variables)
   let parsed
   try {
@@ -249,9 +254,11 @@ function resolveNsolidServer (name, settings) {
   if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && local)) {
     fail(\`The N|Solid MCP URL must use https (plain http only for localhost): \${name}\`)
   }
-  const headers = Object.fromEntries(Object.entries(definition.headers ?? {}).map(([key, value]) => {
+  const headers = Object.fromEntries(Object.entries(definition.headers ?? {}).flatMap(([key, value]) => {
     if (typeof value !== 'string') fail(\`Invalid header for the N|Solid MCP server: \${name}\`)
-    return [key, expandTemplate(value, variables)]
+    const expanded = expandTemplate(value, variables)
+    // A header naming a setting left unset (the token, under OAuth) is left out.
+    return expanded.includes('$' + '{') ? [] : [[key, expanded]]
   }))
   return { url, headers }
 }

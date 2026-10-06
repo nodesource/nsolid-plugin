@@ -349,9 +349,12 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
   const nsolid = readNsolidSettings()
   if (nsolid) {
     variables.NSOLID_MCP_URL = nsolid.mcpUrl
-    variables.NSOLID_API_TOKEN = nsolid.token
+    if (nsolid.token) variables.NSOLID_API_TOKEN = nsolid.token
   }
-  const mcpServers = bundle.mcpServers.filter((s) => s.credentials !== 'nsolid' || nsolid)
+  const mcpServers = bundle.mcpServers
+    .filter((s) => s.credentials !== 'nsolid' || nsolid)
+    // Without a token, the harness signs the person in with OAuth: no header to send.
+    .map((s) => (s.credentials === 'nsolid' && !nsolid?.token ? { ...s, headers: {} } : s))
   const skippedNsolid = bundle.mcpServers.filter((s) => s.credentials === 'nsolid' && !nsolid)
 
   const mcpConfigPath = adapter.getMcpConfigPath()
@@ -364,7 +367,7 @@ export async function install (options: InstallOptions): Promise<InstallResult> 
       })
       result.mcpServersConfigured = mcpServers.map((s) => s.name)
       if (skippedNsolid.length > 0) {
-        progress.step('N|Solid MCP', `skipped ${skippedNsolid.map((s) => s.name).join(', ')} — set NSOLID_MCP_URL and NSOLID_API_TOKEN, or write ${nsolidSettingsPath()}`)
+        progress.step('N|Solid MCP', `skipped ${skippedNsolid.map((s) => s.name).join(', ')} — set NSOLID_MCP_URL (and NSOLID_API_TOKEN, unless the server signs people in with OAuth), or write ${nsolidSettingsPath()}`)
       }
       const targetConfigPath = mcpConfigPath ?? adapter.getMcpConfigPath() ?? 'MCP config'
       progress.step('Merging MCP servers', `${result.mcpServersConfigured.join(', ')} into ${targetConfigPath}\n(backup saved)`)
