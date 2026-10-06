@@ -4,6 +4,12 @@
   "description": "NodeSource AI skills for N|Solid performance and security",
   "skills": [
     {
+      "name": "ns-activity-report",
+      "path": "skills/ns-activity-report",
+      "description": "Report how a team uses N|Solid: features, pages, people, and AI assistants and their MCP tools",
+      "requiresMcp": ["nsolid"]
+    },
+    {
       "name": "ns-advanced-memory-leak-hunter",
       "path": "skills/ns-advanced-memory-leak-hunter",
       "description": "Perform deep memory analysis to identify and locate memory leaks in production",

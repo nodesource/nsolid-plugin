@@ -11,6 +11,7 @@
   "repository": "https://github.com/NodeSource/nsolid-plugin",
   "license": "MIT",
   "skills": [
+    "./skills/ns-activity-report",
     "./skills/ns-advanced-memory-leak-hunter",
     "./skills/ns-analyze-asset",
     "./skills/ns-analyze-behaviors",

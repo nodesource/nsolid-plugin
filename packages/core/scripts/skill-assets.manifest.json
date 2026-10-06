@@ -7,6 +7,7 @@
     "ns-validate-optimization"
   ],
   "nsolid-api.cjs": [
+    "ns-activity-report",
     "ns-advanced-memory-leak-hunter",
     "ns-analyze-asset",
     "ns-cpu-spike-analysis",
@@ -34,7 +35,11 @@
     "ns-cpu-spike-analysis"
   ],
   "nsolid-report.cjs": [
+    "ns-activity-report",
     "ns-analyze-asset",
     "ns-cpu-spike-analysis"
+  ],
+  "render-activity-report.cjs": [
+    "ns-activity-report"
   ]
 }

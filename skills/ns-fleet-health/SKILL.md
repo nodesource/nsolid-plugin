@@ -21,7 +21,7 @@ Run what fits the question; for a full briefing, all of it:
 - **Node.js runtimes:** `list_runtimes`: versions at or near end of life, and core advisories with the release that fixes them.
 - **New behaviors:** `list_behaviors`: dependencies doing something new, release regressions and drift.
 - **Agent credentials** (admins, on request): the web UI's Connect agents page, or `GET /v1/tenants/<tenant>/ingest-tokens`, shows ingest tokens due for rotation (`rotationDueAt`) and rotated ones still in use; rotation is covered in `ns-configure-agents`.
-- **How the team uses N|Solid** (admins, on request): the web UI's Activity page, or `GET /v1/tenants/<tenant>/activity?by=area|tool|clientName|person`, shows which features, pages and AI assistants and tools people use. It is off where N|Solid hasn't enabled it for the tenant.
+- **How the team uses N|Solid** (admins, on request): the web UI's Activity page, or `GET /v1/tenants/<tenant>/activity?by=area|tool|clientName|person`, shows which features, pages and AI assistants and tools people use; `ns-activity-report` writes it as a page to share. It is off where N|Solid hasn't enabled it for the tenant.
 - **Custom conditions:** `fleet_snapshot` takes an expression mixing metrics and what a process is, e.g. `rss > 1GiB && nodeVersion < "22"`, `cpu_percent > 80 && "canary" in tags`. `expression_help` with context `fleet` lists the fields. `save_view` keeps a useful expression under a name for people and tools (with the user's agreement).
 
 ### 3. Prioritize
