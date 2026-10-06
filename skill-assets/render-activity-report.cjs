@@ -65,6 +65,7 @@ const PAGES = {
   '/t/:tenant/assets': 'Profiles and snapshots',
   '/t/:tenant/assets/:assetId': 'A profile or snapshot',
   '/t/:tenant/connect': 'Connect agents',
+  '/t/:tenant/tokens': 'API tokens',
   '/t/:tenant/activity': 'Activity',
   '/t/:tenant/source': 'Source code',
   '/t/:tenant/support': 'NodeSource access'
