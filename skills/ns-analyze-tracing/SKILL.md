@@ -7,7 +7,7 @@ description: >-
 ### 1. Use Provided Trace Data First
 - Treat the prompt as primary evidence. Parse any provided trace ID, span list, app name, endpoint name, status code, duration, or error stack before calling tools.
 - If the user supplied a trace tree/export or any other host-provided trace data, treat it as authoritative: map that hierarchy directly and **do not fall through to live enrichment** (`information-dashboard`, `tracing`, `tracing-detail`), even when the export includes its trace ID. The connected-services discovery (step 2) and live `tracing` queries (steps 3–4) are only for when no sufficient host data is present.
-- If the user supplied only a trace ID (not a full tree), call `tracing-detail` with `span_traceId` and `showLimit: 1000` to get the whole trace in one call. If the metadata's `totalSpans` is larger, call once more with `showLimit` at least `totalSpans` (at most 10000). Don't page with `page`: the spans come back in no fixed order, so pages can repeat or skip spans. Do not call `tracing` with `span_traceId`: it ignores that filter and returns the default page.
+- If the user supplied only a trace ID (not a full tree), call `tracing-detail` with `span_traceId` and `showLimit: 150`. Every span comes back whole, so a bigger page can pass the client's limit on tool output. If the metadata's `totalSpans` is at most 150, that is the whole trace. If it is larger, don't ask for more: say the waterfall covers `returnedSpans` of `totalSpans` spans, in no particular order. That still shows repeated span names (an N+1), but not the critical path or totals. Don't page with `page`: the spans come back in no fixed order, so pages can repeat or skip spans. Do not call `tracing` with `span_traceId`: it ignores that filter and returns the default page.
 - If `tracing-detail` is not among the available tools (consoles before 6.5.2), returns an error (such as `elasticReader is not available`), or returns no spans (`totalSpans: 0`: the trace aged out or the ID is wrong), say the trace could not be read and ask the user for the trace data or a different trace ID.
 
 ### 2. Discover Connected Services Only When Needed
@@ -39,7 +39,7 @@ description: >-
 
 ### 6. Triage the Trace
 - Use `tracing` results as collapsed trace-list evidence: slow/failing service, endpoint, status, duration, and `span_traceId`.
-- If no trace tree was supplied, call `tracing-detail` for the slow or failing trace's `span_traceId`, as in step 1 (one call, `showLimit` covering the whole trace). Sort the spans by `span_start` first: they come back in no fixed order, and response order is not execution order. Then build the parent/child waterfall from `span_id` and `span_parentId`: which child spans take the time, which fail, and which run one after another (one starts after the previous ends) when they could run in parallel.
+- If no trace tree was supplied, call `tracing-detail` for the slow or failing trace's `span_traceId`, as in step 1 (one call with `showLimit: 150`; for a bigger trace, say the waterfall covers only part of it). Sort the spans by `span_start` first: they come back in no fixed order, and response order is not execution order. Then build the parent/child waterfall from `span_id` and `span_parentId`: which child spans take the time, which fail, and which run one after another (one starts after the previous ends) when they could run in parallel.
 - If `tracing-detail` is not among the available tools (consoles before 6.5.2), returns an error, or returns no spans, stay with the collapsed trace-list evidence and say that the waterfall was not available.
 - If the user supplied the full trace tree/export, analyze `span_parentId` vs child hierarchy directly.
 
@@ -73,4 +73,5 @@ description: >-
 - A slow top-level span may be caused by a slow child span, but only assert that when the full hierarchy is available, from `tracing-detail` or a supplied trace tree.
 - Never pass `span_traceId` to `tracing` to look up one trace; it ignores the filter. Use `tracing-detail`.
 - Read `tracing-detail` spans in `span_start` order; the order they arrive in means nothing.
+- When `returnedSpans` is below `totalSpans`, the waterfall is a sample: report repeated spans from it, never the critical path or a total.
 - Filter out expected long-polling or WebSocket connections when hunting for latency regressions.
