@@ -6,6 +6,35 @@ description: >-
 
 This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Saving rules and acknowledging or silencing alerts need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
 
+## Start a Newly Connected Service's Baseline
+
+When setting up alerts for a newly connected service, call `list_alert_starters`.
+It returns the same starters the web editor offers, each with an id, title,
+reason (`why`) and a `spec` in `set_alert_rule`'s terms. Read the current list;
+do not keep copies of starter definitions or reconstruct their thresholds.
+
+- Call `list_alert_rules` first. Check both names and coverage: a tenant-wide
+  rule may already cover the service. Offer the useful missing starters and
+  explain their reasons; do not install the whole list automatically.
+- Review each chosen `spec` with the user. Starters are enabled, cover every
+  process or app, have no notification channels, and take no diagnostics.
+  Agree on the intended coverage and whether to record alerts only or use
+  existing channels from `list_alert_channels`.
+- For one service, add an app expression in `scope` for metric/event rules.
+  For finding/behavior rules, combine the original `where` with the app
+  expression using parentheses. Use the expression language's escaped string
+  syntax for the app name. Choose an unused rule name for service-specific
+  rules; a name already in use replaces the whole rule.
+- Preview what it would have caught using step 3 below, and show the final
+  spec. Once the user authorizes saving, pass that spec with the selected
+  `tenant` to `set_alert_rule`; do not pass the starter's id, title or why.
+  Keep each metric's letters, windows, conditions and hold times unless the
+  user asks to tune them. Report any warnings from the save.
+- Without `set_alert_rule`, review and draft only. The web editor can open a
+  selected starter at `/t/{tenant}/alerts/rules/new?starter={id}`. If
+  `list_alert_starters` is unavailable on an older server, explain that the
+  baseline catalog needs a server update; do not invent replacement starters.
+
 ## Defining a Rule
 
 ### 1. Turn the Request into a Rule Kind
