@@ -6,12 +6,46 @@ description: >-
 
 This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Saving rules and acknowledging or silencing alerts need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
 
+## Start a Newly Connected Service's Baseline
+
+When setting up alerts for a newly connected service, call `list_alert_starters`.
+It returns the same starters the web editor offers, each with an id, title,
+reason (`why`) and a `spec` in `set_alert_rule`'s terms. Read the current list;
+do not keep copies of starter definitions or reconstruct their thresholds.
+
+- Call `list_alert_rules` first. Check both names and coverage: a tenant-wide
+  rule may already cover the service. Offer the useful missing starters and
+  explain their reasons; do not install the whole list automatically.
+- Review each chosen `spec` with the user. Starters are enabled, cover every
+  process or app, have no notification channels, and take no diagnostics.
+  Agree on the intended coverage and whether to record alerts only or use
+  existing channels from `list_alert_channels`.
+- For one service, add an app expression in `scope` for metric/event rules.
+  For finding/behavior rules, combine the original `where` with the app
+  expression using parentheses. Use the expression language's escaped string
+  syntax for the app name. Choose an unused rule name for service-specific
+  rules; a name already in use replaces the whole rule.
+- Preview what it would have caught using step 3 below, and show the final
+  spec. Once the user authorizes saving, pass that spec with the selected
+  `tenant` to `set_alert_rule`; do not pass the starter's id, title or why.
+  Keep each metric's letters, windows, conditions and hold times unless the
+  user asks to tune them. Report any warnings from the save.
+- Without `set_alert_rule`, review and draft only. The web editor can open a
+  selected starter at `/t/{tenant}/alerts/rules/new?starter={id}`. If
+  `list_alert_starters` is unavailable on an older server, explain that the
+  baseline catalog needs a server update; do not invent replacement starters.
+
 ## Defining a Rule
 
 ### 1. Turn the Request into a Rule Kind
 - **Metric rule**: a measurement crossing a line for a while ("CPU over 80% for 5 minutes", "p99 latency over 500 ms", "heap over 1.5 GB"). `metric.name` (`cpu_percent`, `used_heap_size`, `rss`, `loop_estimated_lag`, `loop_utilization`, `http_server` with `field: "p99"`, …; `list_metrics` lists what the tenant reports, an app's own OpenTelemetry metrics included under their stored names: `orders.created` is `orders_created`), `agg` (default `max`; `rate` for a counter's increase per second; `change` for how much it moved over the window), `condition` over `value` in the metric's unit (`value > 80`, `value > 500ms`, `value > 1.5GiB`), `forMinutes` (how long it must hold), `keepFiringForMinutes`, `groupBy` `agent` (each process) or `app`.
   - **A window:** `windowMinutes` (1 to 1440, default 1) judges a longer stretch. "RSS climbing for an hour" is `rss` with `agg: "change"`, `windowMinutes: 60`, `value > 200MiB`.
   - **A ratio:** `per` names a second metric, and `value` becomes the ratio: `used_heap_size` per `heap_size_limit` with `value > 0.9` is "heap at 90% of its limit".
+  - **Several metrics:** `metric.values` in place of `metric.name` reads up to five metrics, `A` to `E`, each its own way, and the `condition` chains the letters with `&&`, `||`, `!` and parentheses, each letter in its own metric's unit. "CPU over 80% while the loop is saturated" is `values: {A: {name: "cpu_percent", agg: "avg", windowMinutes: 5}, B: {name: "loop_utilization"}}` with `condition: "A > 80 && B > 0.9"`.
+    - `agg`, `field`, `windowMinutes` and `per` go in each value: given beside `values`, they are refused.
+    - The condition must use every letter: each one costs a read on every evaluation.
+    - A process or app with no value for a letter (it doesn't report that metric) makes that letter's comparisons false: `A > 80 && B > 0.9` doesn't hold without B, and `A > 80 || B > 0.9` holds on A alone.
+    - Letters compare with numbers only. Comparing two letters or doing arithmetic on them (`A > 1.5 * B`, `C / D > 0.85`) isn't supported yet: for a ratio, give one value a `per`.
   - **Silence:** `noData: "fire"` makes a group that reported in the last hour and has gone quiet hold, instead of resolving. "Tell me when checkout stops reporting" is `cpu_percent`, `value < 0` (never true on a value), `noData: "fire"`, `forMinutes: 5`, `groupBy: "app"`, scoped to the app. A process that exited, or was lost, is gone rather than quiet: use an event rule for those.
   - Agents report every 5 s by default. For agents set to report less often than once a minute, make the window at least that long.
 - **Event rule**: something that happens ("a process crashes", "the loop blocks over a second"). `event.where` over agent events: `type == "exit" && exitCode != 0`, `exitSignal == "SIGABRT"`, `type == "loop_blocked" && blockedFor > 1s`, `type == "lost"` (a process gone 15 minutes without an exit: SIGKILL, the out-of-memory killer, its host lost; the alert comes 15 minutes after it was last heard from). `resolveAfterMinutes` closes it after a quiet spell. `count` with `withinMinutes` fires only once that many matching events of a group came within the window ("3 exits in 10 minutes": `count: 3`, `withinMinutes: 10`); until then it is pending.
@@ -25,7 +59,7 @@ This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools ta
 
 ### 3. Check What It Would Have Caught
 Before saving, show the user what the rule would have done:
-- **Metric rule:** `query_metric` with the same metric, `agg`, `field`, the scope's app or `where`, and `from: "-24h"` (or `-7d`). Say how often and for how long the series crossed the line, and whether `forMinutes` would have held it back. A rule that would have fired all day is noise; one that never would have may be too loose. For `per`, query both metrics and compare them; for `change`, compare each window's start and end.
+- **Metric rule:** `query_metric` with the same metric, `agg`, `field`, the scope's app or `where`, and `from: "-24h"` (or `-7d`). Say how often and for how long the series crossed the line, and whether `forMinutes` would have held it back. A rule that would have fired all day is noise; one that never would have may be too loose. For `per`, query both metrics and compare them; for `change`, compare each window's start and end. With `values`, query each letter the way its value reads it, and say how often they crossed their lines together (for `&&`) or either did (for `||`).
 - **Event rule:** `list_events` with the same `where` (and the scope's app) over the last day or week: how many events would have fired it, from how many processes. With `count`, `event_histogram` with the same filters and `step` set to the window (`"10m"`) shows whether that many ever came within one.
 - **Finding rule:** `list_vulnerabilities` with the same `where`: what is open now. These would not alert (only new ones do), but they show the rule matches what the user expects.
 - **Behavior rule:** `list_behaviors` with the same `where`.
