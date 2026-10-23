@@ -12,6 +12,7 @@ The watch learns what each app's packages do from its CPU profiles, and reports 
 - `list_behaviors` (open ones, most severe first), with `app` when the user names one, `kind` (`capability`, `package`, `regression`, `drift`) or `where`, e.g. `severity >= "high"`, `capability == "network"`, `versionChange`.
 - Each behavior names the app, the package and its versions, what it `does`, its severity, the modules and functions involved, when it was first and last seen, and how many profiles showed it against how many before did not.
 - `versionChange` means it arrived with a new version of the package while earlier versions never did it. That is how a compromised release of a dependency shows at run time, and it weighs a step more.
+- `notInScan` means the package's published code imports none of the modules it was seen calling: it was seen running programs or compiling code that its source never imports, so something reached them another way (a module required by a computed name, code fetched and evaluated). It weighs a step more too, and the package version fails `observed-not-in-scan` in `app_packages`.
 
 ### 2. Judge Each One
 - **New capability** (`process`: runs programs; `code`: compiles code; `network`; `threads`; `fs`): is it expected of that package? A logging library that starts spawning processes, or a date library that starts using the network, is suspicious; a database driver using the network is not.
@@ -19,6 +20,7 @@ The watch learns what each app's packages do from its CPU profiles, and reports 
   - `compare_release_calls` for the app's release that brought it shows the call against the release before, and the package upgrades that came with it.
   - `find_package` with the package name shows which apps and processes run which versions of it.
   - `list_vulnerabilities` with `where: '"<package>" in packages'` shows whether the version is a known malicious or vulnerable release (`MAL-…` reports are malicious packages).
+  - For a `notInScan` behavior, `app_packages` with the `app` lists the version's failing checks. `risk/uses-dynamic-require` (a module imported by a computed name) or `risk/uses-eval` (code compiled from a string) could explain how it reached the module. With neither, it got there by an unusual loader (such as `module.constructor._load`) or through code that isn't in the published package, fetched at run time: either is a strong sign.
 - **New package** (running at all for the first time): which dependency brought it in (`get_sbom` with the `app` and `package` gives the chain) and whether that was expected.
 - **Regression**: a package taking more of the CPU in a release; `compare_releases` shows the rest of that release. Hand it to `ns-analyze-release`.
 - **Drift**: dependency versions that changed with no new release (a rebuilt image of the same version, or a change on disk under a running process). Ask whether the build pins its lockfile; an unexpected change under a running process deserves an incident.
