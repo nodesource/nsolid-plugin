@@ -56,14 +56,14 @@ Return a response with these sections:
    - Update CI/CD configuration (GitHub Actions `node-version`, Dockerfile `FROM node:X`, etc.).
    - Run tests with the new version and watch for deprecation warnings.
    - Check for incompatible native modules (`node-gyp` rebuild if needed).
-6. **Dependency Compatibility** — read direct deps from `package.json` (`dependencies`, `devDependencies`, `optionalDependencies`) and call `getPackageVersions` with `{name, version}` entries to check target-Node incompatibilities if NCM reports them.
+6. **Dependency Compatibility** — list direct deps from `package.json` (`dependencies`, `devDependencies`, `optionalDependencies`) and take each one's installed version from the lockfile, not the `package.json` range. Leave out `workspace:`, `file:`, `link:` and git specs: one of them fails the whole `getPackageVersions` call. Call `getPackageVersions` with `{name, version}` entries. NCM doesn't say which Node.js versions a package supports. In each result's `allScores`, the entry named `uses-deprecated-node-apis` lists the deprecated Node.js APIs that version uses, which may warn or break on the target line: report the ones with `pass: false`. (`moduleRisks` lists failing checks without their names.) Also compare each dependency's `engines.node` (`npm view <pkg>@<version> engines`, with the exact version: a range prints every matching version) with the target. Say that neither is a full compatibility check; the test suite on the target version is.
 7. **Verification** — how to confirm the upgrade was successful (`node --version`, test suite, check for `DeprecationWarning`s in output).
 
 ### 5. Re-detect if Needed
 If the user asks about a specific version mid-conversation, re-run the detection in step 2 (`package.json` engines, `.nvmrc`, `.node-version`, or `node --version`) to refresh the current version.
 
 ## Tools
-- `getPackageVersions` — check direct dependencies for known incompatibilities with target Node version.
+- `getPackageVersions` — NCM's `uses-deprecated-node-apis` score (in `allScores`) for each direct dependency, at its lockfile version.
 
 ## Guardrails
 - The release schedule table from `fetch-node-releases.cjs` or the injected host table is authoritative. Do not override LTS names, EOL dates, or latest patch versions with training-data values.
