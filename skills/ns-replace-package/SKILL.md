@@ -11,7 +11,7 @@ description: >-
 
 ### 2. Fetch NCM Data for the Target Package
 - Call `getPackageQuality` for the package being replaced.
-- Document: vulnerabilities (severity + title), license, module risks flagged by NCM (e.g. install scripts, obfuscation, author risk, malware), quality scores.
+- Document: vulnerabilities (severity + title), license, module risks flagged by NCM (e.g. deprecated, install scripts, eval, unsafe regexps, deprecated Node APIs), quality scores.
 - Use these findings as the objective reasons why replacement is warranted.
 
 ### 3. Propose Alternatives
@@ -26,7 +26,7 @@ Present a comparison table or ranked list with these columns:
 - NCM vulnerability status
 - License
 - NCM module risks
-- Maintenance signal (latest version age, if available from NCM)
+- Maintenance signal: the latest version and its age, from the npm registry (`npm view <pkg> version`, then `npm view <pkg> 'time[<version>]'`). NCM's `latest` can trail npm by weeks.
 - Why it is or isn't recommended
 
 Lead with the strongest recommendation and explain the tradeoff clearly.
@@ -42,6 +42,7 @@ For the top recommended alternative, provide:
 
 ## Tools
 - `getPackageQuality` — call once for the target package and once for each proposed alternative. Do not recommend an alternative without querying NCM for it first.
+- `npm view <pkg> version` and `npm view <pkg> 'time[<version>]'` — the latest published version and when it was published, from the npm registry.
 
 ## Guardrails
 - Do not invent unpublished or fictional alternatives. Only recommend packages that genuinely exist and are relevant to the use case.
