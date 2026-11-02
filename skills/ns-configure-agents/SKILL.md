@@ -1,7 +1,7 @@
 ---
 name: ns-configure-agents
 description: >-
-  Changes how N|Solid agents run, safely: tracing on or off, continuous CPU profiling, the metrics interval, the blocked-loop threshold, trace sampling, snapshot redaction, tags. Use when the user wants tracing turned on for an app, continuous profiling for a while, a different metrics interval, or asks why a process has a setting. Previews every change, prefers changes that expire, and explains where each running value came from.
+  Changes how N|Solid agents run, safely: tracing on or off, continuous CPU profiling, the metrics interval, the blocked-loop threshold, trace sampling, snapshot redaction, tags. Use when the user wants tracing turned on for an app, continuous profiling for a while, a different metrics interval, asks why a process has a setting, or asks for a named config's history: who changed it and what it held before. Previews every change, prefers changes that expire, and explains where each running value came from.
 ---
 
 This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Changing configuration needs the `nsolid:dynamic-configuration` permission; without it the change tools are missing, and the skill can still explain and preview.
@@ -11,6 +11,7 @@ N|Solid keeps agents at **desired configs**: each targets processes by an expres
 ### 1. Understand What Runs Now
 - `list_desired_configs`: the configs the tenant keeps, with their targets, settings and priority; ones with `expiresAt` are temporary overrides.
 - `agent_config` with an `agentId`: what that process reports, what it should have and which config set each key, what is still to apply, and whether it has converged. Use it to answer "why does this process have that setting?"
+- `desired_config_history` with a config's `name`: its 50 newest saves and deletes, each with the settings, target, priority, expiry, who made it and when. Deleted configs keep their history. Read it before changing or deleting a named config, to see who set it and what it held before. No tool restores an earlier version: to go back to one, make it a new change and preview and apply it as below.
 
 ### 2. Shape the Change
 - Settings: `tracingEnabled`, `traceSampleRate` (0 to 1), `contCpuProfile` (continuous CPU profiling), `interval` (metrics, ms), `blockedLoopThreshold` (ms), `pauseMetrics`, `promiseTracking`, `redactSnapshots`, `assetsEnabled`, `tags`. Turning `contCpuProfile` on needs the tenant's continuous-profiling feature: where N|Solid has it off, the save is refused, and processes stay off whatever a config says.

@@ -1,10 +1,12 @@
 ---
 name: ns-analyze-event
 description: >-
-  Investigates an existing N|Solid event or N|Solid alert and correlates the relevant evidence from N|Solid. Use when the user provides or references an event or alert such as a blocked event loop, a process exit or crash, an uncaught exception, a new vulnerability, a new package behavior, a stack trace, or span data. Routes follow-up to CPU, memory, vulnerability, or tracing workflows when needed.
+  Investigates an existing N|Solid event or N|Solid alert and correlates the relevant evidence from N|Solid. Use when the user provides or references an event or alert such as a blocked event loop, a process exit or crash, an uncaught exception, a new vulnerability, a new package behavior, a stack trace, or span data. Also use when the user asks why an agent dropped, disconnected or reconnected, even without a specific event or alert. Routes follow-up to CPU, memory, vulnerability, or tracing workflows when needed.
 ---
 
 This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the event or user names.
+
+**No event, just a drop or reconnect.** When the user asks why an app or process dropped, disconnected or reconnected without giving an event or alert, skip parsing: resolve the app or process they name with `find_agents` to get its actual `agentId` (ask only for the missing app or process when they named neither), then go straight to **Lifecycle** in step 2. Use the time window they gave for `list_events`, or say which recent window you used (such as `-1h`) when they gave none; `agent_sessions` takes no `from`/`to`.
 
 ### 1. Parse the Event
 - Recognize the payload's shape before anything else:
@@ -26,8 +28,9 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|S
 - **New behavior** (a behavior alert: a package that newly runs programs, compiles code, uses the network, starts threads or touches files; a release regression; dependency drift):
   - Call `list_behaviors` for the app. A regression's release comparison is in `compare_releases`; a new capability or drift in a dependency may be a supply-chain problem, so hand it to `ns-analyze-vulnerabilities`.
 - **Lifecycle** (an exit, a disconnect, repeated restarts; console `agent-exit`):
-  - Call `list_events` with the same `app` or `agentId`, `types: ["exit", "lost", "disconnect"]` and `from`/`to` around the event.
+  - Call `list_events` with the same `app` or `agentId`, `types: ["exit", "lost", "disconnect", "connect"]` and `from`/`to` around the event (or the window chosen above).
   - Call `list_ended_processes` with the `app`: how each process ended (an exit code and signal, an abort, or lost without a word), how long it lived, and its peaks. `get_agent` gives one process's exit error and stack.
+  - For drops and reconnects, `agent_sessions` with the `agentId`: its command-stream sessions, newest first (20, or `limit` up to 200), with connect and close times, the close reason, gateway, peer, host and N|Solid version. A session that closed and was followed by a new one is a reconnect; report the reason and gateway it shows. A closed session does not prove a crash: to learn how the process ended, inspect its `exit` or `lost` event or `list_ended_processes`, and do not treat a normal exit or a `lost` event alone as proof of a crash.
   - For "how often", `event_histogram` with the `app` and `types: ["exit", "lost"]` counts them per bucket over a day or a month: one restart, or a crash loop.
   - A lost process left no exit: look at its last minutes instead (`query_metric` for `rss` and `used_heap_size` with `agentIds: ["<agentId>"]`, up to its last report). Memory climbing to the end suggests the out-of-memory killer.
   - Call `query_metric` with explicit metrics (`used_heap_size`, `rss`, `cpu_percent`) and `agentIds: ["<agentId>"]` before the event to spot resource spikes. Running out of memory shows as an abort (`SIGABRT`) with the heap at its limit.

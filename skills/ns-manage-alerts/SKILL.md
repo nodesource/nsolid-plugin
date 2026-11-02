@@ -1,10 +1,10 @@
 ---
 name: ns-manage-alerts
 description: >-
-  Defines, reviews, tunes and triages N|Solid alert rules and alerts. Use when the user wants to be alerted or paged on something (CPU, memory, event loop lag, latency, crashes or a crash loop, a process killed or lost, an app that stops reporting, blocked loops, new or known exploited vulnerabilities, a dependency's new behavior or a release regression), asks what alerts exist, which are firing or whether a rule is working, wants to acknowledge or silence an alert, switch a rule off, or wants a noisy rule fixed. Writes rules in N|Solid's expression language and checks what each would have caught before saving it.
+  Defines, reviews, tunes and triages N|Solid alert rules and alerts. Use when the user wants to be alerted or paged on something (CPU, memory, event loop lag, latency, crashes or a crash loop, a process killed or lost, an app that stops reporting, blocked loops, new or known exploited vulnerabilities, a dependency's new behavior or a release regression), asks what alerts exist, which are firing or whether a rule is working, wants to acknowledge or silence an alert or end a silence early, switch a rule off, or wants a noisy rule fixed. Writes rules in N|Solid's expression language and checks what each would have caught before saving it.
 ---
 
-This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Saving rules and acknowledging or silencing alerts need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
+This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Saving rules, acknowledging or silencing alerts and ending a silence need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
 
 ## Start a Newly Connected Service's Baseline
 
@@ -93,13 +93,14 @@ Before saving, show the user what the rule would have done:
 - `get_alert` with the `fingerprint`: the event or value that fired it, the diagnostic its rule took (an `assetId`: read it with `profile_hotspots` or `heap_summary`), the continuous profiles kept from around it, its history and its notifications.
 - Hand the investigation to the skill that fits: `ns-cpu-spike-analysis`, `ns-memory-spike-analysis`, `ns-analyze-event`, `ns-analyze-vulnerabilities` or `ns-analyze-behaviors`.
 - `ack_alert` marks it acknowledged until it fires again; `silence_alert` with `minutes` stops its notifications for a while (it still changes state). Do either only when the user asks.
+- `unsilence_alert` ends a silence early, only when the user asks. Read `get_alert` first for who silenced it (`silencedBy`) and until when (`silencedUntil`): none, or a time already past, means there is no silence to end, so say so instead. If `get_alert` is refused, say the silence's details are unavailable, and still get the same go-ahead. Confirm before ending it unless the user already explicitly asked to end that alert's silence. Ending a silence sends no notification and keeps the alert's state; its next firing or resolution may notify the rule's enabled channels again, PagerDuty included: tell the user.
 
 ## Present the Result
 - For a new or changed rule: the rule as saved, what it would have caught (step 3), and where it notifies.
 - For triage: what is firing, since when, what the evidence shows, and the next step.
 
 ## Guardrails
-- Never save, change, switch off, delete, acknowledge or silence without the user's say-so; show the rule first.
+- Never save, change, switch off, delete, acknowledge, silence or end a silence without the user's say-so. Show the rule first when creating or changing one; ending a silence the user explicitly asked to end needs no rule shown and no second confirmation.
 - Never add `diagnose: "snapshot"` unasked: it pauses the application.
 - Do not invent channels: use only names `list_alert_channels` returned.
 - A rule on blocked loops shorter than the agents report makes N|Solid lower the `blockedLoopThreshold` of the processes in its scope to match (of every process, when the scope is on packages); mention it when saving one.
