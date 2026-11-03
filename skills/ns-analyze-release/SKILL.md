@@ -53,6 +53,7 @@ When the user wants deploys recorded, or profiles of a bundled or minified app t
 - `app` and `version` must be what the processes report: the app name (`NSOLID_APPNAME`, else `package.json`'s `name`) and `package.json`'s `version`.
 - Add the steps to the workspace's CI configuration (GitHub Actions, GitLab CI, or the user's script) with the token as a secret and the API URL as a variable. Show the change and make it only with the user's approval.
 - Afterwards, `list_sourcemaps` with the `app` shows the uploaded sets, and `list_releases` the marked deploys.
+- `get_sourcemap_set` with a `setId` from `list_sourcemaps` describes that set, never with source contents: `maps` counts the whole set, and `entries` details at most 200 maps (generated path, size, original file count). `path` keeps the maps whose path contains that text: `mapsMatched` counts them all and `mapsOmitted` the ones left out of `entries`. To check that a bundle's map was uploaded, pass part of the bundle's path as `path`; a map missing from the first 200 entries is not proof that it wasn't uploaded. No MCP tool uploads maps: people upload them from CI or from a profile's page in the web UI. Deleting a set, which has no undo, is left to people in the web UI or API.
 
 ### 7. Present the Report
 - `# Release Analysis — <app> <base> → <version>`

@@ -1,12 +1,14 @@
 ---
 name: ns-analyze-asset
 description: >-
-  Analyzes an existing N|Solid diagnostic asset in N|Solid by asset ID or local asset path. Use when the user asks to inspect, review, summarize, or interpret an already-captured CPU profile, heap profile, heap sample, heap tracking file, or heap snapshot, including assets just produced by ns-generate-asset. Do not use to capture new profiles/snapshots.
+  Analyzes an existing N|Solid diagnostic asset in N|Solid by asset ID or local asset path. Use when the user asks to inspect, review, summarize, or interpret an already-captured CPU profile, heap profile, heap sample, heap tracking file, or heap snapshot, including assets just produced by ns-generate-asset. Also use when the user asks to restore a deleted diagnostic profile or snapshot. Do not use to capture new profiles/snapshots.
 ---
 
 This skill reads assets through the N|Solid MCP server (`nsolid`) and bundled scripts. The scripts need the server's settings: `NSOLID_API_URL` and `NSOLID_API_TOKEN` in the environment, or `~/.agents/.nsolid-auth.json` with `apiUrl` and `token` (plus `tenant` when the token can use several tenants).
 
 ## Instructions
+
+When the user asks to restore a deleted profile or snapshot, pick the tenant (step 1), then go straight to [Restoring a Deleted Asset](#restoring-a-deleted-asset) instead of steps 2–10. Every other request follows the steps below.
 
 ### 1. Pick the Tenant
 - The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Pass the same tenant to every call, and set `NSOLID_TENANT` for the scripts.
@@ -122,7 +124,17 @@ Rules:
   node "<skill-dir>/fetch-nsolid-asset.cjs" <assetId> <appName>
   ```
 
+## Restoring a Deleted Asset
+Only when the user asks to bring back a deleted profile or snapshot. Never restore one in order to analyze it.
+- `list_assets` with `status: "deleted"` (narrowed by `agentId` or `kind`) lists deleted assets. It returns one page (20 by default, `limit` up to 100), ordered by when files completed, not when they were deleted, so an asset missing from it is not proof that no restore is possible. Ask again with `limit: 100` and the narrowest `agentId` and `kind`. If it is still missing, tell the user that the MCP tool can't page further, and that they (or an API client they have already authenticated) can page `GET /v1/tenants/{tenant}/assets?status=deleted`, passing each response's `nextCursor` back as `cursor`, narrowed with the REST filters `agent` (not `agentId`) and `kind` as fits. Don't read credentials, build token-bearing requests yourself, or page the API without end. Never say the absence proves no restore is possible.
+- `undoUntil` is the deadline; don't assume a fixed window. Only an asset whose `undoUntil` is still in the future can come back. Check it before offering a restore.
+- `restore_asset` with the `assetId` needs the **Keeping files** permission (`nsolid:manage-assets`); without it the tool is missing.
+- A file may have been deleted because of what it contains: a heap snapshot can hold secrets and personal data. Confirm with the user before restoring, unless they already explicitly asked to restore that asset.
+- After `undoUntil` the API answers 410: the asset can't be restored. Say so; don't retry.
+- Report the result as returned, `pinned` included: a pinned asset comes back unpinned when it would exceed the pinned budget, with at least a day before its file goes.
+
 ## Guardrails
+- Never restore a deleted asset unless the user asked for it.
 - Never analyze an asset that is not analyzed yet. Wait and ask again until the summary has real content, or say it isn't ready.
 - Do not lie about findings. If the summary lacks detail, say so explicitly.
 - Never read raw asset files or the HTML reports into context; download and render them only with the bundled `fetch-nsolid-asset.cjs` and `render-cpu-report.cjs`.
