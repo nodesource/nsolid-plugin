@@ -4,7 +4,7 @@ description: >-
   Investigates an existing N|Solid event or N|Solid alert and correlates the relevant evidence from N|Solid. Use when the user provides or references an event or alert such as a blocked event loop, a process exit or crash, an uncaught exception, a new vulnerability, a new package behavior, a stack trace, or span data. Also use when the user asks why an agent dropped, disconnected or reconnected, even without a specific event or alert. Routes follow-up to CPU, memory, vulnerability, or tracing workflows when needed.
 ---
 
-This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the event or user names.
+This skill reads N|Solid data through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the event or user names.
 
 **No event, just a drop or reconnect.** When the user asks why an app or process dropped, disconnected or reconnected without giving an event or alert, skip parsing: resolve the app or process they name with `find_agents` to get its actual `agentId` (ask only for the missing app or process when they named neither), then go straight to **Lifecycle** in step 2. Use the time window they gave for `list_events`, or say which recent window you used (such as `-1h`) when they gave none; `agent_sessions` takes no `from`/`to`.
 

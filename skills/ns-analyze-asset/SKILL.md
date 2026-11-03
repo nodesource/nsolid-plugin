@@ -11,7 +11,7 @@ This skill reads assets through the N|Solid MCP server (`nsolid`) and bundled sc
 When the user asks to restore a deleted profile or snapshot, pick the tenant (step 1), then go straight to [Restoring a Deleted Asset](#restoring-a-deleted-asset) instead of steps 2–10. Every other request follows the steps below.
 
 ### 1. Pick the Tenant
-- The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Pass the same tenant to every call, and set `NSOLID_TENANT` for the scripts.
+- Most N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Pass the same tenant to every tenant-scoped call, and set `NSOLID_TENANT` for the scripts.
 
 ### 2. Identify the Asset
 - The user should provide an asset ID or an app name with asset type.

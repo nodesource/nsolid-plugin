@@ -4,18 +4,19 @@ description: >-
   Changes how N|Solid agents run, safely: tracing on or off, continuous CPU profiling, the metrics interval, the blocked-loop threshold, trace sampling, snapshot redaction, tags. Use when the user wants tracing turned on for an app, continuous profiling for a while, a different metrics interval, asks why a process has a setting, or asks for a named config's history: who changed it and what it held before. Previews every change, prefers changes that expire, and explains where each running value came from.
 ---
 
-This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Changing configuration needs the `nsolid:dynamic-configuration` permission; without it the change tools are missing, and the skill can still explain and preview.
+This skill works through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Changing configuration needs the `nsolid:dynamic-configuration` permission; without it the change tools are missing, and the skill can still explain and preview.
 
 N|Solid keeps agents at **desired configs**: each targets processes by an expression (or an app, tags or one agent), has a priority, and can expire. Processes started later get them too, and N|Solid confirms each change from the agent's own report. That beats changing one process once, which a restart forgets.
 
 ### 1. Understand What Runs Now
-- `list_desired_configs`: the configs the tenant keeps, with their targets, settings and priority; ones with `expiresAt` are temporary overrides.
+- `list_desired_configs`: the configs the tenant keeps, with their targets, settings (as `config`) and priority; ones with `expiresAt` are temporary overrides.
 - `agent_config` with an `agentId`: what that process reports, what it should have and which config set each key, what is still to apply, and whether it has converged. Use it to answer "why does this process have that setting?"
 - `desired_config_history` with a config's `name`: its 50 newest saves and deletes, each with the settings, target, priority, expiry, who made it and when. Deleted configs keep their history. Read it before changing or deleting a named config, to see who set it and what it held before. No tool restores an earlier version: to go back to one, make it a new change and preview and apply it as below.
 
 ### 2. Shape the Change
+- `preview_desired_config` and `set_desired_config` accept exactly one of `settings` or its alias `config`, never both. `list_desired_configs` names those settings `config`; its `where` is an expression tree, while `whereText` is the expression string the input accepts. Do not pass the entire returned row as tool arguments. Selectors and configuration subtrees are kept whole, but their entire entry can be omitted by the byte cap: a missing name in a partial list is not proof it is absent.
 - Settings: `tracingEnabled`, `traceSampleRate` (0 to 1), `contCpuProfile` (continuous CPU profiling), `interval` (metrics, ms), `blockedLoopThreshold` (ms), `pauseMetrics`, `promiseTracking`, `redactSnapshots`, `assetsEnabled`, `tags`. Turning `contCpuProfile` on needs the tenant's continuous-profiling feature: where N|Solid has it off, the save is refused, and processes stay off whatever a config says.
-- Target: `app`, `tags`, one `agentId`, or `where`, an expression over what a process is (`app == "checkout" && hostname.endsWith(".prod")`, `nodeVersion >= "22"`; `expression_help` with context `selector` lists the fields). Every process of the tenant needs `allAgents: true` and the user's explicit agreement.
+- Target: `app`, `tags`, one `agentId`, or `where`, an expression over what a process is (`app == "checkout" && hostname.endsWith(".prod")`, `nodeVersion >= "22"`; `expression_help` with context `selector` lists the fields; it takes no `tenant`). Every process of the tenant needs `allAgents: true` and the user's explicit agreement.
 - **Prefer an expiring override** for anything diagnostic: `expiresInMinutes` makes it stop applying, and the processes go back to what they had. Tracing or continuous profiling "for the next hour" is an override of 60 minutes.
 - `priority`: higher wins where configs disagree.
 - Names use letters, digits, `.`, `_` and `-`: `checkout-tracing-1h`.

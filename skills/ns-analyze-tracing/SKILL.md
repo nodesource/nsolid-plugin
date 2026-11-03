@@ -4,7 +4,7 @@ description: >-
   Analyzes N|Solid/OpenTelemetry tracing evidence from N|Solid for request latency, HTTP errors, and service dependencies. Use when the user asks about slow endpoints, API timeouts, distributed traces/spans, N+1 queries, await chains, microservice latency, cascading failures, or trace IDs. Query N|Solid only when no trace data was provided.
 ---
 
-This skill reads traces through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names.
+This skill reads traces through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names.
 
 ### 1. Use Provided Trace Data First
 - Treat the prompt as primary evidence. Parse any provided trace ID, span list, app name, endpoint name, status code, duration, or error stack before calling tools.
@@ -13,7 +13,7 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). The N|Solid t
 
 ### 2. Discover Services Only When Needed
 - **Skip this step if sufficient host-provided trace data is present**, or when the user names the service or app.
-- Call `list_apps` for the app names. A span's `service` is its app's name.
+- Call `list_apps` for the app names. A span's `service` is its app's name. An app missing from an omitted or truncated answer is not proven absent: pass the named app straight to the tools that take it, or ask the user for its exact name.
 - The N|Solid server doesn't collect AWS Lambda functions; if the user asks about a serverless function, say so.
 
 ### 3. Find Slow Requests Only If No Trace Was Supplied

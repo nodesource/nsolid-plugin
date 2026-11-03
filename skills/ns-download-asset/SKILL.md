@@ -10,7 +10,7 @@ This skill downloads N|Solid assets with a bundled script, finding them through 
 
 ### 1. Pick the Tenant
 
-- The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Set `NSOLID_TENANT` for the script.
+- Most N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Set `NSOLID_TENANT` for the script.
 
 ### 2. Identify the Asset
 

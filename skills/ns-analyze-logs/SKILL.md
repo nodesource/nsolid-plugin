@@ -4,7 +4,7 @@ description: >-
   Searches and analyzes the logs N|Solid keeps from Node.js apps (nsolid.logger and OpenTelemetry logs): errors and warnings by app, process, text or severity, a request's logs (by its trace, for OpenTelemetry logs), and how they line up with exits, blocked loops and slow traces. Use when the user asks what an app logged, to find errors in production logs, what happened around an incident, or for the logs of a specific request or trace.
 ---
 
-This skill reads logs through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names.
+This skill reads logs through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names.
 
 N|Solid keeps logs for 14 days by default. Apps send them through the N|Solid logger (`nsolid.logger`) or an OpenTelemetry SDK. Only OpenTelemetry logs carry trace and span ids: `nsolid.logger` lines have none yet, so they are found by process and time rather than by trace.
 
@@ -14,7 +14,7 @@ N|Solid keeps logs for 14 days by default. Apps send them through the N|Solid lo
   - `severity`: the least severe to include (e.g. `warn`);
   - `agentId`: one process (`find_agents` finds them by app or host);
   - `traceId`: one request's logs (OpenTelemetry logs only);
-  - `where`: an expression, e.g. `level >= "error" && service == "checkout"`, `body.contains("ECONNREFUSED")`, `attr["http.route"] == "/orders"` (`expression_help` with context `log` lists the fields).
+  - `where`: an expression, e.g. `level >= "error" && service == "checkout"`, `body.contains("ECONNREFUSED")`, `attr["http.route"] == "/orders"` (`expression_help` with context `log` lists the fields; it takes no `tenant`).
 - Start narrow (an app, errors, the incident's window) and widen only as needed.
 
 ### 2. Correlate
