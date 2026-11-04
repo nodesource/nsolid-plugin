@@ -254,8 +254,16 @@ export async function cancelManagedTree (
         process.kill(groupId, 0)
         await sleep(25) // group still exists (e.g. a grandchild) — keep polling
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ESRCH') return { confirmed: true }
-        return { confirmed: false, error: `process group check failed (${(err as NodeJS.ErrnoException).code})` }
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === 'ESRCH') return { confirmed: true }
+        // Darwin skips zombies when probing a group and can return EPERM
+        // until they are reaped. Keep waiting for ESRCH within the same
+        // deadline; EPERM alone never proves that cleanup is safe.
+        if (platform === 'darwin' && code === 'EPERM') {
+          await sleep(25)
+          continue
+        }
+        return { confirmed: false, error: `process group check failed (${code})` }
       }
     }
     return { confirmed: false, error: 'managed npm process group still exists after the confirmation deadline' }

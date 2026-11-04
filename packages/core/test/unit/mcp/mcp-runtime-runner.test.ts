@@ -45,6 +45,63 @@ function killTree (pid: number): void {
   }
 }
 
+describe('cancelManagedTree (Unix termination confirmation)', () => {
+  it('waits for a transient Darwin EPERM to become ESRCH before confirming termination', async (t) => {
+    let probes = 0
+    t.mock.method(process, 'kill', (pid: number, signal: NodeJS.Signals | number) => {
+      assert.strictEqual(pid, -1234)
+      if (signal === 0) {
+        probes++
+        throw Object.assign(new Error('group probe'), { code: probes === 1 ? 'EPERM' : 'ESRCH' })
+      }
+      assert.ok(signal === 'SIGTERM' || signal === 'SIGKILL')
+      return true
+    })
+
+    const outcome = await cancelManagedTree({ pid: 1234 }, Promise.resolve(), {
+      platform: 'darwin',
+      confirmMs: 5_000,
+    })
+
+    assert.deepStrictEqual(outcome, { confirmed: true })
+    assert.strictEqual(probes, 2, 'confirmation requires a later ESRCH, not EPERM alone')
+  })
+
+  it('does not confirm termination when Darwin EPERM persists to the deadline', async (t) => {
+    t.mock.method(process, 'kill', (pid: number, signal: NodeJS.Signals | number) => {
+      assert.strictEqual(pid, -1234)
+      if (signal === 0) throw Object.assign(new Error('permission denied'), { code: 'EPERM' })
+      return true
+    })
+    const start = Date.now()
+    const outcome = await cancelManagedTree({ pid: 1234 }, Promise.resolve(), {
+      platform: 'darwin',
+      confirmMs: 50,
+    })
+
+    assert.strictEqual(outcome.confirmed, false)
+    assert.ok(outcome.error)
+    assert.ok(Date.now() - start < 5_000, 'confirmation remains bounded')
+  })
+
+  for (const { platform, code } of [
+    { platform: 'linux', code: 'EPERM' },
+    { platform: 'darwin', code: 'EACCES' },
+  ] as const) {
+    it(`does not reinterpret ${code} on ${platform} as confirmed termination`, async (t) => {
+      t.mock.method(process, 'kill', (_pid: number, signal: NodeJS.Signals | number) => {
+        if (signal === 0) throw Object.assign(new Error('probe failed'), { code })
+        return true
+      })
+
+      const outcome = await cancelManagedTree({ pid: 1234 }, Promise.resolve(), { platform })
+
+      assert.strictEqual(outcome.confirmed, false)
+      assert.match(outcome.error ?? '', new RegExp(`process group check failed \\(${code}\\)`))
+    })
+  }
+})
+
 describe('cancelManagedTree (Windows termination branch)', () => {
   it('returns a bounded terminationError when taskkill never exits', async () => {
     const killer = fakeKiller()
