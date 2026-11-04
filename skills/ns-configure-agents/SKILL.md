@@ -21,8 +21,14 @@ N|Solid keeps agents at **desired configs**: each targets processes by an expres
 - `priority`: higher wins where configs disagree.
 - Names use letters, digits, `.`, `_` and `-`: `checkout-tracing-1h`.
 
+#### New Names and Replacing a Config
+- Saving under a name that exists replaces that config. A name missing from a bounded or partial `list_desired_configs` result does not authorize replacing anything: before saving a config as new, verify the exact tenant and name in a successful, complete `list_desired_configs` result (no cut notice, nothing omitted, no error), the Console, or an authorized `GET /v1/tenants/{tenant}/configs` (the full REST list; there is no route for one config by name). If none of these is available, don't save it: hand the user the drafted spec to check and save themselves.
+- The name appearing in any list, partial or not, means saving replaces that config. Show what it holds now; if the user authorized only creating a config, get their go-ahead to replace it. The user's existing go-ahead to replace that config with the same change still counts; ask nothing more.
+- `preview_desired_config` shows which processes would change; it does not prove a name is unused and does not keep the old config's settings.
+- To edit an existing config, start from its current, complete record and keep everything the user didn't ask to change: target, settings, priority, state (enabled or not) and expiry (`expiresAt`). `set_desired_config` only takes the fields its schema lists, and expiry only as a whole `expiresInMinutes` (1 to 10080) counted from the save; it cannot carry an absolute `expiresAt`, a state or any other field as it is. When the record isn't complete, or any of these can't be written exactly with the fields `set_desired_config` offers, don't save it through MCP: have the user make the change in the Console editor, or hand them the drafted change to apply there with their authorization. Never round, renew, extend or drop an expiry, drop a field the schema doesn't list, or re-enable a config as a side effect; change any of them only when the user asks, and say so.
+
 ### 3. Preview
-- `preview_desired_config` with the same inputs: how many connected processes match and which would change, without saving. Show it to the user.
+- `preview_desired_config` with the same inputs: how many connected processes match and which would change, without saving. Show it to the user. It says nothing about whether the name is in use: check that as in New Names and Replacing a Config.
 - Call out what the change costs or stops: tracing and continuous profiling add overhead; turning off metrics, tracing or assets stops that data; `redactSnapshots: false` makes later heap snapshots carry the application's strings, which can include secrets and personal data.
 
 ### 4. Apply

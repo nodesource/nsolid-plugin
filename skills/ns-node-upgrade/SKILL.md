@@ -36,7 +36,8 @@ Otherwise, check in order:
 
 ### 2b. Check What Production Runs (when N|Solid is available)
 If the `nsolid` MCP server is available, call `list_runtimes` (it takes a `tenant` when the token can use several: `list_tenants`). For each Node.js version the tenant's processes run, it gives the apps and process counts, whether its line is at or within 90 days of end of life (and which line to move to), the Node.js security team's core advisories that affect it, and the lowest release of its line that fixes them all (`upgradeTo`).
-- Find the project's app among them (its `package.json` `name` or `NSOLID_APPNAME`). Each version names at most 20 apps; `appsOmitted` and an `outputCut` notice mean some are hidden, so an app missing from the list is not proof that it doesn't run. Confirm a known app's version with `find_agents` scoped to it (`where: 'app == "<app>"'`). Production may run a different version than the workspace pins: say so, and plan from what runs.
+- Find the project's app among them (its `package.json` `name` or `NSOLID_APPNAME`). Each version names at most 20 apps; `appsOmitted` and an `outputCut` notice mean some are hidden, so an app missing from the list is not proof that it doesn't run. Confirm what a known app runs now with `find_agents` given the exact `app` and `status: "connected"` (or a `where` with the app name escaped in the expression language's string syntax, plus `status: "connected"`). Historical, disconnected or exited processes are not confirmation of what production runs now. A `More agents match` notice means the result is partial: keep every version it shows and don't claim it covers all of the app's processes. Production may run a different version than the workspace pins: say so, and plan from what runs.
+- For each confirmed version `list_runtimes` didn't show with its advisories (cut, omitted or missing), recover its end of life, core advisories and `upgradeTo` from `get_agent`'s runtime verdict for a confirmed process, or an authorized `GET /v1/tenants/{tenant}/runtimes?app=<app>`. If neither is available, say advisory coverage for that version is incomplete; don't conclude that no same-line patch is needed.
 - Core advisories with an `upgradeTo` on the same line call for a patch upgrade first, whatever the line move: it is the smallest change that fixes them.
 - If the server isn't available, continue from the workspace alone.
 
@@ -71,7 +72,8 @@ If the user asks about a specific version mid-conversation, re-run the detection
 ## Tools
 - `getPackageVersions` — check direct dependencies for known incompatibilities with target Node version.
 - `list_runtimes` (`nsolid` server, when available) — the Node.js versions production runs, their end of life, core advisories and the release that fixes them.
-- `find_agents` (`nsolid` server, when available) — the processes of one app, with the Node.js version each runs.
+- `find_agents` (`nsolid` server, when available) — the connected processes of one app (`app`, `status: "connected"`), with the Node.js version each runs.
+- `get_agent` (`nsolid` server, when available) — one process's runtime verdict: end of life, core advisories and `upgradeTo`.
 
 ## Guardrails
 - The release schedule table from `fetch-node-releases.cjs` or the injected host table is authoritative. Do not override LTS names, EOL dates, or latest patch versions with training-data values.
