@@ -36,7 +36,7 @@ Otherwise, check in order:
 
 ### 2b. Check What Production Runs (when N|Solid is available)
 If the `nsolid` MCP server is available, call `list_runtimes` (it takes a `tenant` when the token can use several: `list_tenants`). For each Node.js version the tenant's processes run, it gives the apps and process counts, whether its line is at or within 90 days of end of life (and which line to move to), the Node.js security team's core advisories that affect it, and the lowest release of its line that fixes them all (`upgradeTo`).
-- Find the project's app among them (its `package.json` `name` or `NSOLID_APPNAME`). Production may run a different version than the workspace pins: say so, and plan from what runs.
+- Find the project's app among them (its `package.json` `name` or `NSOLID_APPNAME`). Each version names at most 20 apps; `appsOmitted` and an `outputCut` notice mean some are hidden, so an app missing from the list is not proof that it doesn't run. Confirm a known app's version with `find_agents` scoped to it (`where: 'app == "<app>"'`). Production may run a different version than the workspace pins: say so, and plan from what runs.
 - Core advisories with an `upgradeTo` on the same line call for a patch upgrade first, whatever the line move: it is the smallest change that fixes them.
 - If the server isn't available, continue from the workspace alone.
 
@@ -71,6 +71,7 @@ If the user asks about a specific version mid-conversation, re-run the detection
 ## Tools
 - `getPackageVersions` — check direct dependencies for known incompatibilities with target Node version.
 - `list_runtimes` (`nsolid` server, when available) — the Node.js versions production runs, their end of life, core advisories and the release that fixes them.
+- `find_agents` (`nsolid` server, when available) — the processes of one app, with the Node.js version each runs.
 
 ## Guardrails
 - The release schedule table from `fetch-node-releases.cjs` or the injected host table is authoritative. Do not override LTS names, EOL dates, or latest patch versions with training-data values.
