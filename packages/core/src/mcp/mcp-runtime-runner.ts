@@ -249,24 +249,23 @@ export async function cancelManagedTree (
     if (!(await waitFor(closed, deadline))) {
       return { confirmed: false, error: 'npm process did not exit after SIGKILL' }
     }
+    let probeError: string | undefined
     while (Date.now() < deadline) {
       try {
         process.kill(groupId, 0)
-        await sleep(25) // group still exists (e.g. a grandchild) — keep polling
+        probeError = undefined
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code
         if (code === 'ESRCH') return { confirmed: true }
+        probeError = `process group check failed (${code})`
         // Darwin skips zombies when probing a group and can return EPERM
         // until they are reaped. Keep waiting for ESRCH within the same
         // deadline; EPERM alone never proves that cleanup is safe.
-        if (platform === 'darwin' && code === 'EPERM') {
-          await sleep(25)
-          continue
-        }
-        return { confirmed: false, error: `process group check failed (${code})` }
+        if (platform !== 'darwin' || code !== 'EPERM') return { confirmed: false, error: probeError }
       }
+      await sleep(25) // group still exists or its state is unconfirmed — keep polling
     }
-    return { confirmed: false, error: 'managed npm process group still exists after the confirmation deadline' }
+    return { confirmed: false, error: probeError ?? 'managed npm process group still exists after the confirmation deadline' }
   } catch (err) {
     return { confirmed: false, error: (err as Error).message }
   }

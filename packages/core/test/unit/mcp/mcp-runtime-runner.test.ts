@@ -48,13 +48,13 @@ function killTree (pid: number): void {
 describe('cancelManagedTree (Unix termination confirmation)', () => {
   it('waits for a transient Darwin EPERM to become ESRCH before confirming termination', async (t) => {
     let probes = 0
+    const calls: Array<[number, NodeJS.Signals | number]> = []
     t.mock.method(process, 'kill', (pid: number, signal: NodeJS.Signals | number) => {
-      assert.strictEqual(pid, -1234)
+      calls.push([pid, signal])
       if (signal === 0) {
         probes++
         throw Object.assign(new Error('group probe'), { code: probes === 1 ? 'EPERM' : 'ESRCH' })
       }
-      assert.ok(signal === 'SIGTERM' || signal === 'SIGKILL')
       return true
     })
 
@@ -65,6 +65,7 @@ describe('cancelManagedTree (Unix termination confirmation)', () => {
 
     assert.deepStrictEqual(outcome, { confirmed: true })
     assert.strictEqual(probes, 2, 'confirmation requires a later ESRCH, not EPERM alone')
+    assert.deepStrictEqual(calls, [[-1234, 'SIGTERM'], [-1234, 'SIGKILL'], [-1234, 0], [-1234, 0]])
   })
 
   it('does not confirm termination when Darwin EPERM persists to the deadline', async (t) => {
@@ -80,7 +81,7 @@ describe('cancelManagedTree (Unix termination confirmation)', () => {
     })
 
     assert.strictEqual(outcome.confirmed, false)
-    assert.ok(outcome.error)
+    assert.match(outcome.error ?? '', /process group check failed \(EPERM\)/)
     assert.ok(Date.now() - start < 5_000, 'confirmation remains bounded')
   })
 
