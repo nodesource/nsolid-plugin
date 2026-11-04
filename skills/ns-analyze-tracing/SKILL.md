@@ -13,7 +13,7 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). Most N|Solid 
 
 ### 2. Discover Services Only When Needed
 - **Skip this step if sufficient host-provided trace data is present**, or when the user names the service or app.
-- Call `list_apps` for the app names. A span's `service` is its app's name. An app missing from an omitted or truncated answer is not proven absent: pass the named app straight to the tools that take it, or ask the user for its exact name.
+- Call `list_apps` for the app names. A span's `service` is its app's name. An app missing from an omitted or truncated answer is not proven absent: if the user gave its exact name, pass it straight to the tools that take it; otherwise ask for the exact name rather than guess.
 - The N|Solid server doesn't collect AWS Lambda functions; if the user asks about a serverless function, say so.
 
 ### 3. Find Slow Requests Only If No Trace Was Supplied

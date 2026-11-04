@@ -6,7 +6,7 @@ description: >-
 
 This skill works through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Saving rules, acknowledging or silencing alerts and ending a silence need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
 
-When `list_alert_rules` comes back cut, too large or with an error, a name missing from it is not proof the name is free: don't claim a rule is absent from a partial list.
+When `list_alert_rules` comes back cut, too large or with an error, a name missing from it is not proof the name is free: don't claim a rule is absent from a partial list, and don't save under that name as a new rule until the exact name is verified unused.
 
 ## Start a Newly Connected Service's Baseline
 
@@ -80,7 +80,7 @@ Before saving, show the user what the rule would have done:
 - Names use letters, digits, `.`, `_` and `-`: `checkout-p99-latency`.
 
 ## Reviewing and Tuning
-- `list_alert_rules` lists every rule with its condition, scope, channels, diagnostics and `health`, which tells a quiet rule from a broken one:
+- `list_alert_rules` lists rules with their condition, scope, channels, diagnostics and `health`, which tells a quiet rule from a broken one:
   - `ok`, with what the last check saw: the groups with a value and how many held (`groups`, `holding`), or for an event rule when an event last came and last matched (`checkedAt`, `matchedAt`);
   - `no-data`: no process in scope reports the metric (a misspelled name, an empty scope);
   - `failing`: its last check failed, and `lastError` says why;
