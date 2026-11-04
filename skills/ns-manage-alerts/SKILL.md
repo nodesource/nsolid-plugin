@@ -6,14 +6,7 @@ description: >-
 
 This skill works through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Saving rules, acknowledging or silencing alerts and ending a silence need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
 
-## Partial Rule Lists and Name Checks
-- `list_alert_rules` returns a bare JSON array of rules: it has no `limit`, count, `truncated` flag or cursor. Its result is incomplete when a content block carries a cut notice, when it comes back as a text-only notice that the result was too large, or when it returns an error. Then the rules it left out are unknown: a name missing from it is unverified, not unused, and coverage conclusions from it are partial: say which.
-- A successful JSON list with no cut notice, too-large notice or error is complete for that tenant: if the exact name is absent from it, the name is free, and no Console or REST check is needed.
-- A positive match still counts on a partial list: the exact name appearing in any rule list, cut or not, proves that rule exists.
-- When the list is incomplete and the name is absent from it, verify that exact tenant and name before presenting or saving it as new: the Console's alert rules page, or an authorized `GET /v1/tenants/{tenant}/alert-rules/{name}`. A 404 from an authorized request confirms the name is free. A 200 means the rule exists.
-- An existing name means saving would replace that rule: show it, and if the user approved only creating a rule, get their go-ahead to replace it. The user's existing go-ahead for the same action on the same target still counts; ask nothing more.
-- If the exact name can't be verified (no Console or REST access, or the request is refused), don't infer that it is free and don't save it as new: hand the user the drafted spec to check and save themselves.
-- The REST lookup settles the rule's identity and whether the name exists; it is not `set_alert_rule` input. A REST rule is in the API's own shape (expressions as trees, durations in milliseconds), not the MCP writer's arguments. To edit a rule, start from its complete record in `list_alert_rules` (in `set_alert_rule`'s terms); when that record isn't available through MCP, have the user make the change in the Console's rule editor, or hand them the drafted change. Never translate a REST rule into `set_alert_rule` arguments, and neither drop nor copy fields MCP doesn't name. Keep the user's existing authorization and the selected tenant and rule as they are.
+When `list_alert_rules` comes back cut, too large or with an error, a name missing from it is not proof the name is free: don't claim a rule is absent from a partial list.
 
 ## Start a Newly Connected Service's Baseline
 
@@ -24,8 +17,7 @@ do not keep copies of starter definitions or reconstruct their thresholds.
 
 - Call `list_alert_rules` first. Check both names and coverage: a tenant-wide
   rule may already cover the service. Offer the useful missing starters and
-  explain their reasons; do not install the whole list automatically. When
-  the rule list is partial, say the coverage check is partial too.
+  explain their reasons; do not install the whole list automatically.
 - Review each chosen `spec` with the user. Starters are enabled, cover every
   process or app, have no notification channels, and take no diagnostics.
   Agree on the intended coverage and whether to record alerts only or use
@@ -34,9 +26,7 @@ do not keep copies of starter definitions or reconstruct their thresholds.
   For finding/behavior rules, combine the original `where` with the app
   expression using parentheses. Use the expression language's escaped string
   syntax for the app name. Choose an unused rule name for service-specific
-  rules; a name already in use replaces the whole rule. If the rule list was
-  partial, verify the exact name as in Partial Rule Lists and Name Checks
-  before offering it as new.
+  rules; a name already in use replaces the whole rule.
 - Preview what it would have caught using step 3 below, and show the final
   spec. Once the user authorizes saving, pass that spec with the selected
   `tenant` to `set_alert_rule`; do not pass the starter's id, title or why.
@@ -84,13 +74,13 @@ Before saving, show the user what the rule would have done:
 - `diagnose` makes a firing process capture evidence: `profile` (CPU), `heap_sampling` or `snapshot` (pauses the process). Only rules grouped by `agent` take one: an app's alert is about no one process. A small hourly budget per app (`diagnosePerAppPerHour`, default 2) keeps an incident from profiling the whole fleet; `diagnoseDurationMs` (default 10000) sets how long a profile or sampling runs. Suggest `profile` for CPU and latency rules and `heap_sampling` for memory rules; `snapshot` only when the user asks. A process that profiles continuously isn't asked for a `profile`: the alert keeps its continuous profiles instead.
 
 ### 5. Save
-- Show the rule as you'll save it (name, kind, condition, scope, channels, diagnostics), and save it with `set_alert_rule` once the user agrees. A name that exists is replaced whole: check `list_alert_rules` first (when it is partial, verify the exact name as in Partial Rule Lists and Name Checks before saving it as new), say so when the user is changing a rule rather than adding one, and pass back every writable input value its `list_alert_rules` record shows (in `set_alert_rule`'s terms), changing only what the user asked. Not every returned key is input: `health`, `updatedAt`, `updatedBy` and `kind` are output metadata, not `set_alert_rule` arguments, and leaving out such known read-only metadata is correct. Never discard an unknown writable field or setting to get past validation: when the writer can't carry it faithfully, use a writer that can or hand off the draft. Without that complete MCP record, use the Console's rule editor or hand off the draft rather than rebuilding the rule from REST. `enabled` left out keeps the rule's state; a new rule is on.
+- Show the rule as you'll save it (name, kind, condition, scope, channels, diagnostics), and save it with `set_alert_rule` once the user agrees. A name that exists is replaced whole: check `list_alert_rules` first, say so when the user is changing a rule rather than adding one, and pass back every field it shows (they are in `set_alert_rule`'s terms), changing only what the user asked. `enabled` left out keeps the rule's state; a new rule is on.
 - Arguments are checked strictly: a misspelled or unknown key is refused with its name. Fix it rather than dropping it.
 - A channel that doesn't exist is refused. The saved rule comes back with `warnings`, such as a metric no process reported in the last 7 days (a misspelled name, or an app that hasn't started) or a disabled channel: tell the user.
 - Names use letters, digits, `.`, `_` and `-`: `checkout-p99-latency`.
 
 ## Reviewing and Tuning
-- `list_alert_rules` lists the rules (all of them unless a cut notice, too-large notice or error says otherwise) with their condition, scope, channels, diagnostics and `health`, which tells a quiet rule from a broken one:
+- `list_alert_rules` lists every rule with its condition, scope, channels, diagnostics and `health`, which tells a quiet rule from a broken one:
   - `ok`, with what the last check saw: the groups with a value and how many held (`groups`, `holding`), or for an event rule when an event last came and last matched (`checkedAt`, `matchedAt`);
   - `no-data`: no process in scope reports the metric (a misspelled name, an empty scope);
   - `failing`: its last check failed, and `lastError` says why;
@@ -109,7 +99,6 @@ Before saving, show the user what the rule would have done:
 
 ## Present the Result
 - For a new or changed rule: the rule as saved, what it would have caught (step 3), and where it notifies.
-- For coverage reviews: mark the conclusion partial when `list_alert_rules` left rules out.
 - For triage: what is firing, since when, what the evidence shows, and the next step.
 
 ## Guardrails
