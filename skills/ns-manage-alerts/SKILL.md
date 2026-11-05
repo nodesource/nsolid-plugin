@@ -9,6 +9,7 @@ This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools ta
 ## Start a Newly Connected Service's Baseline
 
 When setting up alerts for a newly connected service, call `list_alert_starters`.
+It takes no arguments; do not pass `tenant`.
 It returns the same starters the web editor offers, each with an id, title,
 reason (`why`) and a `spec` in `set_alert_rule`'s terms. Read the current list;
 do not keep copies of starter definitions or reconstruct their thresholds.
