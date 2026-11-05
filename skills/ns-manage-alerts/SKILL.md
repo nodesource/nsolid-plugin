@@ -4,12 +4,14 @@ description: >-
   Defines, reviews, tunes and triages N|Solid alert rules and alerts. Use when the user wants to be alerted or paged on something (CPU, memory, event loop lag, latency, crashes or a crash loop, a process killed or lost, an app that stops reporting, blocked loops, new or known exploited vulnerabilities, a dependency's new behavior or a release regression), asks what alerts exist, which are firing or whether a rule is working, wants to acknowledge or silence an alert or end a silence early, switch a rule off, or wants a noisy rule fixed. Writes rules in N|Solid's expression language and checks what each would have caught before saving it.
 ---
 
-This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Saving rules, acknowledging or silencing alerts and ending a silence need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
+This skill works through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Saving rules, acknowledging or silencing alerts and ending a silence need the `nsolid:manage-alerts` permission; without it those tools are missing, and the skill can still review and draft.
+
+When `list_alert_rules` comes back cut, too large or with an error, a name missing from it is not proof the name is free: don't claim a rule is absent from a partial list, and don't save under that name as a new rule until the exact name is verified unused.
 
 ## Start a Newly Connected Service's Baseline
 
-When setting up alerts for a newly connected service, call `list_alert_starters`.
-It returns the same starters the web editor offers, each with an id, title,
+When setting up alerts for a newly connected service, call `list_alert_starters`
+(it takes no `tenant`). It returns the same starters the web editor offers, each with an id, title,
 reason (`why`) and a `spec` in `set_alert_rule`'s terms. Read the current list;
 do not keep copies of starter definitions or reconstruct their thresholds.
 
@@ -51,7 +53,7 @@ do not keep copies of starter definitions or reconstruct their thresholds.
 - **Event rule**: something that happens ("a process crashes", "the loop blocks over a second"). `event.where` over agent events: `type == "exit" && exitCode != 0`, `exitSignal == "SIGABRT"`, `type == "loop_blocked" && blockedFor > 1s`, `type == "lost"` (a process gone 15 minutes without an exit: SIGKILL, the out-of-memory killer, its host lost; the alert comes 15 minutes after it was last heard from). `resolveAfterMinutes` closes it after a quiet spell. `count` with `withinMinutes` fires only once that many matching events of a group came within the window ("3 exits in 10 minutes": `count: 3`, `withinMinutes: 10`); until then it is pending.
 - **Finding rule**: new vulnerability findings. `finding.where`, e.g. `severity >= "high" && evidence >= "loaded"`, `knownExploited` (CISA lists its CVE as exploited in the wild), `kind == "malicious"`, `kind == "end-of-life"`, `"express" in via`. Only findings that open after the rule is saved alert.
 - **Behavior rule**: a dependency doing something new, a release regression, or dependency drift. `behavior.where`, e.g. `kind == "capability" && severity >= "high"`, `kind == "regression" && severity >= "medium"`, `kind == "drift" && severity >= "high"`, `versionChange`.
-- `expression_help` (contexts `agent`, `event`, `finding`, `behavior`) lists every field when the request needs one this skill doesn't name.
+- `expression_help` (contexts `agent`, `event`, `finding`, `behavior`; it takes no `tenant`) lists every field when the request needs one this skill doesn't name.
 
 ### 2. Scope It
 - `scope` limits metric and event rules to some processes, as an agent expression: `app == "checkout"`, `"canary" in tags`, `hostname.endsWith(".prod")`. Finding and behavior rules take no scope: put `app == "…"` in their `where`.
@@ -78,7 +80,7 @@ Before saving, show the user what the rule would have done:
 - Names use letters, digits, `.`, `_` and `-`: `checkout-p99-latency`.
 
 ## Reviewing and Tuning
-- `list_alert_rules` lists every rule with its condition, scope, channels, diagnostics and `health`, which tells a quiet rule from a broken one:
+- `list_alert_rules` lists rules with their condition, scope, channels, diagnostics and `health`, which tells a quiet rule from a broken one:
   - `ok`, with what the last check saw: the groups with a value and how many held (`groups`, `holding`), or for an event rule when an event last came and last matched (`checkedAt`, `matchedAt`);
   - `no-data`: no process in scope reports the metric (a misspelled name, an empty scope);
   - `failing`: its last check failed, and `lastError` says why;

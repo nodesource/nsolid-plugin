@@ -8,7 +8,7 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`) and bund
 
 ### Phase 0: Reuse Evidence and Resolve Target
 1. If the user already supplied both baseline and peak evidence (asset IDs or local files), skip straight to Phase 4.
-2. The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Pass it to every call, and set `NSOLID_TENANT` for the scripts.
+2. Most N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Pass the same tenant to every tenant-scoped call, and set `NSOLID_TENANT` for the scripts.
 3. If no `agentId` is supplied, call `fleet_snapshot` with `where: 'app == "<appName>"'` and `sort: "used_heap_size"` to find the process; keep the exact `appName` for downloads. Stop if no matching process is connected.
 4. A leak can sit in a worker thread while the main thread looks fine: `list_threads` with the `agentId` shows each thread's heap. Capture the thread that grows (`threadId`).
 

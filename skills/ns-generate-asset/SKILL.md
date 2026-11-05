@@ -7,7 +7,7 @@ description: >-
 This skill captures assets through the N|Solid MCP server (`nsolid`) and saves them with a bundled script. The script needs the server's settings: `NSOLID_API_URL` and `NSOLID_API_TOKEN` in the environment, or `~/.agents/.nsolid-auth.json` with `apiUrl` and `token` (plus `tenant` when the token can use several tenants).
 
 ### 1. Pick the Tenant
-- The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names (production and staging are usually separate tenants). Pass the same tenant to every call, and set `NSOLID_TENANT` for the script.
+- Most N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names (production and staging are usually separate tenants). Pass the same tenant to every tenant-scoped call, and set `NSOLID_TENANT` for the script.
 
 ### 2. Resolve Scope
 - The target app is already resolved (workspace mapping, explicit `Application: <name>`, or user confirmation). Do not switch apps.

@@ -4,7 +4,7 @@ description: >-
   Explains what a release of a Node.js app changed in production, from N|Solid's CPU profiles and package inventories: CPU by package and function against the release before (with confidence), calls between packages that are new or gone, packages added, removed or upgraded, regressions and dependency drift. Use when the user asks whether a deploy made things slower, what changed in version X, why the app behaves differently since a release, or wants releases marked or sourcemaps uploaded from CI.
 ---
 
-This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names (production and staging are usually separate tenants).
+This skill works through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names (production and staging are usually separate tenants).
 
 A release is a version of the app as its processes report it (`package.json`'s `version`). N|Solid records a release when its processes first report it, and CI can mark a deploy with its commit and a link.
 

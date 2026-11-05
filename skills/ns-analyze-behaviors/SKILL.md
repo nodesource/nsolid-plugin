@@ -4,7 +4,7 @@ description: >-
   Investigates what N|Solid's behavioral watch found: npm packages that newly run programs, compile code, use the network, start threads or touch the file system in production, packages that start running at all, release regressions and dependency drift. Use when the user asks about supply-chain attacks at run time, a compromised or suspicious dependency, what a package started doing, a behavior alert, or dependencies that changed without a release.
 ---
 
-This skill works through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names.
+This skill works through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names.
 
 The watch learns what each app's packages do from its CPU profiles, and reports a package doing something it never did before in that app, once the app has a history without it.
 

@@ -35,8 +35,8 @@ Otherwise, check in order:
 **At the start of your response**, briefly tell the user which source was used to determine the current version (one sentence). If the project-pinned version and the runtime on PATH disagree, treat the project pin as authoritative and note the mismatch.
 
 ### 2b. Check What Production Runs (when N|Solid is available)
-If the `nsolid` MCP server is available, call `list_runtimes` (it takes a `tenant` when the token can use several: `list_tenants`). For each Node.js version the tenant's processes run, it gives the apps and process counts, whether its line is at or within 90 days of end of life (and which line to move to), the Node.js security team's core advisories that affect it, and the lowest release of its line that fixes them all (`upgradeTo`).
-- Find the project's app among them (its `package.json` `name` or `NSOLID_APPNAME`). Production may run a different version than the workspace pins: say so, and plan from what runs.
+If the `nsolid` MCP server is available, call `list_runtimes` (pass a `tenant` when the token can use several; `list_tenants` takes no `tenant` and lists them). For each Node.js version the tenant's processes run, it gives the apps and process counts, whether its line is at or within 90 days of end of life (and which line to move to), the Node.js security team's core advisories that affect it, and the lowest release of its line that fixes them all (`upgradeTo`).
+- Find the project's app among them (its `package.json` `name` or `NSOLID_APPNAME`). Production may run a different version than the workspace pins: say so, and plan from what runs. Each version names at most 20 apps, and `appsOmitted` counts the rest: an app it doesn't name may still run that version.
 - Core advisories with an `upgradeTo` on the same line call for a patch upgrade first, whatever the line move: it is the smallest change that fixes them.
 - If the server isn't available, continue from the workspace alone.
 

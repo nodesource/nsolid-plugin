@@ -13,7 +13,7 @@ This skill reads N|Solid data through the N|Solid MCP server (`nsolid`) and bund
 - If the user explicitly says read-only, offline, or "analyze this file", do not capture a new heap asset unless they later approve it.
 
 ### 2. Pick the Tenant
-- The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user or alert names. Pass the same tenant to every call, and set `NSOLID_TENANT` for the scripts.
+- Most N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user or alert names. Pass the same tenant to every tenant-scoped call, and set `NSOLID_TENANT` for the scripts.
 
 ### 3. Find the Bottleneck Only If You Still Need a Target
 - If no agent is known, call `fleet_snapshot` with `where: 'app == "<appName>"'` and `sort: "used_heap_size"`, and keep the exact app name.

@@ -9,11 +9,11 @@ This skill reads SBOMs through the N|Solid MCP server (`nsolid`) and a bundled s
 ## Instructions
 
 ### 1. Pick the Tenant
-- The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names. Set `NSOLID_TENANT` for the script.
+- Most N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names. Set `NSOLID_TENANT` for the script.
 
 ### 2. Identify Target Application
 - Determine the specific `app` name you need the SBOM for.
-- If the app name is unknown, call `list_apps` for the apps and their process counts.
+- If the app name is unknown, call `list_apps` for the apps and their process counts. An app missing from an omitted or truncated answer is not proven absent: if the user gave its exact name, pass it straight to `get_sbom`; otherwise ask for the exact name rather than guess.
 - An app's SBOM covers its connected processes together. For one process instead, find its `agentId` with `find_agents` (`app`).
 
 ### 3. Know What It Contains

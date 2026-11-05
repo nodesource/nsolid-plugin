@@ -4,13 +4,14 @@ description: >-
   Analyzes live runtime vulnerabilities in the packages connected N|Solid Node.js processes run, from N|Solid. Use when the user wants to know which CVEs are actually present in running apps, active exploitable/live vulnerabilities, malicious packages, zero-day exposure, supply-chain risk in production, Node.js runtime advisories, or production package risk. For static npm-audit-style project dependency scans, use ns-audit-dependencies instead.
 ---
 
-This skill reads vulnerability findings through the N|Solid MCP server (`nsolid`). The N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user names (production and staging are usually separate tenants).
+This skill reads vulnerability findings through the N|Solid MCP server (`nsolid`). Most N|Solid tools take a `tenant`: when the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user names (production and staging are usually separate tenants).
 
 ### 1. High-Level Overview
 - Call `list_vulnerabilities`: open findings, most severe first. Each names its advisory (GHSA, a malicious-package report MAL, or a Node.js core advisory NODE-CORE), the app, severity, the vulnerable packages with the version that fixes them, the app's own dependencies that bring each in (`via`), and the runtime evidence: `installed`, `loaded` (required by the app) or `running` (seen in CPU profiles). A finding whose CVE CISA lists as exploited in the wild carries `knownExploited`: the CVE, when CISA listed it, its remediation due date, and whether ransomware campaigns use it.
-- Narrow large fleets with `app`, `severity` (at least), or `where`, e.g. `severity >= "high" && evidence >= "loaded"`, or `knownExploited` (`expression_help` with context `finding` lists the fields).
+- Narrow large fleets with `app`, `severity` (at least), or `where`, e.g. `severity >= "high" && evidence >= "loaded"`, or `knownExploited` (`expression_help` with context `finding` lists the fields; it takes no `tenant`).
+- A result that fills its `limit` or carries a cut notice is partial: the findings it shows stand, but more may exist, so it cannot support an app all-clear or a complete ranking.
 - Summarize which app has the most critical issues. Lead with malicious packages (MAL-…) when there are any, then known exploited findings in loaded or running code: attackers use those now, whatever their severity.
-- Before saying an app has nothing to fix, `vulnerability_data` shows whether the advisory data is current: when the OSV mirror and CISA's catalog were last checked, and any sync error. Say so when it is stale.
+- Before saying an app has nothing to fix, `vulnerability_data` (it takes no `tenant`) shows whether the advisory data is current: when the OSV mirror and CISA's catalog were last checked, and any sync error. Say so when it is stale.
 - For the Node.js runtime itself, `list_runtimes` gives each Node.js version in use: its core advisories, the release that fixes them, and whether its line is at or near end of life.
 
 ### 2. Detail Per App

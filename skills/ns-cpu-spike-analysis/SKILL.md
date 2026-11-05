@@ -18,7 +18,7 @@ when the token can use several tenants).
 - If the user explicitly says read-only, offline, or "analyze this data", never capture a new profile unless they later approve it.
 
 ### 2. Pick the Tenant
-- The N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` once and use the tenant the user or alert names (production and staging are usually separate tenants). Pass the same tenant to every call, and set `NSOLID_TENANT` for the scripts.
+- Most N|Solid tools take a `tenant`. When the token can use one tenant it is the default; otherwise call `list_tenants` (it takes no `tenant`) once and use the tenant the user or alert names (production and staging are usually separate tenants). Pass the same tenant to every tenant-scoped call, and set `NSOLID_TENANT` for the scripts.
 
 ### 3. Discover Connected Agents Only When Needed
 - Call `fleet_snapshot` with `sort: "cpu_percent"` to list connected processes, hottest first, with their live metrics. When the user named an app, add `where: 'app == "<appName>"'`.
