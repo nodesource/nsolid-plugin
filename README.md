@@ -208,8 +208,8 @@ pnpm lint           # Lint all packages
 ### Bundle and plugin asset sync checks
 
 ```bash
-pnpm --filter nsolid-plugin bundle:check   # Check if core bundle.json is in sync
-pnpm --filter nsolid-plugin bundle:sync    # Copy root bundle.json into core
+pnpm --filter ./packages/core bundle:check   # Check if core bundle.json is in sync
+pnpm --filter ./packages/core bundle:sync    # Copy root bundle.json into core
 pnpm plugin:check                                    # Check generated manifests/configs and verify no package skill copies are committed
 pnpm plugin:sync                                     # Regenerate manifests/configs and remove materialized package skill copies
 pnpm plugin:materialize                              # Copy root skills into the Pi package for pack/release
@@ -223,9 +223,11 @@ Run `pnpm plugin:check` in CI and before release. The source tree keeps one cano
 
 The native plugin installs from `main`, and its MCP wrapper prints `npx -y nsolid-plugin@<version> setup` as the repair command. So the version on `main` must be a release that is on npm.
 
-1. Set the new version in `bundle.json`, `packages/core/package.json`, `packages/pi-plugin/package.json` and any `nsolid-plugin@<version>` a skill runs. Then run `pnpm plugin:sync`, `pnpm plugin:root` and `pnpm --filter nsolid-plugin bundle:sync`. The version-consistency test fails if any of them differs.
-2. Right after the merge, publish both packages from that commit on `main`, core first: `pnpm --filter nsolid-plugin publish`, then `pnpm --filter nsolid-pi-plugin publish`. Tag the commit `v<version>`. Publish the Pi package with pnpm, not npm: it depends on `nsolid-plugin` as `workspace:*`, which pnpm turns into the exact version and npm would publish as it is.
-3. Publish anything that isn't on `main` (an experiment or a preview) under its own dist-tag, such as `npm publish --tag experimental`. Never under `latest`.
+1. Set the new version in `bundle.json`, `packages/core/package.json`, `packages/pi-plugin/package.json` and any `nsolid-plugin@<version>` a skill runs. Then run `pnpm plugin:sync`, `pnpm plugin:root` and `pnpm --filter ./packages/core bundle:sync`. The version-consistency test fails if any of them differs. Select packages by path: the workspace root is also named `nsolid-plugin`.
+2. Publish before merging, so the repair command `main` will print already works. Once the PR is approved and up to date with `main`, publish both packages from a clean checkout of its head under the `next` dist-tag, core first: `pnpm --filter ./packages/core publish --tag next --no-git-checks`, then `pnpm --filter ./packages/pi-plugin publish --tag next --no-git-checks`. (`--no-git-checks` because pnpm otherwise publishes only from `main`.) Publish the Pi package with pnpm, not npm: it depends on `nsolid-plugin` as `workspace:*`, which pnpm turns into the exact version and npm would publish as it is.
+3. On a machine without `~/.agents/nsolid-plugin/runtime/`, check that `npx -y nsolid-plugin@<version> setup --harness <harness>` installs the runtime and the MCP servers connect. If the branch has to change after publishing, publish a new patch version instead of merging files that differ from what npm has.
+4. Merge, tag the merge commit `v<version>`, and move `latest`: `npm dist-tag add nsolid-plugin@<version> latest` and `npm dist-tag add nsolid-pi-plugin@<version> latest`.
+5. Publish anything that isn't on `main` (an experiment or a preview) under its own dist-tag, such as `npm publish --tag experimental`. Never under `latest`.
 
 ## Troubleshooting
 
