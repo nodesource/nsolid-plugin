@@ -16,7 +16,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const MCP_REMOTE_VERSION = "0.1.38"
-const PLUGIN_VERSION = "1.0.3"
+const PLUGIN_VERSION = "1.2.0"
 const STARTUP_FAILURE_WINDOW_MS = 15000
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
 const SERVER_DEFINITIONS = {"nsolid-console":{"url":"${MCP_URL}","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ns-benchmark":{"url":"https://benchmark.mcp.saas.nodesource.io/mcp","headers":{"X-Nsolid-Org-Id":"${AUTH_ORG_ID}","X-Nsolid-Service-Token":"${AUTH_TOKEN}"}},"ncm":{"url":"https://mcp.ncm.nodesource.com","headers":{"X-Nsolid-Service-Token":"${AUTH_TOKEN}"}}}

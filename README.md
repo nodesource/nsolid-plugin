@@ -219,6 +219,14 @@ pnpm plugin:root:check                               # Fail if committed root ma
 
 Run `pnpm plugin:check` in CI and before release. The source tree keeps one canonical skill copy under root `skills/`; package-local `skills/` directories are materialized only for npm package release and cleaned afterward by package sync scripts.
 
+### Releasing
+
+The native plugin installs from `main`, and its MCP wrapper prints `npx -y nsolid-plugin@<version> setup` as the repair command. So the version on `main` must be a release that is on npm.
+
+1. Set the new version in `bundle.json`, `packages/core/package.json`, `packages/pi-plugin/package.json` and any `nsolid-plugin@<version>` a skill runs. Then run `pnpm plugin:sync`, `pnpm plugin:root` and `pnpm --filter nsolid-plugin bundle:sync`. The version-consistency test fails if any of them differs.
+2. Publish `packages/core` to npm from the commit that merges to `main`, right after the merge, and tag it `v<version>`.
+3. Publish anything that isn't on `main` (an experiment or a preview) under its own dist-tag, such as `npm publish --tag experimental`. Never under `latest`.
+
 ## Troubleshooting
 
 ### Run the doctor command
