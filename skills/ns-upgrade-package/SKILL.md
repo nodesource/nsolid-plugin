@@ -11,7 +11,7 @@ description: >-
 
 ### 2. Fetch NCM Data
 - Call `getPackageQuality` with the package name and current version (or `latest` if not installed) to retrieve vulnerability severity, known issues, license, and quality scores.
-- The tool returns the latest available version as well — record it.
+- A call for the installed version doesn't return the latest one, and NCM's `latest` can trail npm by weeks. Get the latest version from the npm registry: `npm view <pkg> version` prints the version the `latest` dist-tag points to (`npm view <pkg> dist-tags` lists the others).
 - If the user specified a target version explicitly, use that instead of latest.
 
 ### 3. Assess Workspace Usage
@@ -29,7 +29,7 @@ Apply SemVer heuristics to assess risk:
 Return a response with these sections:
 
 1. **Current State** — detected version, source (package.json / lockfile / not found), and workspace usage count.
-2. **Latest Version** — the version NCM reports as latest.
+2. **Latest Version** — the version the npm registry's `latest` dist-tag points to.
 3. **NCM Security & Quality** — any vulnerabilities (severity + title), license, module risks flagged by NCM. If NCM data is unavailable, say so explicitly.
 4. **SemVer Risk Assessment** — change type (major / minor / patch), risk level, and reasoning based on workspace usage and dependents.
 5. **Breaking Changes** — use SemVer heuristics and any NCM-flagged issues. Do NOT fabricate specific changelog entries. Direct the user to the package's official CHANGELOG.md or release notes for the authoritative list.
@@ -42,6 +42,7 @@ Return a response with these sections:
 
 ## Tools
 - `getPackageQuality` — query NCM for vulnerability severity, known issues, license, and quality scores for a single package.
+- `npm view <pkg> version` — the latest published version, from the npm registry.
 
 ## Guardrails
 - Never fabricate changelog details, breaking changes, or migration guides. NCM data does not include changelogs. Use SemVer heuristics and workspace usage data to assess risk instead, and point the user to official release notes.

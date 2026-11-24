@@ -1,6 +1,6 @@
 {
   "name": "nsolid-plugin",
-  "version": "1.0.3",
+  "version": "1.2.0",
   "description": "N|Solid Plugin — AI skills and MCP servers for Codex",
   "author": {
     "name": "NodeSource",
