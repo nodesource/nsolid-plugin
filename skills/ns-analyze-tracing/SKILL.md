@@ -8,8 +8,9 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). Most N|Solid 
 
 ### 1. Use Provided Trace Data First
 - Treat the prompt as primary evidence. Parse any provided trace ID, span list, app name, endpoint name, status code, duration, or error stack before calling tools.
-- If the user supplied a trace tree/export or any other host-provided trace data, treat it as authoritative: map that hierarchy directly and **do not fall through to live enrichment** (steps 2–5 are only for when no sufficient host data is present).
+- If the user supplied a trace tree/export or any other host-provided trace data, treat it as authoritative: map that hierarchy directly and **do not fall through to live enrichment**, not even `get_trace` when the export includes its trace ID (steps 2–5 are only for when no sufficient host data is present).
 - If the user supplied only a trace ID, call `get_trace` with it: the services and who called whom (with counts, times from the caller's side, failures, and the databases, outside hosts and DNS they called), then every span as a tree with durations, services and errors.
+- If `get_trace` says the trace was not found (it aged out or the ID is wrong) or returns another error, say the trace could not be read and ask the user for the trace data or a different trace ID.
 
 ### 2. Discover Services Only When Needed
 - **Skip this step if sufficient host-provided trace data is present**, or when the user names the service or app.
@@ -32,6 +33,8 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). Most N|Solid 
 ### 6. Triage the Trace
 - Call `get_trace` with the slowest or failing request's `traceId`.
 - The calls between services show where the time went from each caller's side, and which calls failed. The span tree shows parent and child spans: a slow parent with one slow child, sequential awaits that could run in parallel, the same query repeated (N+1), or a slow outside host.
+- A long tree stops and ends with `… N more spans`: it lists the first part of the trace, not all of it. The header (duration, span and error counts) and the calls between services still cover every span, so read totals and the slow calls from them, and say the tree is partial. If the header says `(truncated)`, the trace has more spans than the server returns, and even the header covers only part of it.
+- If `get_trace` returns an error, stay with the `search_spans` evidence and say the span tree was not available.
 - To see what each span did, call `get_trace` again with `attributes: true`, or `attributeKeys` for just the ones you need (`["http.route", "db.statement", "http.status_code"]`): the repeated query of an N+1 shows in its `db.statement`, and each failing span shows its error message.
 - `search_logs` with the `traceId` gives the logs written during that request.
 
@@ -47,7 +50,7 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). Most N|Solid 
   - `## Findings`
   - `## Recommendations`
   - `## Validation Plan` when a fix is proposed
-- Ground every claim in supplied trace data or N|Solid's spans and traces.
+- Ground every claim in supplied trace data or N|Solid's spans and traces. State when the span tree covered only part of the trace.
 
 ### 9. Write the Report to Disk
 - Ask the user if they want to save the report to disk.
@@ -61,4 +64,5 @@ This skill reads traces through the N|Solid MCP server (`nsolid`). Most N|Solid 
 ## Guardrails
 - Do not search randomly; narrow with duration, status or the endpoint first.
 - A slow top-level span may be caused by a slow child span: confirm it in the trace tree before asserting it.
+- When the span tree ends with `… N more spans` or the header says `(truncated)`, the tree is partial: report the repeated spans it shows, never a critical path read from it alone.
 - Filter out expected long-polling or WebSocket connections when hunting for latency regressions.
