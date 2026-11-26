@@ -16,7 +16,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const MCP_REMOTE_VERSION = "0.1.38"
-const PLUGIN_VERSION = "1.2.0"
+const PLUGIN_VERSION = "2.0.0-console7.0"
 const STARTUP_FAILURE_WINDOW_MS = 15000
 const AUTH_FILE = path.join(os.homedir(), '.agents', '.nodesource-auth.json')
 const NSOLID_AUTH_FILE = path.join(os.homedir(), '.agents', '.nsolid-auth.json')

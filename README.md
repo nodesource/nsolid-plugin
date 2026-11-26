@@ -10,7 +10,7 @@ N|Solid Plugin installs NodeSource AI skills and MCP servers into Claude Code, C
 | **Codex CLI** | Root GitHub marketplace/plugin + `.codex-plugin/plugin.json` | Native plugin install, then explicit setup |
 | **OpenCode** | CLI direct install (user-level skills + MCP config) | `nsolid-plugin setup --harness opencode` (auth + writes config); `nsolid-plugin install --harness opencode` refreshes it |
 | **Antigravity CLI** | Root GitHub plugin + `plugin.json` | `agy plugin install <repo-url>`, then explicit setup |
-| **Pi Agent** | npm package + `pi.skills` | `pi install npm:nsolid-pi-plugin`, `nsolid-plugin setup --harness pi`, then `pi install npm:pi-mcp-adapter` |
+| **Pi Agent** | npm package + `pi.skills` | `pi install npm:nsolid-pi-plugin@console7`, `nsolid-plugin setup --harness pi`, then `pi install npm:pi-mcp-adapter` |
 
 No harness relies on npm `postinstall` hooks. See `openspec/changes/cross-harness-plugin-installer/design.md` and `openspec/changes/cross-harness-plugin-installer/specs/installation-and-auth.md` for the full design rationale.
 
@@ -94,19 +94,19 @@ With the N|Solid server, `ns-cpu-spike-analysis` also writes an HTML report (`.n
 
 ## Per-harness install
 
-Requirements: Node.js `>=22.3.0`, the target harness CLI, and a NodeSource account with access to your N|Solid organization.
+Requirements: Node.js `>=22.13.0`, the target harness CLI, and a NodeSource account with access to your N|Solid organization.
 
-Install the stable CLI once:
+Install the CLI once. This build is published under the `console7` dist-tag, so name it in every install: without it, npm installs the `latest` release, which is not built for N|Solid Console 7.
 
 ```bash
-npm i -g nsolid-plugin
+npm i -g nsolid-plugin@console7
 ```
 
 Or invoke commands without a global install:
 
 ```bash
-npx -y nsolid-plugin setup --harness <harness>
-npx -y nsolid-plugin install --harness <harness>
+npx -y nsolid-plugin@console7 setup --harness <harness>
+npx -y nsolid-plugin@console7 install --harness <harness>
 ```
 
 The setup step requires a NodeSource account and writes shared credentials to `~/.agents/.nodesource-auth.json`; it also prepares the shared MCP bridge runtime used by the Claude/Codex/Antigravity wrappers (first run downloads it via npm, later runs are offline and idempotent). For OpenCode and Pi, `setup` alone completes onboarding — auth, bridge runtime, skills, and MCP config in one step. The install step is needed only for fallback/repair installs and satisfies the same runtime precondition before copying assets.
@@ -120,7 +120,7 @@ nsolid-plugin setup --harness <harness>
 nsolid-plugin install --harness <harness>
 ```
 
-Without a global install, use `npx -y nsolid-plugin setup --harness <harness>` and `npx -y nsolid-plugin install --harness <harness>`.
+Without a global install, use `npx -y nsolid-plugin@console7 setup --harness <harness>` and `npx -y nsolid-plugin@console7 install --harness <harness>`.
 
 Use direct CLI install as the primary install path for OpenCode. For Claude Code, Codex CLI, and Antigravity CLI, prefer the native plugin commands below and keep `nsolid-plugin install` for fallback or repair. For Pi Agent, skills come from `nsolid-pi-plugin`; the CLI writes Pi MCP config only.
 
@@ -142,7 +142,7 @@ codex plugin add nsolid-plugin@nodesource
 nsolid-plugin setup --harness codex
 ```
 
-Codex is marketplace-owned. A NodeSource-owned Git/local marketplace can be used as fallback if OpenAI curation is unavailable. Authentication remains explicit through `nsolid-plugin setup --harness codex` (or `npx -y nsolid-plugin setup --harness codex`).
+Codex is marketplace-owned. A NodeSource-owned Git/local marketplace can be used as fallback if OpenAI curation is unavailable. Authentication remains explicit through `nsolid-plugin setup --harness codex` (or `npx -y nsolid-plugin@console7 setup --harness codex`).
 
 ### OpenCode
 
@@ -166,7 +166,7 @@ Antigravity installs the repository root as a native plugin and stages skills/MC
 
 ```bash
 # 1. Install the Pi package (skills are package-owned)
-pi install npm:nsolid-pi-plugin
+pi install npm:nsolid-pi-plugin@console7
 
 # 2. Authenticate and write Pi MCP config
 nsolid-plugin setup --harness pi
@@ -246,6 +246,14 @@ The native plugin installs from `main`, and its MCP wrapper prints `npx -y nsoli
 4. Merge, tag the merge commit `v<version>`, and move `latest`: `npm dist-tag add nsolid-plugin@<version> latest` and `npm dist-tag add nsolid-pi-plugin@<version> latest`.
 5. Publish anything that isn't on `main` (an experiment or a preview) under its own dist-tag, such as `npm publish --tag experimental`. Never under `latest`.
 
+### Releasing a Console 7 build
+
+This branch, `nsolid-console-7`, builds the plugin for N|Solid Console 7. Its versions carry a `-console7.N` suffix, such as `2.0.0-console7.0`, and they are published only under the `console7` dist-tag, so an install that names no version or tag keeps resolving `latest`, the release from `main`. That is why every install command in this README names `@console7`, and why the commands the CLI prints name its exact version. Steps 1 and 3 above apply as written. The others change:
+
+- **Version.** Count builds of one release in the suffix: `2.0.0-console7.0`, then `2.0.0-console7.1`. Never reuse a version that is on npm. The version-consistency test fails if the version has no `-console7.N` suffix.
+- **Publish, instead of step 2.** Publish before merging, so the repair command this branch prints already works. Once the PR is approved and up to date with `nsolid-console-7`, make a clean checkout of its head and run `npx pnpm@10 install --frozen-lockfile` in it: a fresh checkout has no `tsc`, and `prepublishOnly` builds with it. Then publish both packages with pnpm 10 under the `console7` dist-tag, core first: `npx pnpm@10 --filter ./packages/core publish --tag console7 --no-git-checks`, then `npx pnpm@10 --filter ./packages/pi-plugin publish --tag console7 --no-git-checks`. Never use `--tag next` or `--tag latest` for a Console 7 build, and always pass `--tag console7`. Both packages also set `publishConfig.tag` to `console7` as a second guard. It only holds with pnpm 10 and older: they hand the tarball to `npm publish`, which honors the field. pnpm 11 and later publish on their own, ignore the field and publish under `latest`. npm prints `with tag latest` even when it applies the field. After publishing, check that `npm dist-tag ls nsolid-plugin` and `npm dist-tag ls nsolid-pi-plugin` show the new version under `console7` only.
+- **Merge, instead of step 4.** Merge into `nsolid-console-7` and tag the merge commit `v<version>`. Never move `latest` or `next` to a Console 7 version.
+
 ## Troubleshooting
 
 ### Run the doctor command
@@ -312,7 +320,7 @@ nsolid-plugin restore --harness <harness> --backup ~/.agents/.config-backup/<har
 
 ### Install vs setup
 
-`nsolid-plugin setup --harness <harness>` authenticates with NodeSource and may open a browser; for direct-config harnesses (OpenCode, Pi) it also writes that harness's MCP config in the same step. `nsolid-plugin install --harness <harness>` never opens a browser; it directly writes N|Solid skills and MCP config for a harness and is used to (re)run a direct config — for example after `switch-org`. Claude, Codex, and Antigravity should normally use native GitHub plugin install from the repository root. OpenCode uses the single-step `setup`, and `install` to refresh its config. Pi is package-owned: `pi install npm:nsolid-pi-plugin` installs skills, while `nsolid-plugin install/setup --harness pi` writes Pi MCP config.
+`nsolid-plugin setup --harness <harness>` authenticates with NodeSource and may open a browser; for direct-config harnesses (OpenCode, Pi) it also writes that harness's MCP config in the same step. `nsolid-plugin install --harness <harness>` never opens a browser; it directly writes N|Solid skills and MCP config for a harness and is used to (re)run a direct config — for example after `switch-org`. Claude, Codex, and Antigravity should normally use native GitHub plugin install from the repository root. OpenCode uses the single-step `setup`, and `install` to refresh its config. Pi is package-owned: `pi install npm:nsolid-pi-plugin@console7` installs skills, while `nsolid-plugin install/setup --harness pi` writes Pi MCP config.
 
 ### Switching organizations
 

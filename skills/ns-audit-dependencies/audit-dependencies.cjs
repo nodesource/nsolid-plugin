@@ -86,7 +86,7 @@ function loadToken () {
   try {
     auth = JSON.parse(fs.readFileSync(authPath, 'utf8'))
   } catch {
-    throw new Error('NodeSource credentials not found. Run: npx -y nsolid-plugin setup --harness <harness>')
+    throw new Error('NodeSource credentials not found. Run: npx -y nsolid-plugin@2.0.0-console7.0 setup --harness <harness>')
   }
 
   if (typeof auth.serviceToken !== 'string' || auth.serviceToken.length === 0) {

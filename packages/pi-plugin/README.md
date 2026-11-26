@@ -5,7 +5,7 @@ nsolid-plugin — N|Solid performance & security skills for Node.js.
 ## Install
 
 ```bash
-pi install npm:nsolid-pi-plugin
+pi install npm:nsolid-pi-plugin@console7
 nsolid-plugin setup --harness pi
 pi install npm:pi-mcp-adapter
 ```

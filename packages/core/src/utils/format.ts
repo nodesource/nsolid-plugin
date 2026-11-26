@@ -1,11 +1,21 @@
 import type { DoctorReport, HarnessType } from '../types.js'
 import { NATIVE_PLUGIN_HARNESSES } from '../types.js'
+import { pluginVersion } from './plugin-version.js'
 
 export const C = {
   green: (s: string) => `\x1b[32m${s}\x1b[0m`,
   yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
   red: (s: string) => `\x1b[31m${s}\x1b[0m`,
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
+}
+
+/**
+ * The command that installs the Pi package. It names this CLI's own version:
+ * `nsolid-pi-plugin` without one resolves `latest`, which may be another
+ * release line than the CLI that printed it. Both packages share one version.
+ */
+export function piInstallCommand (version: string = pluginVersion()): string {
+  return `pi install npm:nsolid-pi-plugin@${version}`
 }
 
 /** Native install command shown when the plugin is missing for a harness. */
@@ -18,7 +28,7 @@ function nativeInstallHint (harness: HarnessType): string {
     case 'antigravity':
       return 'agy plugin install https://github.com/NodeSource/nsolid-plugin.git'
     case 'pi':
-      return 'pi install npm:nsolid-pi-plugin'
+      return piInstallCommand()
     default:
       return ''
   }

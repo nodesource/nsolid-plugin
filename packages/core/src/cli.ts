@@ -10,7 +10,7 @@ import type { AuthConfirmation, HarnessType } from './types.js'
 import { HARNESS_VALUES, PLUGIN_OWNED_HARNESSES } from './types.js'
 import { formatPluginError } from './errors.js'
 import { listConfigBackups } from './utils/backup.js'
-import { C, supportsColor } from './utils/format.js'
+import { C, piInstallCommand, supportsColor } from './utils/format.js'
 import { createConsoleProgress, silentProgress } from './utils/progress.js'
 const PACKAGE_OWNED_SKILL_HARNESSES = new Set<HarnessType>(['pi'])
 const HARNESS_SPECIFIC_SKILL_HARNESSES = new Set<HarnessType>(['opencode'])
@@ -377,7 +377,7 @@ async function main (): Promise<void> {
             console.log(fmt('      pi install npm:pi-mcp-adapter'))
             console.log(fmt(`    MCP config written to ${getAdapter('pi').getMcpConfigPath()}`))
             console.log(fmt('    Install/reload the Pi package to load package-owned skills:'))
-            console.log(fmt('      pi install npm:nsolid-pi-plugin'))
+            console.log(fmt(`      ${piInstallCommand()}`))
             console.log(fmt('      (local QA: pi install ./packages/pi-plugin --no-approve, then /reload)'))
           }
           continue
