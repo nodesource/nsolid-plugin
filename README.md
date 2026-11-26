@@ -94,7 +94,7 @@ With the N|Solid server, `ns-cpu-spike-analysis` also writes an HTML report (`.n
 
 ## Per-harness install
 
-Requirements: Node.js `>=22.3.0`, the target harness CLI, and a NodeSource account with access to your N|Solid organization.
+Requirements: Node.js `>=22.13.0`, the target harness CLI, and a NodeSource account with access to your N|Solid organization.
 
 Install the stable CLI once:
 

@@ -24,7 +24,7 @@
     "plugin:root:check": "node scripts/materialize-github-marketplace.mjs --check"
   },
   "engines": {
-    "node": ">=22.3.0"
+    "node": ">=22.13.0"
   },
   "license": "MIT",
   "devDependencies": {

@@ -44,7 +44,7 @@
     "typescript": "^5.7.0"
   },
   "engines": {
-    "node": ">=22.3.0"
+    "node": ">=22.13.0"
   },
   "files": [
     "dist/src/",
