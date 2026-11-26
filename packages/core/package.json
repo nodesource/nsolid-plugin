@@ -1,6 +1,6 @@
 {
   "name": "nsolid-plugin",
-  "version": "1.2.0",
+  "version": "2.0.0-console7.0",
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
@@ -28,7 +28,8 @@
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
-    "access": "public"
+    "access": "public",
+    "tag": "console7"
   },
   "dependencies": {
     "semver": "7.8.5",

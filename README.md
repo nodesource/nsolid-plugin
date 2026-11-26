@@ -246,6 +246,14 @@ The native plugin installs from `main`, and its MCP wrapper prints `npx -y nsoli
 4. Merge, tag the merge commit `v<version>`, and move `latest`: `npm dist-tag add nsolid-plugin@<version> latest` and `npm dist-tag add nsolid-pi-plugin@<version> latest`.
 5. Publish anything that isn't on `main` (an experiment or a preview) under its own dist-tag, such as `npm publish --tag experimental`. Never under `latest`.
 
+### Releasing a Console 7 build
+
+This branch, `nsolid-console-7`, builds the plugin for N|Solid Console 7. Its versions carry a `-console7.N` suffix, such as `2.0.0-console7.0`, and they are published only under the `console7` dist-tag, so `npm install nsolid-plugin` and `npx nsolid-plugin` keep resolving the release from `main`. Steps 1 and 3 above apply as written. The others change:
+
+- **Version.** Count builds of one release in the suffix: `2.0.0-console7.0`, then `2.0.0-console7.1`. Never reuse a version that is on npm. The version-consistency test fails if the version has no `-console7.N` suffix.
+- **Publish, instead of step 2.** Publish before merging, so the repair command this branch prints already works. Once the PR is approved and up to date with `nsolid-console-7`, publish both packages from a clean checkout of its head under the `console7` dist-tag, core first: `pnpm --filter ./packages/core publish --tag console7 --no-git-checks`, then `pnpm --filter ./packages/pi-plugin publish --tag console7 --no-git-checks`. Never use `--tag next` or `--tag latest` for a Console 7 build. Both packages also set `publishConfig.tag` to `console7` as a guard: a publish that leaves out `--tag` still lands on `console7`, not `latest`, although npm's own message says `with tag latest`. The guard gives way to an explicit `--tag`, so always pass `--tag console7`, never another tag.
+- **Merge, instead of step 4.** Merge into `nsolid-console-7` and tag the merge commit `v<version>`. Never move `latest` or `next` to a Console 7 version.
+
 ## Troubleshooting
 
 ### Run the doctor command

@@ -34,8 +34,21 @@ function pinsOtherThan (text: string, expected: string): string[] {
 const version = readJson('bundle.json').version as string
 
 describe('plugin version', () => {
-  it('is a plain release version', () => {
-    assert.match(version, /^\d+\.\d+\.\d+$/)
+  // This branch builds the plugin for N|Solid Console 7. Its versions carry a
+  // `-console7.N` suffix, so they never collide with a release from `main`.
+  it('is a Console 7 version', () => {
+    assert.match(version, /^\d+\.\d+\.\d+-console7\.\d+$/)
+  })
+
+  // Console 7 builds publish under the `console7` dist-tag only. The field makes
+  // a publish that forgets `--tag console7` land there instead of on `latest`.
+  it('publishes every package under the console7 dist-tag', () => {
+    const tags = Object.fromEntries(['packages/core/package.json', 'packages/pi-plugin/package.json']
+      .map((path) => [path, (readJson(path).publishConfig as { tag?: string } | undefined)?.tag]))
+    assert.deepEqual(tags, {
+      'packages/core/package.json': 'console7',
+      'packages/pi-plugin/package.json': 'console7'
+    })
   })
 
   it('is the same in every manifest and package', () => {

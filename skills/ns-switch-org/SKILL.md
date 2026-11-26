@@ -35,7 +35,7 @@ command timeout of **at least 300000ms** (the CLI's own OAuth wait window is
 5 minutes):
 
 ```sh
-npx -y nsolid-plugin@1.2.0 switch-org --harness <harness>
+npx -y nsolid-plugin@2.0.0-console7.0 switch-org --harness <harness>
 ```
 
 No `--yes` or other interactive flags are needed — the CLI detects it is not
