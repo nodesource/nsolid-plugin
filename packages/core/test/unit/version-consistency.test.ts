@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
 
 // Every place that names the plugin's version must name the same one. The MCP
 // wrapper prints `npx -y nsolid-plugin@<version> setup` as its repair command,
@@ -14,10 +14,12 @@ function readJson (path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(repoRoot, path), 'utf8')) as Record<string, unknown>
 }
 
+// Vendored copies come from other packages, so they are not ours to pin.
 function filesUnder (dir: string, name: RegExp): string[] {
   const out: string[] = []
   for (const entry of readdirSync(join(repoRoot, dir), { withFileTypes: true, recursive: true })) {
-    if (entry.isFile() && name.test(entry.name)) out.push(relative(repoRoot, join(entry.parentPath, entry.name)))
+    const path = relative(repoRoot, join(entry.parentPath, entry.name))
+    if (entry.isFile() && name.test(entry.name) && !path.split(sep).includes('vendor')) out.push(path)
   }
   return out
 }
@@ -31,7 +33,39 @@ function pinsOtherThan (text: string, expected: string): string[] {
   return [...text.matchAll(PIN)].map((match) => match[1]).filter((pinned) => pinned !== expected)
 }
 
+// A command that fetches one of the plugin's packages from npm: npx, bunx,
+// `pnpm dlx`, `npm`/`pnpm`/`yarn` install, add or exec, and `pi install npm:`.
+// Group 1 is the package, group 2 what follows its `@`, if anything.
+// `nsolid-plugin setup` alone runs a CLI already installed, and
+// `claude plugin install nsolid-plugin@nodesource` names a marketplace, so
+// neither is a fetch.
+const FETCH = /(?:\b(?:npx|bunx|pnpm\s+dlx|(?:npm|pnpm|yarn)\s+(?:i|install|add|exec|x))(?:\s+-\S+)*\s+|\bpi\s+install(?:\s+-\S+)*\s+npm:)(nsolid-(?:pi-)?plugin)(?![\w-])(?:@([^\s`'"()[\]]+))?/g
+// Prose like `nsolid-plugin@console7.` ends a sentence; the period isn't part of the spec.
+const TRAILING_PUNCTUATION = /[.,;:!?]+$/
+
+// Fetches whose spec `accepts` refuses, as `<package>@<spec>`, or the bare
+// package name when the command names no version or tag. Without one, npm
+// resolves `latest`, which is not this build when it publishes under another tag.
+function fetchesRefused (text: string, accepts: (spec: string) => boolean): string[] {
+  const refused: string[] = []
+  for (const match of text.matchAll(FETCH)) {
+    const spec = match[2]?.replace(TRAILING_PUNCTUATION, '')
+    if (!spec) refused.push(match[1])
+    else if (!accepts(spec)) refused.push(`${match[1]}@${spec}`)
+  }
+  return refused
+}
+
 const version = readJson('bundle.json').version as string
+
+// Skills run the CLI pinned to this exact build.
+const exactVersion = (spec: string) => spec === version
+
+// The README may also name the `console7` tag, or a placeholder such as
+// `<version>`; source code may also build the version into a template
+// (`@${version}`), as the Pi hint does.
+const versionOrTag = (spec: string) =>
+  spec === version || spec === 'console7' || /^<[\w-]+>$/.test(spec) || /^\$\{[^}]+\}$/.test(spec)
 
 describe('plugin version', () => {
   // This branch builds the plugin for N|Solid Console 7. Its versions carry a
@@ -79,12 +113,28 @@ describe('plugin version', () => {
 
   it('is the one every skill pins when it runs the CLI', () => {
     const pinned: string[] = []
-    for (const file of filesUnder('skills', /\.md$/)) {
-      for (const other of pinsOtherThan(readFileSync(join(repoRoot, file), 'utf8'), version)) {
-        pinned.push(`${file}: nsolid-plugin@${other}`)
-      }
+    for (const file of filesUnder('skills', /\.(md|cjs|mjs|js)$/)) {
+      const text = readFileSync(join(repoRoot, file), 'utf8')
+      for (const other of pinsOtherThan(text, version)) pinned.push(`${file}: nsolid-plugin@${other}`)
+      for (const fetch of fetchesRefused(text, exactVersion)) pinned.push(`${file}: ${fetch}`)
     }
     assert.deepEqual(pinned, [])
+  })
+
+  // An install command with no version or tag resolves `latest`, which is the
+  // release from `main`, not this build.
+  it('is named, or the console7 tag is, by every install command in the READMEs and the CLI source', () => {
+    const files = [
+      ...['README.md', 'packages/core/README.md', 'packages/pi-plugin/README.md'].filter((file) => existsSync(join(repoRoot, file))),
+      ...filesUnder(join('packages', 'core', 'src'), /\.[cm]?[jt]s$/)
+    ]
+    const unversioned: string[] = []
+    for (const file of files) {
+      for (const fetch of fetchesRefused(readFileSync(join(repoRoot, file), 'utf8'), versionOrTag)) {
+        unversioned.push(`${file}: ${fetch}`)
+      }
+    }
+    assert.deepEqual(unversioned, [])
   })
 })
 
@@ -113,5 +163,54 @@ describe('skill pin scan', () => {
 
   it('does not read trailing sentence punctuation as part of the version', () => {
     assert.deepEqual(pinsOtherThan('Pin it to nsolid-plugin@2.0.0-beta.0.', '2.0.0-beta.0'), [])
+  })
+})
+
+describe('install command scan', () => {
+  it('reports npx, npm, pnpm and pi commands that name no version', () => {
+    const text = [
+      'npx -y nsolid-plugin setup --harness <harness>',
+      "throw new Error('Run: npx nsolid-plugin install')",
+      'npm i -g nsolid-plugin',
+      'npm install --global nsolid-pi-plugin',
+      'pnpm dlx nsolid-plugin doctor',
+      'pi install npm:nsolid-pi-plugin',
+      'Run `pi install npm:nsolid-pi-plugin`.'
+    ].join('\n')
+    assert.deepEqual(fetchesRefused(text, versionOrTag), [
+      'nsolid-plugin', 'nsolid-plugin', 'nsolid-plugin', 'nsolid-pi-plugin', 'nsolid-plugin', 'nsolid-pi-plugin', 'nsolid-pi-plugin'
+    ])
+  })
+
+  it('reports a tag other than console7, and another version', () => {
+    const text = 'npx -y nsolid-plugin@latest setup\npi install npm:nsolid-pi-plugin@1.2.0'
+    assert.deepEqual(fetchesRefused(text, versionOrTag), ['nsolid-plugin@latest', 'nsolid-pi-plugin@1.2.0'])
+  })
+
+  it('accepts the exact version, the console7 tag, a placeholder and a template', () => {
+    const text = [
+      `npx -y nsolid-plugin@${version} setup`,
+      'npm i -g nsolid-plugin@console7',
+      'pi install npm:nsolid-pi-plugin@console7.',
+      'npx -y nsolid-plugin@<plugin-version> setup',
+      'return `pi install npm:nsolid-pi-plugin@${version}`' // eslint-disable-line no-template-curly-in-string
+    ].join('\n')
+    assert.deepEqual(fetchesRefused(text, versionOrTag), [])
+  })
+
+  it('accepts only the exact version in skills', () => {
+    const text = `npx -y nsolid-plugin@${version} setup\nnpx -y nsolid-plugin@console7 setup`
+    assert.deepEqual(fetchesRefused(text, exactVersion), ['nsolid-plugin@console7'])
+  })
+
+  it('ignores a CLI already installed, a marketplace plugin and other packages', () => {
+    const text = [
+      'nsolid-plugin setup --harness pi',
+      'claude plugin install nsolid-plugin@nodesource',
+      'claude plugin marketplace add NodeSource/nsolid-plugin',
+      'pi install npm:pi-mcp-adapter',
+      'npx -y nsolid-plugin-extras setup'
+    ].join('\n')
+    assert.deepEqual(fetchesRefused(text, versionOrTag), [])
   })
 })
