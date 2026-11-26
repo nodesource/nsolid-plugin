@@ -1,5 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import type { DoctorReport } from '../../../src/types.js'
 
 function makeReport (overrides?: Partial<DoctorReport>): DoctorReport {
@@ -13,6 +14,22 @@ function makeReport (overrides?: Partial<DoctorReport>): DoctorReport {
     ...overrides,
   }
 }
+
+// The packages' own manifests, read from disk rather than through the code under test.
+function packageVersion (pkg: 'core' | 'pi-plugin'): string {
+  const manifest = new URL(`../../../../${pkg}/package.json`, import.meta.url)
+  return (JSON.parse(readFileSync(manifest, 'utf8')) as { version: string }).version
+}
+
+describe('piInstallCommand', () => {
+  // Without a version, `pi install npm:nsolid-pi-plugin` resolves `latest`, which
+  // can be another release line than the CLI that printed the command.
+  it('names the version of the CLI that prints it, which is the Pi package version', async () => {
+    const { piInstallCommand } = await import('../../../src/utils/format.js')
+    assert.equal(packageVersion('pi-plugin'), packageVersion('core'))
+    assert.equal(piInstallCommand(), `pi install npm:nsolid-pi-plugin@${packageVersion('core')}`)
+  })
+})
 
 describe('formatDoctorReport', () => {
   let originalNoColor: string | undefined
@@ -123,7 +140,7 @@ describe('formatDoctorReport', () => {
     const out = formatDoctorReport(report, 'pi', false)
 
     assert.ok(out.includes('Plugin        ✗ not installed'))
-    assert.ok(out.includes('pi install npm:nsolid-pi-plugin'))
+    assert.ok(out.includes(`pi install npm:nsolid-pi-plugin@${packageVersion('core')}`))
   })
 
   it('omits the Plugin line for a non-native harness (opencode)', async () => {

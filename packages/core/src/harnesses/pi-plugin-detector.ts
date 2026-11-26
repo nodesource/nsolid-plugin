@@ -5,7 +5,7 @@ import { readJsonFile } from '../utils/config.js'
 /**
  * Native package detection for the Pi Agent harness.
  *
- * Pi is package-owned: `pi install npm:nsolid-pi-plugin` installs skills via a
+ * Pi is package-owned: `pi install npm:nsolid-pi-plugin@<version>` installs skills via a
  * real npm package rather than the shared CLI tracking file. These helpers
  * discover that package on disk (from `~/.pi/agent/settings.json` `packages`
  * entries or the canonical npm install location) so both `doctor` and the
