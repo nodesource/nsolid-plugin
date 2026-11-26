@@ -40,8 +40,9 @@ describe('plugin version', () => {
     assert.match(version, /^\d+\.\d+\.\d+-console7\.\d+$/)
   })
 
-  // Console 7 builds publish under the `console7` dist-tag only. The field makes
-  // a publish that forgets `--tag console7` land there instead of on `latest`.
+  // Console 7 builds publish under the `console7` dist-tag only, and the release
+  // steps always pass `--tag console7`. The field is a second guard for npm and
+  // pnpm 10 and older; pnpm 11 and later ignore it.
   it('publishes every package under the console7 dist-tag', () => {
     const tags = Object.fromEntries(['packages/core/package.json', 'packages/pi-plugin/package.json']
       .map((path) => [path, (readJson(path).publishConfig as { tag?: string } | undefined)?.tag]))
