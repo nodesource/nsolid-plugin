@@ -322,7 +322,7 @@ Tokens and auth headers are redacted automatically.
 nsolid-plugin uninstall --harness <harness>
 ```
 
-When no NodeSource install remains after the uninstall, the CLI also deletes the stored credentials (`~/.agents/.nodesource-auth.json`). Pass `--keep-credentials` to keep them.
+When the CLI's install tracking shows that no NodeSource install remains after the uninstall, it also deletes the stored credentials (`~/.agents/.nodesource-auth.json`). Pass `--keep-credentials` to keep them. Without a tracking file (after a native plugin install, for example) the CLI can't tell, so it keeps them: run `nsolid-plugin logout` to remove them.
 
 ### Pi MCP not working
 
