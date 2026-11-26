@@ -36,8 +36,7 @@
     {
       "name": "ns-audit-dependencies",
       "path": "skills/ns-audit-dependencies",
-      "description": "Audit project dependencies for known vulnerabilities and quality issues",
-      "requiresMcp": ["ncm"]
+      "description": "Audit project dependencies for known vulnerabilities and quality issues"
     },
     {
       "name": "ns-benchmark-run",
@@ -67,7 +66,7 @@
       "name": "ns-generate-sbom",
       "path": "skills/ns-generate-sbom",
       "description": "Generate Software Bill of Materials for project dependency provenance",
-      "requiresMcp": ["ncm"]
+      "requiresMcp": ["nsolid-console"]
     },
     {
       "name": "ns-memory-spike-analysis",
@@ -84,7 +83,8 @@
     {
       "name": "ns-optimize-function",
       "path": "skills/ns-optimize-function",
-      "description": "Optimize a selected Node.js function: assess impact, benchmark baseline, propose and validate an optimization"
+      "description": "Optimize a selected Node.js function: assess impact, benchmark baseline, propose and validate an optimization",
+      "requiresMcp": ["ns-benchmark"]
     },
     {
       "name": "ns-replace-package",

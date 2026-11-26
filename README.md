@@ -16,7 +16,7 @@ No harness relies on npm `postinstall` hooks. See `openspec/changes/cross-harnes
 
 ## What it includes
 
-- 17 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, saved N|Solid assets, vulnerability analysis, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimization validation, and switching NodeSource organizations.
+- 18 Node.js operations skills for memory leaks/spikes, CPU spikes, event loop delays, traces, capturing, analyzing and downloading saved N|Solid assets, vulnerability analysis, dependency audits, package and Node.js upgrades, benchmarks, SBOM generation, optimizing a selected function, optimization validation, and switching NodeSource organizations.
 - Three MCP servers: `nsolid-console`, `ns-benchmark`, and `ncm`.
 - Explicit OAuth setup against NodeSource accounts. You need a NodeSource account with access to the target N|Solid organization.
 
@@ -322,7 +322,7 @@ Tokens and auth headers are redacted automatically.
 nsolid-plugin uninstall --harness <harness>
 ```
 
-Credentials are preserved.
+When the CLI's install tracking shows that no NodeSource install remains after the uninstall, it also deletes the stored credentials (`~/.agents/.nodesource-auth.json`). Pass `--keep-credentials` to keep them. Without a tracking file (after a native plugin install, for example) the CLI can't tell, so it keeps them: run `nsolid-plugin logout` to remove them.
 
 ### Pi MCP not working
 
